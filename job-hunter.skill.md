@@ -31,7 +31,7 @@ sends notifications via Telegram.
 ## Scraping Strategy
 The scraper uses **breadth-first round-robin** across 4 buckets:
 - LinkedIn/UAE, LinkedIn/Saudi, Foundit/UAE, Foundit/Saudi
-- Collects **3 matching jobs per bucket** (12 total)
+- Collects **2 matching jobs per bucket** (12 total)
 - Fetches page 1 of every keyword before going to page 2
 - Evaluates jobs after each page fetch to stop early
 - Scrapers are generators that yield one page at a time
@@ -50,7 +50,7 @@ Jobs are scored by matching keywords in title + company + full description:
   team lead, java, kotlin, backend
 - **Medium (+1)**: docker, ci/cd, kubernetes, terraform, cloud, .net,
   typescript, devops, infrastructure
-- **Threshold**: score >= 11 to qualify as a match
+- **Threshold**: score >= 13 to qualify as a match
 
 ## Filters (applied before scoring)
 1. **Excluded titles**: test engineer, qa, staff software engineer, sdet,
@@ -73,7 +73,7 @@ For each candidate job, the scraper fetches the full description and extracts:
 ### When triggered by cron (scheduled):
 1. Run the scraper: `.venv/bin/python3 scraper.py`
 2. Scraper iterates all 4 buckets breadth-first
-3. For each new job passing all filters with score >= 11:
+3. For each new job passing all filters with score >= 13:
    - Saves to SQLite database
    - Sends Telegram notification with:
      - Job title (bold), company, country

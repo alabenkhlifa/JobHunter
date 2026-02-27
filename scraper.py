@@ -81,8 +81,8 @@ CONFIG = {
     ],
     "max_experience": 8,
     "max_job_age_days": 7,
-    "score_threshold": 11,
-    "min_matching_jobs": 3,
+    "score_threshold": 13,
+    "min_matching_jobs": 2,
     "rate_limit": {"min": 2, "max": 5},
     "db_path": "./data/jobs.db",
     "log_path": "./data/scraper.log",
@@ -675,10 +675,10 @@ def send_telegram_document(token, chat_id, file_path, caption=None):
 def format_job_message(job):
     score = job["score"]
 
-    # Tier label based on raw score (threshold=11)
+    # Tier label based on raw score (threshold=13)
     if score >= 18:
         tier_label = "\U0001f525 HOT MATCH"
-    elif score >= 14:
+    elif score >= 15:
         tier_label = "\u2b50 STRONG MATCH"
     else:
         tier_label = "\u2705 GOOD MATCH"
