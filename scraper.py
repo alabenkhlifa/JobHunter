@@ -81,7 +81,7 @@ CONFIG = {
     ],
     "max_experience": 8,
     "max_job_age_days": 7,
-    "score_threshold": 9,
+    "score_threshold": 11,
     "min_matching_jobs": 3,
     "rate_limit": {"min": 2, "max": 5},
     "db_path": "./data/jobs.db",
@@ -673,17 +673,12 @@ def send_telegram_document(token, chat_id, file_path, caption=None):
 
 
 def format_job_message(job):
-    # Score as percentage of max possible
-    max_score = sum(
-        tier["weight"] * len(tier["terms"])
-        for tier in CONFIG["scoring"].values()
-    )
-    score_pct = min(round(job["score"] * 100 / max_score), 100)
+    score = job["score"]
 
-    # Tier label
-    if score_pct >= 75:
+    # Tier label based on raw score (threshold=11)
+    if score >= 18:
         tier_label = "\U0001f525 HOT MATCH"
-    elif score_pct >= 50:
+    elif score >= 14:
         tier_label = "\u2b50 STRONG MATCH"
     else:
         tier_label = "\u2705 GOOD MATCH"
@@ -708,7 +703,7 @@ def format_job_message(job):
     bd = job.get("score_breakdown", "")
 
     lines = [
-        f"{tier_label} (Score: {score_pct}/100)",
+        f"{tier_label} (Score: {score})",
         "",
         f"\U0001f4cb <b>{job['title']}</b>",
         f"\U0001f3e2 {job['company']}",

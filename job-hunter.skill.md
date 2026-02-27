@@ -50,7 +50,7 @@ Jobs are scored by matching keywords in title + company + full description:
   team lead, java, kotlin, backend
 - **Medium (+1)**: docker, ci/cd, kubernetes, terraform, cloud, .net,
   typescript, devops, infrastructure
-- **Threshold**: score >= 9 to qualify as a match
+- **Threshold**: score >= 11 to qualify as a match
 
 ## Filters (applied before scoring)
 1. **Excluded titles**: test engineer, qa, staff software engineer, sdet,
@@ -73,7 +73,7 @@ For each candidate job, the scraper fetches the full description and extracts:
 ### When triggered by cron (scheduled):
 1. Run the scraper: `.venv/bin/python3 scraper.py`
 2. Scraper iterates all 4 buckets breadth-first
-3. For each new job passing all filters with score >= 9:
+3. For each new job passing all filters with score >= 11:
    - Saves to SQLite database
    - Sends Telegram notification with:
      - Job title (bold), company, country
