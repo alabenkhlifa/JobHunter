@@ -29,12 +29,10 @@ CONFIG = {
         "platform architect",
         "solutions architect",
     ],
-    "locations": [
-        "UAE",
-        "Saudi Arabia",
-        "Dubai",
-        "Riyadh",
-    ],
+    "regions": {
+        "UAE": ["UAE", "Dubai"],
+        "Saudi": ["Saudi Arabia", "Riyadh"],
+    },
     "scoring": {
         "high": {
             "weight": 3,
@@ -227,7 +225,7 @@ def rate_limited_get(session, url, **kwargs):
 
 
 def scrape_linkedin(session, keyword, location):
-    jobs = []
+    """Generator that yields one page of jobs at a time (list per page)."""
     base_url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 
     for page in range(CONFIG["max_pages"]):
@@ -244,22 +242,23 @@ def scrape_linkedin(session, keyword, location):
             resp = rate_limited_get(session, base_url, params=params)
         except requests.RequestException as e:
             log.warning(f"LinkedIn request failed: {e}")
-            break
+            return
 
         if resp.status_code == 429:
             log.warning("LinkedIn rate limited (429), stopping pagination")
-            break
+            return
         if resp.status_code != 200:
             log.warning(f"LinkedIn returned {resp.status_code}")
-            break
+            return
 
         soup = BeautifulSoup(resp.text, "lxml")
         cards = soup.find_all("div", class_="base-search-card")
 
         if not cards:
             log.info("LinkedIn: no more results")
-            break
+            return
 
+        page_jobs = []
         for card in cards:
             try:
                 title_el = card.find("span", class_="sr-only")
@@ -272,11 +271,10 @@ def scrape_linkedin(session, keyword, location):
                     continue
 
                 url = link_el["href"].split("?")[0]
-                # Extract LinkedIn job ID from URL
                 job_id_match = url.rstrip("/").split("-")[-1]
                 job_id = f"li-{job_id_match}" if job_id_match.isdigit() else f"li-{hashlib.md5(url.encode()).hexdigest()[:12]}"
 
-                jobs.append({
+                page_jobs.append({
                     "id": job_id,
                     "title": title_el.get_text(strip=True),
                     "company": company_el.get_text(strip=True) if company_el else "Unknown",
@@ -289,9 +287,8 @@ def scrape_linkedin(session, keyword, location):
                 log.debug(f"LinkedIn: skipping card: {e}")
                 continue
 
-        log.info(f"LinkedIn: found {len(cards)} cards on page {page + 1}")
-
-    return jobs
+        log.info(f"LinkedIn: found {len(page_jobs)} cards on page {page + 1}")
+        yield page_jobs
 
 
 # ── Foundit Gulf Scraper ─────────────────────────────────────────────────────
@@ -305,7 +302,7 @@ FOUNDIT_LOCATION_MAP = {
 
 
 def scrape_foundit(session, keyword, location):
-    jobs = []
+    """Generator that yields one page of jobs at a time (list per page)."""
     seen_ids = set()
     location_param = FOUNDIT_LOCATION_MAP.get(location, location)
     max_exp = CONFIG["max_experience"]
@@ -331,24 +328,24 @@ def scrape_foundit(session, keyword, location):
             )
         except requests.RequestException as e:
             log.warning(f"Foundit request failed: {e}")
-            break
+            return
 
         if resp.status_code != 200:
             log.warning(f"Foundit returned {resp.status_code}")
-            break
+            return
 
         try:
             data = resp.json()
         except ValueError:
             log.warning("Foundit returned non-JSON response")
-            break
+            return
 
         api_jobs = data.get("jobSearchResponse", {}).get("data", [])
         if not api_jobs:
             log.info("Foundit: no more results")
-            break
+            return
 
-        new_on_page = 0
+        page_jobs = []
         for j in api_jobs:
             try:
                 title = j.get("title") or j.get("cleanedJobTitle")
@@ -359,19 +356,16 @@ def scrape_foundit(session, keyword, location):
                 if job_id in seen_ids:
                     continue
                 seen_ids.add(job_id)
-                new_on_page += 1
 
-                # Build the job detail URL
                 jd_url = j.get("seoJdUrl") or j.get("jdUrl", "")
                 job_url = f"https://www.founditgulf.com{jd_url}" if jd_url else ""
 
-                # Convert epoch ms to ISO date
                 date_posted = ""
                 created = j.get("createdAt")
                 if created and isinstance(created, (int, float)):
                     date_posted = datetime.fromtimestamp(created / 1000, tz=timezone.utc).isoformat()
 
-                jobs.append({
+                page_jobs.append({
                     "id": job_id,
                     "title": title,
                     "company": j.get("companyName", "Unknown"),
@@ -384,12 +378,11 @@ def scrape_foundit(session, keyword, location):
                 log.debug(f"Foundit: skipping job: {e}")
                 continue
 
-        log.info(f"Foundit: found {new_on_page} new jobs on page {page + 1}")
-        if new_on_page == 0:
+        log.info(f"Foundit: found {len(page_jobs)} new jobs on page {page + 1}")
+        if not page_jobs:
             log.info("Foundit: no new results, stopping pagination")
-            break
-
-    return jobs
+            return
+        yield page_jobs
 
 
 # ── Job Details ──────────────────────────────────────────────────────────────
@@ -749,91 +742,117 @@ def main():
     session = create_session()
     new_jobs = []
     target = CONFIG["min_matching_jobs"]
-    matches_per_source = {}
 
+    # Build all (scraper, region) buckets with their keyword×location generators
+    buckets = {}
     for scraper_name, scraper_fn in SCRAPERS:
-        matches_per_source[scraper_name] = 0
-        source_done = False
+        for region_name, locations in CONFIG["regions"].items():
+            bucket = f"{scraper_name}/{region_name}"
+            # Create a page generator for each keyword×location combo
+            generators = []
+            for keyword in CONFIG["keywords"]:
+                for location in locations:
+                    generators.append(scraper_fn(session, keyword, location))
+            buckets[bucket] = {
+                "matches": 0,
+                "generators": generators,  # page generators (each yields list of jobs)
+                "pending_jobs": [],  # jobs fetched but not yet evaluated
+            }
 
-        for keyword in CONFIG["keywords"]:
-            if source_done:
-                break
-            for location in CONFIG["locations"]:
-                if source_done:
-                    break
+    def evaluate_job(job):
+        """Evaluate a single job: fetch details, filter, score. Returns job if it passes, None otherwise."""
+        if is_job_seen(conn, job["id"]):
+            return None
+        if is_excluded(job):
+            log.debug(f"Excluded: {job['title']}")
+            return None
+
+        max_age = CONFIG["max_job_age_days"]
+        date_posted = job.get("date_posted", "")
+        if date_posted:
+            try:
+                posted = datetime.fromisoformat(date_posted.replace("Z", "+00:00"))
+                if posted.tzinfo is None:
+                    posted = posted.replace(tzinfo=timezone.utc)
+                age_days = (datetime.now(timezone.utc) - posted).days
+                if age_days > max_age:
+                    log.debug(f"Skipped (posted {age_days}d ago > {max_age}d max): {job['title']}")
+                    return None
+            except (ValueError, TypeError):
+                pass
+
+        log.info(f"Fetching details: {job['title']}")
+        desc = fetch_job_description(session, job)
+        job["description"] = desc
+
+        if requires_local_presence(desc):
+            log.info(f"Skipped (requires local presence): {job['title']} @ {job['company']}")
+            return None
+
+        req, nice = extract_tech_keywords(desc)
+        job["tech_required"] = ", ".join(req)
+        job["tech_nice_to_have"] = ", ".join(nice)
+        job["min_experience"] = extract_min_experience(desc)
+
+        max_exp = CONFIG["max_experience"]
+        if job["min_experience"] > max_exp:
+            log.info(f"Skipped ({job['min_experience']}+ yrs > {max_exp} max): {job['title']} @ {job['company']}")
+            return None
+
+        job["salary"] = extract_salary(desc)
+        job["work_model"] = detect_work_model(desc)
+        score, breakdown = score_job(job)
+        job["score"] = score
+        job["score_breakdown"] = ", ".join(breakdown)
+        save_job(conn, job)
+        return job
+
+    # Breadth-first: fetch one page per generator, evaluate immediately, rotate
+    while any(b["matches"] < target and b["generators"] for b in buckets.values()):
+        for bucket, state in buckets.items():
+            if state["matches"] >= target:
+                continue
+            if not state["generators"]:
+                continue
+
+            # Fetch one page from each generator, evaluate after each page
+            next_generators = []
+            for gen in state["generators"]:
+                if state["matches"] >= target:
+                    next_generators.append(gen)  # keep for later (won't be used)
+                    continue
                 try:
-                    jobs = scraper_fn(session, keyword, location)
-                    log.info(f"{scraper_name}: got {len(jobs)} results for '{keyword}' in '{location}'")
+                    page_jobs = next(gen)
+                except StopIteration:
+                    continue
+                except Exception as e:
+                    log.exception(f"{bucket} scraper failed: {e}")
+                    continue
 
-                    for job in jobs:
-                        if is_job_seen(conn, job["id"]):
-                            continue
-                        if is_excluded(job):
-                            log.debug(f"Excluded: {job['title']}")
-                            continue
+                next_generators.append(gen)
 
-                        # Filter out old jobs
-                        max_age = CONFIG["max_job_age_days"]
-                        date_posted = job.get("date_posted", "")
-                        if date_posted:
-                            try:
-                                posted = datetime.fromisoformat(date_posted.replace("Z", "+00:00"))
-                                if posted.tzinfo is None:
-                                    posted = posted.replace(tzinfo=timezone.utc)
-                                age_days = (datetime.now(timezone.utc) - posted).days
-                                if age_days > max_age:
-                                    log.debug(f"Skipped (posted {age_days}d ago > {max_age}d max): {job['title']}")
-                                    continue
-                            except (ValueError, TypeError):
-                                pass
+                # Evaluate jobs from this page immediately
+                for job in page_jobs:
+                    if state["matches"] >= target:
+                        break
 
-                        # Fetch full job description
-                        log.info(f"Fetching details: {job['title']}")
-                        desc = fetch_job_description(session, job)
-                        job["description"] = desc
+                    result = evaluate_job(job)
+                    if result and result["score"] >= CONFIG["score_threshold"]:
+                        new_jobs.append(result)
+                        state["matches"] += 1
+                        count = state["matches"]
+                        age = job_age(result.get("date_posted", ""))
+                        age_str = f" | {age}" if age else ""
+                        exp_str = f" | {result['min_experience']}+ yrs" if result["min_experience"] > 0 else ""
+                        sal_str = f" | {result['salary']}" if result["salary"] else ""
+                        wm_str = f" | {result['work_model']}" if result["work_model"] != "on-site" else ""
+                        log.info(f"New match [{bucket} {count}/{target}]: {result['title']} @ {result['company']} (score={result['score']}{age_str}{exp_str}{sal_str}{wm_str})")
+                        log.info(f"        Score: {result['score_breakdown']}")
 
-                        # Filter out jobs requiring local presence
-                        if requires_local_presence(desc):
-                            log.info(f"Skipped (requires local presence): {job['title']} @ {job['company']}")
-                            continue
+                        if count >= target:
+                            log.info(f"Reached {target} matches for {bucket}, moving on")
 
-                        req, nice = extract_tech_keywords(desc)
-                        job["tech_required"] = ", ".join(req)
-                        job["tech_nice_to_have"] = ", ".join(nice)
-                        job["min_experience"] = extract_min_experience(desc)
-
-                        # Filter out jobs requiring too many years
-                        max_exp = CONFIG["max_experience"]
-                        if job["min_experience"] > max_exp:
-                            log.info(f"Skipped ({job['min_experience']}+ yrs > {max_exp} max): {job['title']} @ {job['company']}")
-                            continue
-
-                        job["salary"] = extract_salary(desc)
-                        job["work_model"] = detect_work_model(desc)
-                        score, breakdown = score_job(job)
-                        job["score"] = score
-                        job["score_breakdown"] = ", ".join(breakdown)
-                        save_job(conn, job)
-
-                        if job["score"] >= CONFIG["score_threshold"]:
-                            new_jobs.append(job)
-                            matches_per_source[scraper_name] += 1
-                            count = matches_per_source[scraper_name]
-                            age = job_age(job.get("date_posted", ""))
-                            age_str = f" | {age}" if age else ""
-                            exp_str = f" | {job['min_experience']}+ yrs" if job["min_experience"] > 0 else ""
-                            sal_str = f" | {job['salary']}" if job["salary"] else ""
-                            wm_str = f" | {job['work_model']}" if job["work_model"] != "on-site" else ""
-                            log.info(f"New match [{scraper_name} {count}/{target}]: {job['title']} @ {job['company']} (score={job['score']}{age_str}{exp_str}{sal_str}{wm_str})")
-                            log.info(f"        Score: {job['score_breakdown']}")
-
-                            if count >= target:
-                                log.info(f"Reached target of {target} matching jobs for {scraper_name}, moving to next source")
-                                source_done = True
-                                break
-
-                except Exception:
-                    log.exception(f"{scraper_name} failed for '{keyword}' in '{location}'")
+            state["generators"] = next_generators
 
     if new_jobs:
         log.info(f"Found {len(new_jobs)} new matching job(s)")
