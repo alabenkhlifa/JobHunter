@@ -294,78 +294,100 @@ def scrape_linkedin(session, keyword, location):
     return jobs
 
 
-# ── Bayt Scraper ─────────────────────────────────────────────────────────────
+# ── Foundit Gulf Scraper ─────────────────────────────────────────────────────
 
-BAYT_LOCATION_MAP = {
-    "UAE": "uae",
-    "Dubai": "uae",
-    "Saudi Arabia": "saudi-arabia",
-    "Riyadh": "saudi-arabia",
+FOUNDIT_LOCATION_MAP = {
+    "UAE": "United Arab Emirates",
+    "Dubai": "Dubai, United Arab Emirates",
+    "Saudi Arabia": "Saudi Arabia",
+    "Riyadh": "Riyadh, Saudi Arabia",
 }
 
 
-def scrape_bayt(session, keyword, location):
+def scrape_foundit(session, keyword, location):
     jobs = []
-    location_slug = BAYT_LOCATION_MAP.get(location, location.lower().replace(" ", "-"))
-    keyword_slug = keyword.replace(" ", "-")
+    seen_ids = set()
+    location_param = FOUNDIT_LOCATION_MAP.get(location, location)
+    max_exp = CONFIG["max_experience"]
 
-    for page in range(1, CONFIG["max_pages"] + 1):
-        url = f"https://www.bayt.com/en/{location_slug}/jobs/{keyword_slug}-jobs/?page={page}"
+    for page in range(CONFIG["max_pages"]):
+        start = page * 15
+        url = "https://www.founditgulf.com/middleware/jobsearch"
+        params = {
+            "query": keyword,
+            "locations": location_param,
+            "sort": 1,  # sort by date
+            "limit": 15,
+            "start": start,
+            "experienceRanges": f"0~{max_exp}",
+        }
 
-        log.info(f"Bayt: '{keyword}' in '{location}' page {page}")
+        log.info(f"Foundit: '{keyword}' in '{location}' page {page + 1}")
 
         try:
-            resp = rate_limited_get(session, url)
+            resp = rate_limited_get(
+                session, url, params=params,
+                headers={"Accept": "application/json", "Referer": "https://www.founditgulf.com/"},
+            )
         except requests.RequestException as e:
-            log.warning(f"Bayt request failed: {e}")
+            log.warning(f"Foundit request failed: {e}")
             break
 
-        if resp.status_code == 403:
-            log.warning("Bayt returned 403, stopping")
-            break
         if resp.status_code != 200:
-            log.warning(f"Bayt returned {resp.status_code}")
+            log.warning(f"Foundit returned {resp.status_code}")
             break
 
-        soup = BeautifulSoup(resp.text, "lxml")
-        listings = soup.find_all("li", attrs={"data-js-job": True})
-
-        if not listings:
-            log.info("Bayt: no more results")
+        try:
+            data = resp.json()
+        except ValueError:
+            log.warning("Foundit returned non-JSON response")
             break
 
-        for listing in listings:
+        api_jobs = data.get("jobSearchResponse", {}).get("data", [])
+        if not api_jobs:
+            log.info("Foundit: no more results")
+            break
+
+        new_on_page = 0
+        for j in api_jobs:
             try:
-                title_link = listing.find("h2")
-                if not title_link:
-                    continue
-                a_tag = title_link.find("a")
-                if not a_tag:
+                title = j.get("title") or j.get("cleanedJobTitle")
+                if not title:
                     continue
 
-                title = a_tag.get_text(strip=True)
-                href = a_tag.get("href", "")
-                job_url = f"https://www.bayt.com{href}" if href.startswith("/") else href
+                job_id = f"foundit-{j['id']}"
+                if job_id in seen_ids:
+                    continue
+                seen_ids.add(job_id)
+                new_on_page += 1
 
-                company_el = listing.find("div", class_="is-company")
-                location_el = listing.find("div", class_="is-location")
+                # Build the job detail URL
+                jd_url = j.get("seoJdUrl") or j.get("jdUrl", "")
+                job_url = f"https://www.founditgulf.com{jd_url}" if jd_url else ""
 
-                job_id = f"bayt-{hashlib.md5(job_url.encode()).hexdigest()[:12]}"
+                # Convert epoch ms to ISO date
+                date_posted = ""
+                created = j.get("createdAt")
+                if created and isinstance(created, (int, float)):
+                    date_posted = datetime.fromtimestamp(created / 1000, tz=timezone.utc).isoformat()
 
                 jobs.append({
                     "id": job_id,
                     "title": title,
-                    "company": company_el.get_text(strip=True) if company_el else "Unknown",
-                    "location": location_el.get_text(strip=True) if location_el else location,
+                    "company": j.get("companyName", "Unknown"),
+                    "location": j.get("locations", location),
                     "url": job_url,
-                    "source": "Bayt",
-                    "date_posted": "",
+                    "source": "Foundit",
+                    "date_posted": date_posted,
                 })
             except (KeyError, AttributeError) as e:
-                log.debug(f"Bayt: skipping listing: {e}")
+                log.debug(f"Foundit: skipping job: {e}")
                 continue
 
-        log.info(f"Bayt: found {len(listings)} listings on page {page}")
+        log.info(f"Foundit: found {new_on_page} new jobs on page {page + 1}")
+        if new_on_page == 0:
+            log.info("Foundit: no new results, stopping pagination")
+            break
 
     return jobs
 
@@ -376,7 +398,33 @@ def scrape_bayt(session, keyword, location):
 def fetch_job_description(session, job):
     """Fetch the full job description from the job detail page."""
     try:
+        if job["source"] == "Foundit":
+            # Use Foundit's job detail API
+            job_id = job["id"].replace("foundit-", "")
+            url = f"https://www.founditgulf.com/middleware/jobdetail/{job_id}"
+            resp = rate_limited_get(
+                session, url,
+                headers={"Accept": "application/json", "Referer": "https://www.founditgulf.com/"},
+            )
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    jd = data.get("jobDetailResponse", {})
+                    desc_html = jd.get("description", "")
+                    # Convert HTML description to text
+                    desc = BeautifulSoup(desc_html, "lxml").get_text(separator="\n", strip=True) if desc_html else ""
+                    skills = jd.get("skills", [])
+                    if isinstance(skills, list) and skills:
+                        skill_text = ", ".join(s.get("text", "") for s in skills if isinstance(s, dict))
+                        if skill_text:
+                            desc += f"\nSkills: {skill_text}"
+                    return desc
+                except ValueError:
+                    pass
+            return ""
+
         resp = rate_limited_get(session, job["url"])
+
         if resp.status_code != 200:
             log.debug(f"Could not fetch details for {job['url']}: {resp.status_code}")
             return ""
@@ -385,12 +433,6 @@ def fetch_job_description(session, job):
         # LinkedIn detail page
         if job["source"] == "LinkedIn":
             desc_el = soup.find("div", class_="show-more-less-html__markup")
-            if desc_el:
-                return desc_el.get_text(separator=" ", strip=True)
-
-        # Bayt detail page
-        if job["source"] == "Bayt":
-            desc_el = soup.find("div", class_="is-rich-text")
             if desc_el:
                 return desc_el.get_text(separator=" ", strip=True)
 
@@ -686,7 +728,7 @@ def notify_new_jobs(token, chat_id, jobs):
 
 SCRAPERS = [
     ("LinkedIn", scrape_linkedin),
-    ("Bayt", scrape_bayt),
+    ("Foundit", scrape_foundit),
 ]
 
 
@@ -707,16 +749,17 @@ def main():
     session = create_session()
     new_jobs = []
     target = CONFIG["min_matching_jobs"]
-    done = False
+    matches_per_source = {}
 
-    for keyword in CONFIG["keywords"]:
-        if done:
-            break
-        for location in CONFIG["locations"]:
-            if done:
+    for scraper_name, scraper_fn in SCRAPERS:
+        matches_per_source[scraper_name] = 0
+        source_done = False
+
+        for keyword in CONFIG["keywords"]:
+            if source_done:
                 break
-            for scraper_name, scraper_fn in SCRAPERS:
-                if done:
+            for location in CONFIG["locations"]:
+                if source_done:
                     break
                 try:
                     jobs = scraper_fn(session, keyword, location)
@@ -774,17 +817,19 @@ def main():
 
                         if job["score"] >= CONFIG["score_threshold"]:
                             new_jobs.append(job)
+                            matches_per_source[scraper_name] += 1
+                            count = matches_per_source[scraper_name]
                             age = job_age(job.get("date_posted", ""))
                             age_str = f" | {age}" if age else ""
                             exp_str = f" | {job['min_experience']}+ yrs" if job["min_experience"] > 0 else ""
                             sal_str = f" | {job['salary']}" if job["salary"] else ""
                             wm_str = f" | {job['work_model']}" if job["work_model"] != "on-site" else ""
-                            log.info(f"New match ({len(new_jobs)}/{target}): {job['title']} @ {job['company']} (score={job['score']}{age_str}{exp_str}{sal_str}{wm_str})")
+                            log.info(f"New match [{scraper_name} {count}/{target}]: {job['title']} @ {job['company']} (score={job['score']}{age_str}{exp_str}{sal_str}{wm_str})")
                             log.info(f"        Score: {job['score_breakdown']}")
 
-                            if len(new_jobs) >= target:
-                                log.info(f"Reached target of {target} matching jobs, stopping")
-                                done = True
+                            if count >= target:
+                                log.info(f"Reached target of {target} matching jobs for {scraper_name}, moving to next source")
+                                source_done = True
                                 break
 
                 except Exception:
