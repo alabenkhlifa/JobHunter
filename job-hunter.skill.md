@@ -20,9 +20,11 @@ Foundit Gulf (JSON API), scores matches using a weighted keyword system, and
 sends notifications via Telegram.
 
 ## Architecture
-- **Single file**: `scraper.py` (~850 lines)
+- **Scraper**: `scraper.py` — scraping + CLI utilities (get-job, send-doc, send-msg, mark-interested)
+- **Renderer**: `render_pdf.py` — dumb PDF renderer for resume and cover letter
+- **Profile**: `data/master-profile.json` — master resume data (never fabricated)
 - **Sources**: LinkedIn (guest HTML API), Foundit Gulf (JSON middleware API)
-- **Storage**: SQLite for deduplication and history
+- **Storage**: SQLite for deduplication and history (with `status` column)
 - **Notifications**: Telegram Bot API (HTML parse mode)
 - **Designed for**: Raspberry Pi via cron (lightweight, no headless browser)
 
@@ -82,32 +84,118 @@ For each candidate job, the scraper fetches the full description and extracts:
      - Clickable "View Job" link and source
 4. Messages are batched under 4000 chars, sorted by score descending
 
-### When user replies "interested":
-1. Fetch the full job description from the URL
-2. Read master profile from `data/master-profile.json`
-3. Generate a tailored resume:
-   - Reorder and emphasize skills matching the job description
-   - Adjust professional summary to mirror job requirements
-   - Highlight most relevant projects and experience
-   - Keep all factual content accurate (never fabricate)
-4. Generate a tailored cover letter:
-   - Address company and role specifically
-   - Connect experience to their requirements
-   - Express relocation readiness
-5. Save both as PDF files
-6. Send both PDFs to user via Telegram
+### When user replies "interested" for a job:
+Openclaw (AI) handles the intelligent tailoring; scripts handle rendering and sending.
+
+1. Get job details:
+   ```bash
+   python3 scraper.py --get-job <job_id>
+   ```
+   This prints the full job JSON (title, company, description, tech stacks, etc.)
+
+2. Send progress message:
+   ```bash
+   python3 scraper.py --send-msg "<b>📝 Generating tailored resume and cover letter for:</b>
+   <b><job_title></b> @ <company>
+
+   ⏳ Analyzing job requirements..."
+   ```
+
+3. Read `data/master-profile.json` to get the full master profile
+
+4. **AI tailoring** (this is the intelligent part openclaw does):
+   - Analyze the job description vs the master profile
+   - Decide which skills to lead with (reorder skills categories)
+   - Rewrite the summary paragraph for this specific role
+   - Decide which experience bullets are most relevant
+   - Write a tailored cover letter with specific paragraphs
+
+5. Write tailored resume JSON to a temp file (same structure as master-profile.json, but with reordered/adjusted content)
+
+6. Render resume PDF:
+   ```bash
+   python3 render_pdf.py resume <tailored_resume.json> data/Resume_<Candidate>_<Company>.pdf
+   ```
+
+7. Write cover letter JSON to a temp file with this structure:
+   ```json
+   {
+     "name": "<Candidate Name>",
+     "contact": "<candidate.email@example.com> | <candidate phone>",
+     "date": "<today's date>",
+     "recipient": "Hiring Manager, <Company>",
+     "subject": "Application for <Job Title>",
+     "paragraphs": ["Dear Hiring Manager,\n\n...", "...", "Sincerely,\n<Candidate Name>"]
+   }
+   ```
+
+8. Render cover letter PDF:
+   ```bash
+   python3 render_pdf.py cover <cover_letter.json> data/CoverLetter_<Candidate>_<Company>.pdf
+   ```
+
+9. Send both PDFs:
+   ```bash
+   python3 scraper.py --send-doc data/Resume_<Candidate>_<Company>.pdf
+   python3 scraper.py --send-doc data/CoverLetter_<Candidate>_<Company>.pdf
+   ```
+
+10. Send completion message:
+    ```bash
+    python3 scraper.py --send-msg "✅ Done! Here are your tailored documents:
+    📄 Resume_<Candidate>_<Company>.pdf
+    📄 CoverLetter_<Candidate>_<Company>.pdf
+
+    Key adjustments made:
+    - <list what was emphasized/reordered>
+    - <which skills matched>
+    - <what was highlighted in cover letter>
+
+    Good luck! 🚀"
+    ```
+
+11. Mark job as interested:
+    ```bash
+    python3 scraper.py --mark-interested <job_id>
+    ```
 
 ### When user asks "job stats" or "search status":
 - Query SQLite database at `data/jobs.db`
 - Report: total jobs found, new today, applied count,
   top matches pending review
 
+## CLI Reference
+```bash
+# Normal scraping (cron mode)
+python3 scraper.py
+
+# Get job as JSON
+python3 scraper.py --get-job <job_id>
+
+# Send message via Telegram
+python3 scraper.py --send-msg "<html message>"
+
+# Send document via Telegram
+python3 scraper.py --send-doc <file_path> [caption]
+
+# Mark job as interested
+python3 scraper.py --mark-interested <job_id>
+
+# Render resume PDF
+python3 render_pdf.py resume <input.json> <output.pdf>
+
+# Render cover letter PDF
+python3 render_pdf.py cover <input.json> <output.pdf>
+```
+
 ## File Locations
 - Scraper: `scraper.py`
+- PDF renderer: `render_pdf.py`
+- Master profile: `data/master-profile.json`
 - Database: `data/jobs.db`
 - Logs: `data/scraper.log`
 - Config: `.env` (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-- Dependencies: `requirements.txt` (requests, beautifulsoup4, python-dotenv, lxml)
+- Dependencies: `requirements.txt` (requests, beautifulsoup4, python-dotenv, lxml, fpdf2)
 
 ## Cron Setup (Raspberry Pi)
 ```bash

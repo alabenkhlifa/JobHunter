@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Job scraper for UAE/Saudi Arabia markets with Telegram notifications."""
 
+import argparse
 import hashlib
+import json
 import logging
 import os
 import random
@@ -145,9 +147,16 @@ def init_db():
             min_experience INTEGER DEFAULT -1,
             salary TEXT DEFAULT '',
             work_model TEXT DEFAULT 'on-site',
-            score_breakdown TEXT DEFAULT ''
+            score_breakdown TEXT DEFAULT '',
+            status TEXT DEFAULT 'new'
         )
     """)
+    # Migration for existing databases
+    try:
+        conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     conn.commit()
     return conn
 
@@ -190,6 +199,19 @@ def mark_notified(conn, job_ids):
         "UPDATE jobs SET notified = 1 WHERE id = ?", [(jid,) for jid in job_ids]
     )
     conn.commit()
+
+
+def mark_interested(conn, job_id):
+    conn.execute("UPDATE jobs SET status = 'interested' WHERE id = ?", (job_id,))
+    conn.commit()
+
+
+def get_job_by_id(conn, job_id):
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None:
+        return None
+    return dict(row)
 
 
 # ── HTTP Session ─────────────────────────────────────────────────────────────
@@ -611,7 +633,7 @@ def score_job(job):
 # ── Telegram ─────────────────────────────────────────────────────────────────
 
 
-def send_telegram(token, chat_id, text):
+def send_telegram(token, chat_id, text, reply_markup=None):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -619,6 +641,8 @@ def send_telegram(token, chat_id, text):
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         resp = requests.post(url, json=payload, timeout=15)
         if resp.status_code != 200:
@@ -630,62 +654,101 @@ def send_telegram(token, chat_id, text):
         return False
 
 
+def send_telegram_document(token, chat_id, file_path, caption=None):
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    data = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption
+        data["parse_mode"] = "HTML"
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.post(url, data=data, files={"document": f}, timeout=30)
+        if resp.status_code != 200:
+            log.warning(f"Telegram sendDocument returned {resp.status_code}: {resp.text}")
+            return False
+        return True
+    except (requests.RequestException, OSError) as e:
+        log.warning(f"Telegram sendDocument failed: {e}")
+        return False
+
+
 def format_job_message(job):
-    stars = "\u2b50" * min(job["score"] // 3, 5) if job["score"] >= 3 else ""
-    score_line = f"Score: {job['score']} {stars}" if stars else f"Score: {job['score']}"
+    # Score as percentage of max possible
+    max_score = sum(
+        tier["weight"] * len(tier["terms"])
+        for tier in CONFIG["scoring"].values()
+    )
+    score_pct = min(round(job["score"] * 100 / max_score), 100)
 
-    # Location with country extracted
-    loc_parts = [p.strip() for p in job["location"].split(",")]
-    country = loc_parts[-1] if loc_parts else job["location"]
+    # Tier label
+    if score_pct >= 75:
+        tier_label = "\U0001f525 HOT MATCH"
+    elif score_pct >= 50:
+        tier_label = "\u2b50 STRONG MATCH"
+    else:
+        tier_label = "\u2705 GOOD MATCH"
 
-    # Work model badge
+    # Work model
     wm = job.get("work_model", "on-site")
-    wm_badge = {"remote": "\U0001f30d Remote", "hybrid": "\U0001f3e0 Hybrid"}.get(wm, "\U0001f3e2 On-site")
 
     # Experience
     exp = job.get("min_experience", -1)
-    exp_line = f"\U0001f4c5 {exp}+ years required" if exp > 0 else ""
 
     # Salary
     sal = job.get("salary", "")
-    sal_line = f"\U0001f4b0 {sal}" if sal else ""
+
+    # Job age
+    age = job_age(job.get("date_posted", ""))
 
     # Tech stacks
     req = job.get("tech_required", "")
     nice = job.get("tech_nice_to_have", "")
-    tech_lines = ""
-    if req:
-        tech_lines += f"\n  \u2705 <b>Required:</b> {req}"
-    if nice:
-        tech_lines += f"\n  \U0001f7e1 <b>Nice to have:</b> {nice}"
-
-    # Job age
-    age = job_age(job.get("date_posted", ""))
-    age_line = f"\U0001f552 Posted {age}" if age else ""
 
     # Score breakdown
     bd = job.get("score_breakdown", "")
-    bd_line = f"\U0001f4ca {bd}" if bd else ""
 
-    # Build message
     lines = [
-        f"\u2022 <b>{job['title']}</b>",
-        f"  {job['company']} \u2014 {country}",
-        f"  {wm_badge} | {score_line}",
+        f"{tier_label} (Score: {score_pct}/100)",
+        "",
+        f"\U0001f4cb <b>{job['title']}</b>",
+        f"\U0001f3e2 {job['company']}",
+        f"\U0001f4cd {job['location']}",
+        f"\U0001f4e1 Source: {job['source']}",
     ]
-    if age_line:
-        lines.append(f"  {age_line}")
-    if exp_line:
-        lines.append(f"  {exp_line}")
-    if sal_line:
-        lines.append(f"  {sal_line}")
-    if bd_line:
-        lines.append(f"  {bd_line}")
-    if tech_lines:
-        lines.append(f"  {tech_lines.strip()}")
-    lines.append(f"  <a href=\"{job['url']}\">View Job</a> ({job['source']})")
+
+    if wm != "on-site":
+        lines.append(f"\U0001f4bc {wm.capitalize()}")
+    if age:
+        lines.append(f"\U0001f552 Posted {age}")
+    if exp > 0:
+        lines.append(f"\U0001f4c5 {exp}+ years experience")
+    if sal:
+        lines.append(f"\U0001f4b0 {sal}")
+    if bd:
+        lines.append(f"\U0001f4ca {bd}")
+
+    if req or nice:
+        lines.append("")
+        if req:
+            lines.append(f"\u2705 <b>Required:</b> {req}")
+        if nice:
+            lines.append(f"\U0001f7e1 <b>Nice to have:</b> {nice}")
+
+    lines.extend(["", f"\U0001f517 {job['url']}"])
 
     return "\n".join(lines)
+
+
+def job_inline_keyboard(job):
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "\u2705 Interested", "callback_data": f"interested:{job['id']}"},
+                {"text": "\u274c Skip", "callback_data": f"skip:{job['id']}"},
+                {"text": "\U0001f4c4 Details", "url": job["url"]},
+            ]
+        ]
+    }
 
 
 def notify_new_jobs(token, chat_id, jobs):
@@ -694,27 +757,17 @@ def notify_new_jobs(token, chat_id, jobs):
 
     sorted_jobs = sorted(jobs, key=lambda j: j["score"], reverse=True)
 
-    header = f"<b>\U0001f4bc {len(sorted_jobs)} new matching job(s) found!</b>\n\n"
-    messages = []
-    current = header
+    send_telegram(token, chat_id, f"<b>\U0001f4bc {len(sorted_jobs)} new matching job(s) found!</b>")
+    time.sleep(1)
 
     for job in sorted_jobs:
-        entry = format_job_message(job) + "\n\n"
-        if len(current) + len(entry) > 4000:
-            messages.append(current.rstrip())
-            current = entry
+        msg = format_job_message(job)
+        keyboard = job_inline_keyboard(job)
+        if send_telegram(token, chat_id, msg, reply_markup=keyboard):
+            log.info(f"Sent: {job['title']} @ {job['company']}")
         else:
-            current += entry
-
-    if current.strip():
-        messages.append(current.rstrip())
-
-    for msg in messages:
-        if send_telegram(token, chat_id, msg):
-            log.info("Telegram message sent")
-        else:
-            log.warning("Failed to send Telegram message")
-        time.sleep(1)  # respect rate limit
+            log.warning(f"Failed to send: {job['title']}")
+        time.sleep(1)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -725,12 +778,58 @@ SCRAPERS = [
 ]
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Job scraper and utilities")
+    parser.add_argument("--get-job", metavar="ID", help="Print job JSON to stdout")
+    parser.add_argument("--send-doc", metavar="PATH", help="Send document via Telegram")
+    parser.add_argument("--send-msg", metavar="TEXT", help="Send message via Telegram")
+    parser.add_argument("--mark-interested", metavar="ID", help="Mark job as interested in DB")
+    parser.add_argument("caption", nargs="?", default=None, help="Optional caption for --send-doc")
+    return parser.parse_args()
+
+
 def main():
     load_dotenv()
-    setup_logging()
+    args = parse_args()
+
+    # ── CLI utility commands (no logging setup needed) ────────────────────────
+    if args.get_job:
+        conn = init_db()
+        job = get_job_by_id(conn, args.get_job)
+        conn.close()
+        if job is None:
+            print(json.dumps({"error": f"Job not found: {args.get_job}"}), file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(job, indent=2))
+        return
+
+    if args.mark_interested:
+        conn = init_db()
+        mark_interested(conn, args.mark_interested)
+        conn.close()
+        print(json.dumps({"ok": True, "job_id": args.mark_interested}))
+        return
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+    if args.send_doc:
+        if not token or not chat_id:
+            print("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set", file=sys.stderr)
+            sys.exit(1)
+        ok = send_telegram_document(token, chat_id, args.send_doc, args.caption)
+        sys.exit(0 if ok else 1)
+
+    if args.send_msg:
+        if not token or not chat_id:
+            print("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set", file=sys.stderr)
+            sys.exit(1)
+        ok = send_telegram(token, chat_id, args.send_msg)
+        sys.exit(0 if ok else 1)
+
+    # ── Normal scraping mode ──────────────────────────────────────────────────
+    setup_logging()
+
     telegram_enabled = bool(token and chat_id)
 
     if not telegram_enabled:
