@@ -47,14 +47,41 @@ CONFIG = {
             "weight": 1,
             "terms": [
                 "docker", "ci/cd", "cicd", "kubernetes", "terraform",
-                "cloud", ".net", "typescript", "devops", "infrastructure",
+                "cloud", ".net", "typescript",
             ],
         },
+    },
+    "penalty_terms": {
+        "weight": -3,
+        "terms": [
+            "junior", "intern", "entry level", "entry-level",
+            "graduate", "fresh graduate", "trainee",
+        ],
     },
     "exclude_terms": [
         "test engineer", "qa engineer", "quality assurance",
         "staff software engineer", "manual test", "sdet",
         "machine learning", "ml engineer", "ml architect",
+        # Infra / Network / SRE / Ops
+        "infrastructure engineer", "infrastructure manager",
+        "network engineer", "network architect", "network admin",
+        "site reliability", "sre engineer",
+        "sysadmin", "system administrator", "systems administrator",
+        "systems engineer", "platform engineer",
+        "devops engineer", "devops lead",
+        # Specialized engineering
+        "data engineer", "data architect", "data platform",
+        "security engineer", "security architect", "cybersecurity",
+        "information security", "infosec",
+        "embedded engineer", "embedded software", "firmware",
+        "hardware engineer", "hardware architect",
+        # Frontend / UI roles
+        "frontend engineer", "frontend developer", "front-end engineer", "front-end developer",
+        "javascript developer", "typescript developer",
+        "react developer", "react engineer", "react native",
+        "angular developer", "angular engineer",
+        "vue developer", "vue engineer",
+        "ui developer", "ui engineer", "ux engineer",
     ],
     "tech_terms": [
         "python", "java", "kotlin", "javascript", "typescript", "go", "golang",
@@ -81,8 +108,8 @@ CONFIG = {
     ],
     "max_experience": 8,
     "max_job_age_days": 7,
-    "score_threshold": 13,
-    "min_matching_jobs": 2,
+    "score_threshold": 15,
+    "min_matching_jobs": 1,
     "rate_limit": {"min": 2, "max": 5},
     "db_path": "./data/jobs.db",
     "log_path": "./data/scraper.log",
@@ -616,16 +643,29 @@ def is_excluded(job):
 
 
 def score_job(job):
-    """Score a job and return (score, breakdown) where breakdown lists matched terms."""
-    text = f"{job['title']} {job['company']} {job.get('description', '')}".lower()
+    """Score a job based on required skills and title, with a flat +1 for nice-to-have matches."""
+    required_text = f"{job['title']} {job.get('tech_required', '')}".lower()
+    nice_text = job.get("tech_nice_to_have", "").lower()
+    title = job["title"].lower()
     score = 0
     breakdown = []
 
     for tier_name, tier in CONFIG["scoring"].items():
         for term in tier["terms"]:
-            if term.lower() in text:
+            t = term.lower()
+            if t in required_text:
                 score += tier["weight"]
                 breakdown.append(f"{term}(+{tier['weight']})")
+            elif t in nice_text:
+                score += 1
+                breakdown.append(f"{term}(+1 nice)")
+
+    # Apply penalty terms against title
+    penalty = CONFIG["penalty_terms"]
+    for term in penalty["terms"]:
+        if term.lower() in title:
+            score += penalty["weight"]
+            breakdown.append(f"{term}({penalty['weight']})")
 
     return score, breakdown
 
