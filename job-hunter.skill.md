@@ -104,13 +104,32 @@ Openclaw (AI) handles the intelligent tailoring; scripts handle rendering and se
 3. Read `data/master-profile.json` to get the full master profile
 
 4. **AI tailoring** (this is the intelligent part openclaw does):
-   - Analyze the job description vs the master profile
-   - Decide which skills to lead with (reorder skills categories)
-   - Rewrite the summary paragraph for this specific role
-   - Decide which experience bullets are most relevant
-   - Write a tailored cover letter with specific paragraphs
 
-5. Write tailored resume JSON to a temp file (same structure as master-profile.json, but with reordered/adjusted content)
+   **CRITICAL: The master-profile.json contains REAL data. Every company name, job title, date range, education entry, and certification is factual and must be preserved EXACTLY. You are tailoring, NOT rewriting.**
+
+   What you MUST keep unchanged (copy verbatim from master profile):
+   - All `company` names exactly as written
+   - All `title` values exactly as written
+   - All `dates` and `location` values exactly as written
+   - All `education` entries exactly as written
+   - All `certifications` exactly as written
+   - The `name`, `email`, `phone`, `linkedin` fields exactly as written
+   - The number of experience entries (keep ALL of them, never drop any)
+
+   What you CAN adjust (minor refinements only):
+   - **Skills ordering**: reorder the skill categories so the most relevant one for this job appears first
+   - **Summary paragraph**: rewrite to emphasize aspects relevant to this job, but keep it grounded in the real experience from the master profile
+   - **Experience bullets**: reword existing bullets to emphasize relevant keywords, but the core facts (what was built, what tech was used, what results were achieved) must stay truthful
+   - **Experience order**: optionally reorder experience entries to lead with the most relevant one
+
+   What you MUST NOT do:
+   - Do NOT invent new companies, roles, or experiences
+   - Do NOT change dates, titles, company names, or locations
+   - Do NOT add skills or certifications not in the master profile
+   - Do NOT remove any experience entries or education
+   - Do NOT change the person's name, contact info, or education history
+
+5. Write tailored resume JSON to a temp file (same structure as master-profile.json, but with reordered/adjusted content). **Start by copying the master profile JSON, then make only the adjustments above.**
 
 6. Render resume PDF:
    ```bash
@@ -209,9 +228,12 @@ cp .env.example .env  # Edit with real values
 0 8 * * * cd /home/pi/JobScrapper && .venv/bin/python3 scraper.py >> data/cron.log 2>&1
 ```
 
-## Resume Tailoring Rules
-- NEVER fabricate experience, certifications, or skills
-- ONLY reorder, emphasize, and adjust wording based on job requirements
-- Always keep: all certifications, all experience entries, education
-- Adjust: summary paragraph, skills ordering, bullet point emphasis
-- Add: relevant keywords from the job description where truthful
+## Resume Tailoring Rules (MANDATORY)
+These rules are NON-NEGOTIABLE. Violating them produces a fraudulent resume.
+- **NEVER fabricate** companies, job titles, dates, education, certifications, or skills
+- **NEVER change** company names, job titles, date ranges, locations, or education entries — copy them verbatim from master-profile.json
+- **NEVER drop** experience entries — all entries from the master profile must appear in the tailored version
+- **ONLY adjust**: summary paragraph wording, skills category ordering, experience bullet emphasis/rewording, experience entry ordering
+- **Bullet rewording** means highlighting relevant keywords that are already truthful — NOT inventing new accomplishments
+- The tailored JSON must have the exact same structure as master-profile.json
+- When in doubt, keep the original text unchanged
