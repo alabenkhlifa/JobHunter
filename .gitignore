@@ -2,8 +2,12 @@
 .env
 
 # Data
-data/
+data/*
 !data/master-profile.json
+!data/friend/
+data/friend/*.db
+data/friend/*.log
+data/friend/output/
 
 # Python
 __pycache__/
