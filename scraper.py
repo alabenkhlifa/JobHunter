@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Job scraper for UAE/Saudi Arabia markets with Telegram notifications."""
+"""Job scraper for Dubai market with Telegram notifications."""
 
 import argparse
 import hashlib
@@ -28,19 +28,21 @@ CONFIG = {
         "cloud architect",
         "tech lead",
         "lead software engineer",
+        "senior software engineer",
+        "senior backend engineer",
         "platform architect",
         "solutions architect",
     ],
     "regions": {
-        "UAE": ["UAE", "Dubai"],
-        "Saudi": ["Saudi Arabia", "Riyadh"],
+        "Dubai": ["Dubai"],
     },
+    "allowed_locations": ["dubai"],
     "scoring": {
         "high": {
             "weight": 3,
             "terms": [
                 "architect", "aws", "azure",
-                "spring boot", "microservices", "tech lead", "team lead", "java", "kotlin", "backend",
+                "spring boot", "microservices", "tech lead", "team lead", "senior engineer", "senior software engineer", "senior backend engineer", "java", "kotlin", "backend",
             ],
         },
         "medium": {
@@ -401,6 +403,30 @@ def rate_limited_get(session, url, **kwargs):
     return session.get(url, timeout=30, **kwargs)
 
 
+def normalize_location(location):
+    """Return a display string for source-specific location values."""
+    if isinstance(location, list):
+        parts = []
+        for item in location:
+            if isinstance(item, dict):
+                parts.append(item.get("text") or item.get("name") or item.get("city") or "")
+            else:
+                parts.append(str(item))
+        return ", ".join(p for p in parts if p)
+    if isinstance(location, dict):
+        return location.get("text") or location.get("name") or location.get("city") or str(location)
+    return str(location or "")
+
+
+def is_allowed_location(job):
+    """Allow only jobs whose displayed location matches configured cities."""
+    allowed = [loc.lower() for loc in CONFIG.get("allowed_locations", [])]
+    if not allowed:
+        return True
+    location = normalize_location(job.get("location", "")).lower()
+    return any(loc in location for loc in allowed)
+
+
 # ── LinkedIn Scraper ─────────────────────────────────────────────────────────
 
 
@@ -458,7 +484,7 @@ def scrape_linkedin(session, keyword, location):
                     "id": job_id,
                     "title": title_el.get_text(strip=True),
                     "company": company_el.get_text(strip=True) if company_el else "Unknown",
-                    "location": location_el.get_text(strip=True) if location_el else location,
+                    "location": normalize_location(location_el.get_text(strip=True) if location_el else location),
                     "url": url,
                     "source": "LinkedIn",
                     "date_posted": date_el["datetime"] if date_el and date_el.has_attr("datetime") else "",
@@ -549,7 +575,7 @@ def scrape_foundit(session, keyword, location):
                     "id": job_id,
                     "title": title,
                     "company": j.get("companyName", "Unknown"),
-                    "location": j.get("locations", location),
+                    "location": normalize_location(j.get("locations", location)),
                     "url": job_url,
                     "source": "Foundit",
                     "date_posted": date_posted,
@@ -947,6 +973,7 @@ SCRAPERS = [
 def parse_args():
     parser = argparse.ArgumentParser(description="Job scraper and utilities")
     parser.add_argument("--profile", metavar="NAME", help="Load profile from data/<NAME>/config.json")
+    parser.add_argument("--collect-only", action="store_true", help="Scrape and store matches without sending notifications")
     parser.add_argument("--get-job", metavar="ID", help="Print job JSON to stdout")
     parser.add_argument("--send-doc", metavar="PATH", help="Send document via Telegram/ntfy")
     parser.add_argument("--send-msg", metavar="TEXT", help="Send message via Telegram/ntfy")
@@ -1057,6 +1084,9 @@ def main():
         if is_excluded(job):
             log.debug(f"Excluded: {job['title']}")
             return None
+        if not is_allowed_location(job):
+            log.info(f"Skipped (outside allowed location): {job['title']} @ {job['company']} — {job.get('location', '')}")
+            return None
 
         max_age = CONFIG["max_job_age_days"]
         date_posted = job.get("date_posted", "")
@@ -1145,7 +1175,9 @@ def main():
 
             state["generators"] = next_generators
 
-    if new_jobs:
+    if args.collect_only:
+        log.info(f"Collect-only mode: stored {len(new_jobs)} threshold-matching job(s); notifications skipped")
+    elif new_jobs:
         log.info(f"Found {len(new_jobs)} new matching job(s)")
         if notifications_enabled:
             if notif_type == "ntfy":

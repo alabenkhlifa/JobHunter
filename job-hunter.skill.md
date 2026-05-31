@@ -1,8 +1,8 @@
 ---
 name: job-hunter
-description: Automated job search agent for Gulf market (UAE/KSA).
+description: Automated job search agent for Dubai market.
   Scrapes LinkedIn and Foundit Gulf, scores matches against a
-  Software Architect / Tech Lead profile, and notifies via Telegram.
+  Software Architect / Tech Lead / Senior Engineer backend profile, and notifies via Telegram.
 triggers:
   - job search
   - find jobs
@@ -15,9 +15,9 @@ triggers:
 
 ## Overview
 This skill automates job searching for Software Architect / Cloud Architect /
-Tech Lead roles in UAE and Saudi Arabia. It scrapes LinkedIn (guest API) and
-Foundit Gulf (JSON API), scores matches using a weighted keyword system, and
-sends notifications via Telegram.
+Tech Lead / Senior Engineer backend roles in Dubai. It scrapes LinkedIn (guest API) and
+Foundit Gulf (JSON API), stores keyword-qualified candidates, then a Hermes
+cron job reviews them with an LLM before suggesting offers.
 
 ## Architecture
 - **Scraper**: `scraper.py` — scraping + CLI utilities (get-job, send-doc, send-msg, mark-interested)
@@ -29,20 +29,20 @@ sends notifications via Telegram.
 - **Designed for**: Raspberry Pi via cron (lightweight, no headless browser)
 
 ## Scraping Strategy
-The scraper uses **breadth-first round-robin** across 4 buckets:
-- LinkedIn/UAE, LinkedIn/Saudi, Foundit/UAE, Foundit/Saudi
-- Collects **2 matching jobs per bucket** (12 total)
+The scraper uses **breadth-first round-robin** across 2 buckets:
+- LinkedIn/Dubai, Foundit/Dubai
+- Collects **1 matching job per bucket** (2 total)
 - Fetches page 1 of every keyword before going to page 2
 - Evaluates jobs after each page fetch to stop early
 - Scrapers are generators that yield one page at a time
 
 ### Search Keywords
 - software architect, cloud architect, tech lead
-- lead software engineer, platform architect, solutions architect
+- lead software engineer, senior software engineer, senior backend engineer
+- platform architect, solutions architect
 
 ### Regions
-- **UAE**: searches "UAE" and "Dubai"
-- **Saudi**: searches "Saudi Arabia" and "Riyadh"
+- **Dubai only**: searches "Dubai" and filters out returned jobs whose displayed location does not include Dubai
 
 ## Scoring System
 Jobs are scored by matching keywords in title + company + full description:
@@ -56,9 +56,10 @@ Jobs are scored by matching keywords in title + company + full description:
 1. **Excluded titles**: test engineer, qa, staff software engineer, sdet,
    machine learning, ml engineer, ml architect
 2. **Job age**: posted within last 7 days only
-3. **Local presence**: skips jobs requiring existing UAE/Saudi residency or
+3. **Location**: only keeps jobs whose displayed location includes Dubai
+4. **Local presence**: skips jobs requiring existing UAE/Saudi residency or
    that won't sponsor visas
-4. **Experience**: skips jobs requiring more than 8 years
+5. **Experience**: skips jobs requiring more than 8 years
 
 ## Job Enrichment
 For each candidate job, the scraper fetches the full description and extracts:
@@ -70,19 +71,18 @@ For each candidate job, the scraper fetches the full description and extracts:
 
 ## Workflow
 
-### When triggered by cron (scheduled):
-1. Run the scraper: `.venv/bin/python3 scraper.py`
-2. Scraper iterates all 4 buckets breadth-first
-3. For each new job passing all filters with score >= 13:
+### When triggered by Hermes cron (scheduled):
+1. Run the collector script: `~/.hermes/scripts/jobhunter_collect_candidates.py`
+2. The collector runs: `.venv/bin/python3 scraper.py --collect-only`
+2. Scraper iterates Dubai buckets only
+3. For each new job passing hard filters and keyword score threshold:
    - Saves to SQLite database
-   - Sends Telegram notification with:
-     - Job title (bold), company, country
-     - Work model badge, score with stars
-     - Posted age, experience requirement, salary
-     - Score breakdown (matched terms)
-     - Tech stacks (required vs nice-to-have)
-     - Clickable "View Job" link and source
-4. Messages are batched under 4000 chars, sorted by score descending
+   - Does **not** notify directly
+4. Hermes cron reviews unnotified candidates with an LLM against Ala's profile
+   and rejects low-seniority/student/intern/junior roles, non-Dubai roles,
+   local-only/no-relocation roles, and unrelated frontend/QA/data/ML/DevOps-only roles.
+5. Hermes sends only human-approved recommendations back to Telegram and marks
+   reviewed candidate IDs as `notified=1` to avoid repeats.
 
 ### When user replies "interested" for a job:
 Openclaw (AI) handles the intelligent tailoring; scripts handle rendering and sending.
@@ -185,8 +185,11 @@ Openclaw (AI) handles the intelligent tailoring; scripts handle rendering and se
 
 ## CLI Reference
 ```bash
-# Normal scraping (cron mode)
+# Normal scraping with direct notification (legacy/manual)
 python3 scraper.py
+
+# Collect candidates without notification (Hermes cron mode)
+python3 scraper.py --collect-only
 
 # Get job as JSON
 python3 scraper.py --get-job <job_id>
