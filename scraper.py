@@ -313,6 +313,7 @@ def init_db():
             status TEXT DEFAULT 'new'
         )
     """)
+    init_application_tracking(conn)
     # Migration for existing databases
     try:
         conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'")
@@ -326,6 +327,99 @@ def init_db():
 def is_job_seen(conn, job_id):
     row = conn.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone()
     return row is not None
+
+
+def init_application_tracking(conn):
+    """Create the application-state table used after a job becomes interesting."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            package_path TEXT,
+            created_at TEXT NOT NULL,
+            approved_at TEXT,
+            submitted_at TEXT,
+            platform TEXT,
+            application_url TEXT,
+            notes TEXT,
+            error TEXT
+        )
+        """
+    )
+    conn.commit()
+
+
+def record_application_stage(
+    conn,
+    job_id,
+    stage,
+    *,
+    package_path=None,
+    platform=None,
+    application_url=None,
+    notes=None,
+    error=None,
+    now=None,
+):
+    """Insert or update the latest application-state row for a job."""
+    init_application_tracking(conn)
+    timestamp = (now or datetime.now(timezone.utc)).isoformat()
+    approved_at = timestamp if stage == "approved" else None
+    submitted_at = timestamp if stage == "submitted" else None
+    existing = conn.execute(
+        "SELECT id FROM applications WHERE job_id = ? ORDER BY id DESC LIMIT 1",
+        (job_id,),
+    ).fetchone()
+    if existing:
+        application_id = existing[0]
+        conn.execute(
+            """
+            UPDATE applications
+            SET stage = ?, package_path = COALESCE(?, package_path), created_at = ?,
+                approved_at = COALESCE(?, approved_at), submitted_at = COALESCE(?, submitted_at),
+                platform = COALESCE(?, platform), application_url = COALESCE(?, application_url),
+                notes = ?, error = ?
+            WHERE id = ?
+            """,
+            (
+                stage,
+                package_path,
+                timestamp,
+                approved_at,
+                submitted_at,
+                platform,
+                application_url,
+                notes,
+                error,
+                application_id,
+            ),
+        )
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO applications (
+                job_id, stage, package_path, created_at, approved_at, submitted_at,
+                platform, application_url, notes, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                stage,
+                package_path,
+                timestamp,
+                approved_at,
+                submitted_at,
+                platform,
+                application_url,
+                notes,
+                error,
+            ),
+        )
+        application_id = cur.lastrowid
+    conn.commit()
+    return int(application_id)
 
 
 def save_job(conn, job):
@@ -364,8 +458,18 @@ def mark_notified(conn, job_ids):
 
 
 def mark_interested(conn, job_id):
-    conn.execute("UPDATE jobs SET status = 'interested' WHERE id = ?", (job_id,))
+    cur = conn.execute("UPDATE jobs SET status = 'interested' WHERE id = ?", (job_id,))
+    if cur.rowcount == 0:
+        conn.commit()
+        return False
+    record_application_stage(
+        conn,
+        job_id,
+        "interested",
+        notes="Marked interested from JobHunter",
+    )
     conn.commit()
+    return True
 
 
 def get_job_by_id(conn, job_id):
@@ -1085,8 +1189,11 @@ def main():
 
     if args.mark_interested:
         conn = init_db()
-        mark_interested(conn, args.mark_interested)
+        updated = mark_interested(conn, args.mark_interested)
         conn.close()
+        if not updated:
+            print(json.dumps({"ok": False, "error": f"Job not found: {args.mark_interested}"}), file=sys.stderr)
+            sys.exit(1)
         print(json.dumps({"ok": True, "job_id": args.mark_interested}))
         return
 
