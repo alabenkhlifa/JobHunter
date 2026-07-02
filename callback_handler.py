@@ -26,6 +26,14 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DB_PATH = "./data/jobs.db"
 
+SKIP_REASON_LABELS = {
+    "too_junior": "too junior / low seniority",
+    "wrong_stack": "wrong stack or weak backend fit",
+    "not_dubai": "not Dubai / location concern",
+    "low_quality": "low-quality or suspicious posting",
+    "duplicate": "duplicate or already seen",
+}
+
 if not TOKEN or not CHAT_ID:
     log.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
     sys.exit(1)
@@ -35,14 +43,19 @@ def get_db():
     return sqlite3.connect(DB_PATH)
 
 
-def mark_skipped(job_id):
+def skip_reason_label(reason_code):
+    return SKIP_REASON_LABELS.get(reason_code, reason_code.replace("_", " "))
+
+
+def mark_skipped(job_id, reason=None):
+    reason_text = reason or "user selected skip"
     conn = get_db()
     conn.execute("UPDATE jobs SET status = 'skipped' WHERE id = ?", (job_id,))
     scraper.record_job_feedback(
         conn,
         job_id,
         "skip",
-        reason="user selected skip",
+        reason=reason_text,
         source="telegram_button",
     )
     conn.commit()
@@ -105,15 +118,16 @@ def answer_callback(callback_query_id, text=None):
         pass
 
 
-def handle_skip(job_id, callback_query_id):
+def handle_skip(job_id, callback_query_id, reason_code=None):
     job = get_job(job_id)
     if not job:
         answer_callback(callback_query_id, "Job not found")
         return
-    
-    mark_skipped(job_id)
-    answer_callback(callback_query_id, "✓ Skipped")
-    log.info(f"Skipped: {job['title']} @ {job['company']}")
+
+    reason = skip_reason_label(reason_code) if reason_code else None
+    mark_skipped(job_id, reason=reason)
+    answer_callback(callback_query_id, f"✓ Skipped: {reason}" if reason else "✓ Skipped")
+    log.info(f"Skipped: {job['title']} @ {job['company']}" + (f" ({reason})" if reason else ""))
 
 
 def build_interested_message(job):
@@ -219,14 +233,20 @@ def poll_updates(offset=0):
                     answer_callback(callback_id, "Invalid callback")
                     continue
                 
-                action, job_id = callback_data.split(":", 1)
-                
+                action, payload = callback_data.split(":", 1)
+
                 if action == "skip":
-                    handle_skip(job_id, callback_id)
+                    handle_skip(payload, callback_id)
+                elif action == "skip_reason":
+                    if ":" not in payload:
+                        answer_callback(callback_id, "Invalid skip reason")
+                        continue
+                    reason_code, job_id = payload.split(":", 1)
+                    handle_skip(job_id, callback_id, reason_code=reason_code)
                 elif action == "interested":
-                    handle_interested(job_id, callback_id)
+                    handle_interested(payload, callback_id)
                 elif action == "details":
-                    handle_details(job_id, callback_id)
+                    handle_details(payload, callback_id)
                 else:
                     answer_callback(callback_id, "Unknown action")
         

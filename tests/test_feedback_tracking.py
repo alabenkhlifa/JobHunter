@@ -49,6 +49,13 @@ def test_job_inline_keyboard_uses_callback_for_details_so_we_can_learn_feedback(
         {"text": "❌ Skip", "callback_data": "skip:li-1"},
         {"text": "📄 Details", "callback_data": "details:li-1"},
     ]
+    assert keyboard["inline_keyboard"][1] == [
+        {"text": "Too junior", "callback_data": "skip_reason:too_junior:li-1"},
+        {"text": "Wrong stack", "callback_data": "skip_reason:wrong_stack:li-1"},
+        {"text": "Not Dubai", "callback_data": "skip_reason:not_dubai:li-1"},
+        {"text": "Low quality", "callback_data": "skip_reason:low_quality:li-1"},
+        {"text": "Duplicate", "callback_data": "skip_reason:duplicate:li-1"},
+    ]
 
 
 def test_record_job_feedback_creates_a_traceable_action_log():

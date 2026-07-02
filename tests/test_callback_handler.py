@@ -89,3 +89,23 @@ def test_handle_details_records_feedback_and_sends_details(monkeypatch):
     assert len(sent) == 1
     assert "Build backend services." in sent[0]
     assert "https://example.com/job" in sent[0]
+
+
+def test_handle_skip_with_reason_records_specific_feedback(monkeypatch):
+    callback_handler = load_callback_handler(monkeypatch)
+    calls = []
+    job = {
+        "id": "li-1",
+        "title": "Junior Frontend Engineer",
+        "company": "ExampleCo",
+        "location": "Dubai",
+    }
+
+    monkeypatch.setattr(callback_handler, "get_job", lambda job_id: job if job_id == "li-1" else None)
+    monkeypatch.setattr(callback_handler, "mark_skipped", lambda job_id, reason=None: calls.append(("skip", job_id, reason)))
+    monkeypatch.setattr(callback_handler, "answer_callback", lambda callback_id, text=None: calls.append(("answer", callback_id, text)))
+
+    callback_handler.handle_skip("li-1", "callback-1", reason_code="too_junior")
+
+    assert ("skip", "li-1", "too junior / low seniority") in calls
+    assert ("answer", "callback-1", "✓ Skipped: too junior / low seniority") in calls

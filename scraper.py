@@ -1237,13 +1237,24 @@ def format_job_message(job):
 
 
 def job_inline_keyboard(job):
+    skip_reasons = [
+        ("Too junior", "too_junior"),
+        ("Wrong stack", "wrong_stack"),
+        ("Not Dubai", "not_dubai"),
+        ("Low quality", "low_quality"),
+        ("Duplicate", "duplicate"),
+    ]
     return {
         "inline_keyboard": [
             [
                 {"text": "\u2705 Interested", "callback_data": f"interested:{job['id']}"},
                 {"text": "\u274c Skip", "callback_data": f"skip:{job['id']}"},
                 {"text": "\U0001f4c4 Details", "callback_data": f"details:{job['id']}"},
-            ]
+            ],
+            [
+                {"text": text, "callback_data": f"skip_reason:{code}:{job['id']}"}
+                for text, code in skip_reasons
+            ],
         ]
     }
 
