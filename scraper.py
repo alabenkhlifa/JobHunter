@@ -497,6 +497,9 @@ def get_feedback_summary(conn):
 
 def save_job(conn, job):
     metadata = normalize_recruiter_metadata(job)
+    if not metadata["credibility_notes"]:
+        _, generated_notes = assess_company_recruiter_credibility(job)
+        metadata["credibility_notes"] = "; ".join(generated_notes)
     conn.execute(
         """INSERT OR IGNORE INTO jobs
            (id, title, company, location, url, source, score, date_posted, date_scraped, notified,
@@ -873,6 +876,19 @@ RECRUITER_METADATA_FIELDS = [
     "credibility_notes",
 ]
 
+AGENCY_OR_AGGREGATOR_TERMS = (
+    "talentmate",
+    "dicetek",
+    "dautom",
+    "jobgether",
+    "recruit",
+    "recruitment",
+    "staffing",
+    "talent",
+    "hr solutions",
+    "consulting",
+)
+
 
 def normalize_recruiter_metadata(raw):
     """Normalize optional recruiter/company metadata for storage and messages."""
@@ -882,6 +898,48 @@ def normalize_recruiter_metadata(raw):
         value = raw.get(field, "")
         normalized[field] = str(value).strip() if value is not None else ""
     return normalized
+
+
+def assess_company_recruiter_credibility(job):
+    """Score company/recruiter trust signals used to rank noisy job feeds.
+
+    Positive scores indicate direct/traceable roles. Negative scores indicate
+    agency/aggregator or thin-posting risk. The result is intentionally small so
+    it nudges ranking without overpowering role fit.
+    """
+    metadata = normalize_recruiter_metadata(job)
+    company = str(job.get("company") or "").strip()
+    company_l = company.lower()
+    recruiter_company_l = metadata["recruiter_company"].lower()
+    source_l = str(job.get("source") or "").lower()
+
+    score = 0
+    notes = []
+
+    if metadata["company_website"]:
+        score += 2
+        notes.append("company website present")
+    if metadata["recruiter_profile_url"]:
+        score += 1
+        notes.append("recruiter profile present")
+    if metadata["recruiter_company"] and recruiter_company_l == company_l:
+        score += 1
+        notes.append("recruiter appears internal")
+
+    if any(term in company_l for term in AGENCY_OR_AGGREGATOR_TERMS):
+        score -= 2
+        notes.append("posted by agency/aggregator")
+    elif metadata["recruiter_company"] and any(
+        term in recruiter_company_l for term in AGENCY_OR_AGGREGATOR_TERMS
+    ):
+        score -= 1
+        notes.append("external recruiter/agency signal")
+
+    if source_l == "foundit":
+        score -= 1
+        notes.append("aggregated job-board source")
+
+    return score, notes
 
 
 def fetch_job_description(session, job):
@@ -1106,6 +1164,12 @@ def score_job(job):
             elif t in nice_text:
                 score += 1
                 breakdown.append(f"{term}(+1 nice)")
+
+    credibility_score, credibility_notes = assess_company_recruiter_credibility(job)
+    if credibility_score:
+        score += credibility_score
+        sign = "+" if credibility_score > 0 else ""
+        breakdown.append(f"credibility({sign}{credibility_score}: {'; '.join(credibility_notes)})")
 
     # Apply penalty terms against title
     penalty = CONFIG["penalty_terms"]
