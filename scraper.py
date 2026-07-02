@@ -310,17 +310,30 @@ def init_db():
             salary TEXT DEFAULT '',
             work_model TEXT DEFAULT 'on-site',
             score_breakdown TEXT DEFAULT '',
-            status TEXT DEFAULT 'new'
+            status TEXT DEFAULT 'new',
+            recruiter_name TEXT DEFAULT '',
+            recruiter_company TEXT DEFAULT '',
+            recruiter_profile_url TEXT DEFAULT '',
+            company_website TEXT DEFAULT '',
+            credibility_notes TEXT DEFAULT ''
         )
     """)
     init_application_tracking(conn)
     init_feedback_tracking(conn)
     # Migration for existing databases
-    try:
-        conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # Column already exists
+    for ddl in [
+        "ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'",
+        "ALTER TABLE jobs ADD COLUMN recruiter_name TEXT DEFAULT ''",
+        "ALTER TABLE jobs ADD COLUMN recruiter_company TEXT DEFAULT ''",
+        "ALTER TABLE jobs ADD COLUMN recruiter_profile_url TEXT DEFAULT ''",
+        "ALTER TABLE jobs ADD COLUMN company_website TEXT DEFAULT ''",
+        "ALTER TABLE jobs ADD COLUMN credibility_notes TEXT DEFAULT ''",
+    ]:
+        try:
+            conn.execute(ddl)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     conn.commit()
     return conn
 
@@ -483,10 +496,14 @@ def get_feedback_summary(conn):
 
 
 def save_job(conn, job):
+    metadata = normalize_recruiter_metadata(job)
     conn.execute(
         """INSERT OR IGNORE INTO jobs
-           (id, title, company, location, url, source, score, date_posted, date_scraped, notified, description, tech_required, tech_nice_to_have, min_experience, salary, work_model, score_breakdown)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (id, title, company, location, url, source, score, date_posted, date_scraped, notified,
+            description, tech_required, tech_nice_to_have, min_experience, salary, work_model,
+            score_breakdown, recruiter_name, recruiter_company, recruiter_profile_url,
+            company_website, credibility_notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             job["id"],
             job["title"],
@@ -505,6 +522,11 @@ def save_job(conn, job):
             job.get("salary", ""),
             job.get("work_model", "on-site"),
             job.get("score_breakdown", ""),
+            metadata["recruiter_name"],
+            metadata["recruiter_company"],
+            metadata["recruiter_profile_url"],
+            metadata["company_website"],
+            metadata["credibility_notes"],
         ),
     )
     conn.commit()
@@ -843,6 +865,24 @@ def scrape_foundit(session, keyword, location):
 
 # ── Job Details ──────────────────────────────────────────────────────────────
 
+RECRUITER_METADATA_FIELDS = [
+    "recruiter_name",
+    "recruiter_company",
+    "recruiter_profile_url",
+    "company_website",
+    "credibility_notes",
+]
+
+
+def normalize_recruiter_metadata(raw):
+    """Normalize optional recruiter/company metadata for storage and messages."""
+    raw = raw or {}
+    normalized = {}
+    for field in RECRUITER_METADATA_FIELDS:
+        value = raw.get(field, "")
+        normalized[field] = str(value).strip() if value is not None else ""
+    return normalized
+
 
 def fetch_job_description(session, job):
     """Fetch the full job description from the job detail page."""
@@ -1175,6 +1215,21 @@ def format_job_message(job):
             lines.append(f"\u2705 <b>Required:</b> {req}")
         if nice:
             lines.append(f"\U0001f7e1 <b>Nice to have:</b> {nice}")
+
+    metadata = normalize_recruiter_metadata(job)
+    recruiter_bits = []
+    if metadata["recruiter_name"]:
+        recruiter_bits.append(metadata["recruiter_name"])
+    if metadata["recruiter_company"]:
+        recruiter_bits.append(metadata["recruiter_company"])
+    if metadata["recruiter_profile_url"]:
+        recruiter_bits.append(metadata["recruiter_profile_url"])
+    if recruiter_bits:
+        lines.extend(["", f"\U0001f464 Recruiter: {' | '.join(recruiter_bits)}"])
+    if metadata["company_website"]:
+        lines.append(f"\U0001f310 Company site: {metadata['company_website']}")
+    if metadata["credibility_notes"]:
+        lines.append(f"\U0001f50e Credibility: {metadata['credibility_notes']}")
 
     lines.extend(["", f"\U0001f517 {job['url']}"])
 
