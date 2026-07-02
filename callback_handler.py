@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Telegram callback handler for job button clicks."""
+
+import os
+import sys
+import time
+import json
+import logging
+import requests
+import sqlite3
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Setup
+load_dotenv()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DB_PATH = "./data/jobs.db"
+
+if not TOKEN or not CHAT_ID:
+    log.error("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set")
+    sys.exit(1)
+
+
+def get_db():
+    return sqlite3.connect(DB_PATH)
+
+
+def mark_skipped(job_id):
+    conn = get_db()
+    conn.execute("UPDATE jobs SET status = 'skipped' WHERE id = ?", (job_id,))
+    conn.commit()
+    conn.close()
+
+
+def mark_interested(job_id):
+    conn = get_db()
+    conn.execute("UPDATE jobs SET status = 'interested' WHERE id = ?", (job_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_job(job_id):
+    conn = get_db()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    return dict(row)
+
+
+def send_message(text):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        return resp.status_code == 200
+    except Exception as e:
+        log.warning(f"Failed to send message: {e}")
+        return False
+
+
+def answer_callback(callback_query_id, text=None):
+    url = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception:
+        pass
+
+
+def handle_skip(job_id, callback_query_id):
+    job = get_job(job_id)
+    if not job:
+        answer_callback(callback_query_id, "Job not found")
+        return
+    
+    mark_skipped(job_id)
+    answer_callback(callback_query_id, "✓ Skipped")
+    log.info(f"Skipped: {job['title']} @ {job['company']}")
+
+
+def build_interested_message(job):
+    """Build the Hermes-native action request emitted after an Interested click."""
+    job_id = job["id"]
+    return f"""🎯 <b>HERMES JOBHUNTER ACTION</b>
+
+<b>Interested job selected</b>
+<b>{job['title']}</b>
+{job['company']} - {job['location']}
+
+<b>Job ID:</b> {job_id}
+<b>Score:</b> {job['score']}
+<b>URL:</b> {job['url']}
+
+<b>Required Tech:</b> {job.get('tech_required', 'N/A')}
+<b>Nice to Have:</b> {job.get('tech_nice_to_have', 'N/A')}
+
+Please generate tailored resume and cover letter for this position, save the package, and stop before any application submission until Ala approves."""
+
+
+def handle_interested(job_id, callback_query_id):
+    job = get_job(job_id)
+    if not job:
+        answer_callback(callback_query_id, "Job not found")
+        return
+
+    mark_interested(job_id)
+    answer_callback(callback_query_id, "✓ Marked as interested")
+
+    message = build_interested_message(job)
+
+    send_message(message)
+    log.info(f"Interested: {job['title']} @ {job['company']} - notified Hermes JobHunter")
+
+
+def poll_updates(offset=0):
+    url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+    params = {"offset": offset, "timeout": 30, "allowed_updates": ["callback_query"]}
+    
+    while True:
+        try:
+            resp = requests.get(url, params=params, timeout=35)
+            if resp.status_code != 200:
+                log.warning(f"getUpdates failed: {resp.status_code}")
+                time.sleep(5)
+                continue
+            
+            data = resp.json()
+            if not data.get("ok"):
+                log.warning(f"Telegram API error: {data}")
+                time.sleep(5)
+                continue
+            
+            updates = data.get("result", [])
+            
+            for update in updates:
+                params["offset"] = update["update_id"] + 1
+                
+                if "callback_query" not in update:
+                    continue
+                
+                callback = update["callback_query"]
+                callback_data = callback.get("data", "")
+                callback_id = callback["id"]
+                
+                # Parse callback: "skip:job_id" or "interested:job_id"
+                if ":" not in callback_data:
+                    answer_callback(callback_id, "Invalid callback")
+                    continue
+                
+                action, job_id = callback_data.split(":", 1)
+                
+                if action == "skip":
+                    handle_skip(job_id, callback_id)
+                elif action == "interested":
+                    handle_interested(job_id, callback_id)
+                else:
+                    answer_callback(callback_id, "Unknown action")
+        
+        except requests.Timeout:
+            # Normal timeout, just continue polling
+            continue
+        except Exception as e:
+            log.error(f"Polling error: {e}")
+            time.sleep(10)
+
+
+if __name__ == "__main__":
+    log.info("Starting Telegram callback handler...")
+    log.info(f"Listening for button clicks...")
+    
+    try:
+        poll_updates()
+    except KeyboardInterrupt:
+        log.info("Shutting down...")
+        sys.exit(0)
