@@ -11,6 +11,8 @@ import sqlite3
 from pathlib import Path
 from dotenv import load_dotenv
 
+import scraper
+
 # Setup
 load_dotenv()
 logging.basicConfig(
@@ -36,7 +38,26 @@ def get_db():
 def mark_skipped(job_id):
     conn = get_db()
     conn.execute("UPDATE jobs SET status = 'skipped' WHERE id = ?", (job_id,))
+    scraper.record_job_feedback(
+        conn,
+        job_id,
+        "skip",
+        reason="user selected skip",
+        source="telegram_button",
+    )
     conn.commit()
+    conn.close()
+
+
+def record_feedback(job_id, action, reason=None):
+    conn = get_db()
+    scraper.record_job_feedback(
+        conn,
+        job_id,
+        action,
+        reason=reason,
+        source="telegram_button",
+    )
     conn.close()
 
 
@@ -114,6 +135,28 @@ def build_interested_message(job):
 Please generate tailored resume and cover letter for this position, save the package, and stop before any application submission until Ala approves."""
 
 
+def build_details_message(job):
+    """Build a compact detail view for the Telegram Details button."""
+    description = (job.get("description") or "No description stored.").strip()
+    if len(description) > 1800:
+        description = description[:1800].rstrip() + "…"
+    return f"""📄 <b>Job details</b>
+
+<b>{job['title']}</b>
+{job['company']} - {job['location']}
+
+<b>Score:</b> {job.get('score', 'N/A')}
+<b>Work model:</b> {job.get('work_model', 'N/A')}
+<b>Salary:</b> {job.get('salary') or 'N/A'}
+<b>Required Tech:</b> {job.get('tech_required') or 'N/A'}
+<b>Nice to Have:</b> {job.get('tech_nice_to_have') or 'N/A'}
+
+<b>Description:</b>
+{description}
+
+{job['url']}"""
+
+
 def handle_interested(job_id, callback_query_id):
     job = get_job(job_id)
     if not job:
@@ -127,6 +170,18 @@ def handle_interested(job_id, callback_query_id):
 
     send_message(message)
     log.info(f"Interested: {job['title']} @ {job['company']} - notified Hermes JobHunter")
+
+
+def handle_details(job_id, callback_query_id):
+    job = get_job(job_id)
+    if not job:
+        answer_callback(callback_query_id, "Job not found")
+        return
+
+    record_feedback(job_id, "details", reason="user requested details")
+    answer_callback(callback_query_id, "Opening details")
+    send_message(build_details_message(job))
+    log.info(f"Details requested: {job['title']} @ {job['company']}")
 
 
 def poll_updates(offset=0):
@@ -170,6 +225,8 @@ def poll_updates(offset=0):
                     handle_skip(job_id, callback_id)
                 elif action == "interested":
                     handle_interested(job_id, callback_id)
+                elif action == "details":
+                    handle_details(job_id, callback_id)
                 else:
                     answer_callback(callback_id, "Unknown action")
         

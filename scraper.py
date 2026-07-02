@@ -314,6 +314,7 @@ def init_db():
         )
     """)
     init_application_tracking(conn)
+    init_feedback_tracking(conn)
     # Migration for existing databases
     try:
         conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'")
@@ -422,6 +423,65 @@ def record_application_stage(
     return int(application_id)
 
 
+def init_feedback_tracking(conn):
+    """Create the user feedback event log used to improve ranking over time."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS job_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT,
+            source TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def record_job_feedback(conn, job_id, action, *, reason=None, source="manual", now=None):
+    """Append a traceable feedback event for a job recommendation."""
+    init_feedback_tracking(conn)
+    timestamp = (now or datetime.now(timezone.utc)).isoformat()
+    cur = conn.execute(
+        """
+        INSERT INTO job_feedback (job_id, action, reason, source, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (job_id, action, reason, source, timestamp),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_feedback_summary(conn):
+    """Return compact counts showing what Ala tends to skip or like."""
+    init_feedback_tracking(conn)
+    by_action = _dict_counts(
+        conn.execute(
+            """
+            SELECT action, COUNT(*)
+            FROM job_feedback
+            GROUP BY action
+            ORDER BY action
+            """
+        ).fetchall()
+    )
+    by_reason = _dict_counts(
+        conn.execute(
+            """
+            SELECT reason, COUNT(*)
+            FROM job_feedback
+            WHERE reason IS NOT NULL AND reason != ''
+            GROUP BY reason
+            ORDER BY reason
+            """
+        ).fetchall()
+    )
+    return {"by_action": by_action, "by_reason": by_reason}
+
+
 def save_job(conn, job):
     conn.execute(
         """INSERT OR IGNORE INTO jobs
@@ -467,6 +527,13 @@ def mark_interested(conn, job_id):
         job_id,
         "interested",
         notes="Marked interested from JobHunter",
+    )
+    record_job_feedback(
+        conn,
+        job_id,
+        "interested",
+        reason="user selected interested",
+        source="telegram_button",
     )
     conn.commit()
     return True
@@ -1120,7 +1187,7 @@ def job_inline_keyboard(job):
             [
                 {"text": "\u2705 Interested", "callback_data": f"interested:{job['id']}"},
                 {"text": "\u274c Skip", "callback_data": f"skip:{job['id']}"},
-                {"text": "\U0001f4c4 Details", "url": job["url"]},
+                {"text": "\U0001f4c4 Details", "callback_data": f"details:{job['id']}"},
             ]
         ]
     }
