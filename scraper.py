@@ -111,7 +111,9 @@ CONFIG = {
     "max_experience": 8,
     "max_job_age_days": 7,
     "score_threshold": 15,
-    "min_matching_jobs": 1,
+    # Per scraper/region bucket. Keep this high so one good match does not stop
+    # the scrape early; the LLM review can rank/reject multiple good offers.
+    "min_matching_jobs": 25,
     "rate_limit": {"min": 2, "max": 5},
     "db_path": "./data/jobs.db",
     "log_path": "./data/scraper.log",
@@ -374,7 +376,84 @@ def get_job_by_id(conn, job_id):
     return dict(row)
 
 
+def _dict_counts(rows):
+    """Convert two-column SQLite count rows into a stable dict."""
+    return {str(key): int(count) for key, count in rows}
+
+
+def get_job_status_summary(conn):
+    """Return compact, traceable counters for managing the JobHunter backlog."""
+    total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    unreviewed = conn.execute(
+        """
+        SELECT COUNT(*) FROM jobs
+        WHERE status = 'new' AND COALESCE(notified, 0) = 0
+        """
+    ).fetchone()[0]
+    by_status = _dict_counts(
+        conn.execute(
+            """
+            SELECT COALESCE(status, 'new') AS status, COUNT(*)
+            FROM jobs
+            GROUP BY COALESCE(status, 'new')
+            ORDER BY status
+            """
+        ).fetchall()
+    )
+    by_source = _dict_counts(
+        conn.execute(
+            """
+            SELECT COALESCE(source, 'unknown') AS source, COUNT(*)
+            FROM jobs
+            GROUP BY COALESCE(source, 'unknown')
+            ORDER BY source
+            """
+        ).fetchall()
+    )
+    by_status_and_notified = _dict_counts(
+        conn.execute(
+            """
+            SELECT COALESCE(status, 'new') || ':' ||
+                   CASE WHEN COALESCE(notified, 0) = 1 THEN 'notified' ELSE 'unnotified' END,
+                   COUNT(*)
+            FROM jobs
+            GROUP BY COALESCE(status, 'new'), COALESCE(notified, 0)
+            ORDER BY COALESCE(status, 'new'), COALESCE(notified, 0)
+            """
+        ).fetchall()
+    )
+    return {
+        "total": int(total),
+        "unreviewed": int(unreviewed),
+        "by_status": by_status,
+        "by_source": by_source,
+        "by_status_and_notified": by_status_and_notified,
+    }
+
+
+def archive_stale_unreviewed_jobs(conn, older_than_days, now=None, dry_run=False):
+    """
+    Mark stale, unnotified, still-new jobs as archived.
+
+    This intentionally does not touch notified, interested, skipped, unavailable,
+    or already archived jobs so user decisions and application history are safe.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=older_than_days)).isoformat()
+    params = (cutoff,)
+    where = """
+        status = 'new'
+        AND COALESCE(notified, 0) = 0
+        AND COALESCE(date_scraped, '') < ?
+    """
+    count = conn.execute(f"SELECT COUNT(*) FROM jobs WHERE {where}", params).fetchone()[0]
+    if not dry_run and count:
+        conn.execute(f"UPDATE jobs SET status = 'archived' WHERE {where}", params)
+        conn.commit()
+    return int(count)
+
 # ── HTTP Session ─────────────────────────────────────────────────────────────
+
 
 
 def create_session():
@@ -978,6 +1057,9 @@ def parse_args():
     parser.add_argument("--send-doc", metavar="PATH", help="Send document via Telegram/ntfy")
     parser.add_argument("--send-msg", metavar="TEXT", help="Send message via Telegram/ntfy")
     parser.add_argument("--mark-interested", metavar="ID", help="Mark job as interested in DB")
+    parser.add_argument("--job-stats", action="store_true", help="Print JSON backlog/status counters")
+    parser.add_argument("--archive-stale-days", type=int, metavar="DAYS", help="Archive unnotified new jobs older than DAYS")
+    parser.add_argument("--dry-run", action="store_true", help="Preview write actions such as --archive-stale-days")
     parser.add_argument("caption", nargs="?", default=None, help="Optional caption for --send-doc")
     return parser.parse_args()
 
@@ -1006,6 +1088,34 @@ def main():
         mark_interested(conn, args.mark_interested)
         conn.close()
         print(json.dumps({"ok": True, "job_id": args.mark_interested}))
+        return
+
+    if args.job_stats:
+        conn = init_db()
+        summary = get_job_status_summary(conn)
+        conn.close()
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return
+
+    if args.archive_stale_days is not None:
+        if args.archive_stale_days < 1:
+            print("--archive-stale-days must be >= 1", file=sys.stderr)
+            sys.exit(1)
+        conn = init_db()
+        archived = archive_stale_unreviewed_jobs(
+            conn,
+            older_than_days=args.archive_stale_days,
+            dry_run=args.dry_run,
+        )
+        summary = get_job_status_summary(conn)
+        conn.close()
+        print(json.dumps({
+            "ok": True,
+            "dry_run": args.dry_run,
+            "archive_stale_days": args.archive_stale_days,
+            "matched_jobs": archived,
+            "summary": summary,
+        }, indent=2, sort_keys=True))
         return
 
     # Determine notification backend
