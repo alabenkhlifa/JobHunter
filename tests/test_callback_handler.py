@@ -26,7 +26,8 @@ def test_build_interested_message_routes_to_hermes_without_openclaw(monkeypatch)
 
     assert "HERMES JOBHUNTER ACTION" in message
     assert "OpenClaw" not in message
-    assert "generate tailored resume and cover letter" in message
+    assert "generate a tailored resume and cover letter" in message
+    assert "detect Easy Apply vs external apply" in message
     assert "<b>Job ID:</b> li-1" in message
 
 

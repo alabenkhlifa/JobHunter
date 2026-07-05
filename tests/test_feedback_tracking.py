@@ -50,11 +50,10 @@ def test_job_inline_keyboard_uses_callback_for_details_so_we_can_learn_feedback(
         {"text": "📄 Details", "callback_data": "details:li-1"},
     ]
     assert keyboard["inline_keyboard"][1] == [
-        {"text": "Too junior", "callback_data": "skip_reason:too_junior:li-1"},
         {"text": "Wrong stack", "callback_data": "skip_reason:wrong_stack:li-1"},
-        {"text": "Not Dubai", "callback_data": "skip_reason:not_dubai:li-1"},
+        {"text": "Too junior", "callback_data": "skip_reason:too_junior:li-1"},
+        {"text": "Too senior", "callback_data": "skip_reason:too_senior:li-1"},
         {"text": "Low quality", "callback_data": "skip_reason:low_quality:li-1"},
-        {"text": "Duplicate", "callback_data": "skip_reason:duplicate:li-1"},
     ]
 
 
@@ -96,3 +95,47 @@ def test_feedback_summary_counts_actions_and_reasons():
         "by_action": {"interested": 1, "skip": 2},
         "by_reason": {"strong backend fit": 1, "wrong seniority": 2},
     }
+
+
+def test_application_stage_tracks_linkedin_type_and_evidence():
+    conn = make_conn_with_jobs()
+
+    app_id = scraper.record_application_stage(
+        conn,
+        "li-1",
+        "draft_ready",
+        platform="LinkedIn",
+        application_type="easy_apply",
+        application_url="https://linkedin.com/jobs/view/1",
+        evidence_path="data/output/li-1/screenshots/draft.png",
+        notes="Ready for approval",
+    )
+
+    row = conn.execute(
+        "SELECT id, stage, platform, application_type, application_url, evidence_path, notes FROM applications"
+    ).fetchone()
+    assert row == (
+        app_id,
+        "draft_ready",
+        "LinkedIn",
+        "easy_apply",
+        "https://linkedin.com/jobs/view/1",
+        "data/output/li-1/screenshots/draft.png",
+        "Ready for approval",
+    )
+
+
+def test_application_answer_cache_reuses_only_confirmed_answers():
+    conn = make_conn_with_jobs()
+
+    scraper.cache_application_answer(conn, "Are you willing to relocate?", "Yes", confirmed=True)
+    scraper.cache_application_answer(conn, "Expected salary?", "Ask Ala", confirmed=False)
+
+    cached_relocation = scraper.get_cached_application_answer(conn, "Are you willing to relocate?")
+    cached_salary = scraper.get_cached_application_answer(conn, "Expected salary?", confirmed_only=False)
+
+    assert cached_relocation is not None
+    assert cached_relocation["answer"] == "Yes"
+    assert scraper.get_cached_application_answer(conn, "Expected salary?") is None
+    assert cached_salary is not None
+    assert cached_salary["answer"] == "Ask Ala"

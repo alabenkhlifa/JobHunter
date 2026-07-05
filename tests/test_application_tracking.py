@@ -55,9 +55,22 @@ def test_init_application_tracking_creates_expected_table():
         "approved_at",
         "submitted_at",
         "platform",
+        "application_type",
         "application_url",
+        "evidence_path",
         "notes",
         "error",
+    ]
+    answer_columns = [row[1] for row in conn.execute("PRAGMA table_info(application_answers)").fetchall()]
+    assert answer_columns == [
+        "id",
+        "question_key",
+        "question_text",
+        "answer",
+        "answer_source",
+        "confirmed",
+        "created_at",
+        "updated_at",
     ]
 
 
@@ -78,7 +91,9 @@ def test_record_application_stage_inserts_then_updates_latest_state():
         "package_generated",
         package_path="data/output/package-li-1",
         platform="LinkedIn",
+        application_type="easy_apply",
         application_url="https://example.com/apply",
+        evidence_path="data/output/package-li-1/draft.png",
         notes="Resume and cover letter ready",
         now=now,
     )
@@ -86,7 +101,7 @@ def test_record_application_stage_inserts_then_updates_latest_state():
     assert first == second
     row = conn.execute(
         """
-        SELECT job_id, stage, package_path, platform, application_url, notes, created_at
+        SELECT job_id, stage, package_path, platform, application_type, application_url, evidence_path, notes, created_at
         FROM applications WHERE job_id = 'li-1'
         """
     ).fetchone()
@@ -95,7 +110,9 @@ def test_record_application_stage_inserts_then_updates_latest_state():
         "package_generated",
         "data/output/package-li-1",
         "LinkedIn",
+        "easy_apply",
         "https://example.com/apply",
+        "data/output/package-li-1/draft.png",
         "Resume and cover letter ready",
         "2026-07-02T12:00:00+00:00",
     )
@@ -108,8 +125,17 @@ def test_mark_interested_records_application_stage():
 
     assert updated is True
     assert conn.execute("SELECT status FROM jobs WHERE id = 'li-1'").fetchone()[0] == "interested"
-    application = conn.execute("SELECT job_id, stage, notes FROM applications WHERE job_id = 'li-1'").fetchone()
-    assert application == ("li-1", "interested", "Marked interested from JobHunter")
+    application = conn.execute(
+        "SELECT job_id, stage, platform, application_type, application_url, notes FROM applications WHERE job_id = 'li-1'"
+    ).fetchone()
+    assert application == (
+        "li-1",
+        "interested",
+        "LinkedIn",
+        "linkedin_unknown",
+        "https://example.com",
+        "Marked interested from JobHunter; next safe step is package_generated then draft_ready before approval/submission.",
+    )
 
 
 def test_mark_interested_missing_job_does_not_create_application():

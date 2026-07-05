@@ -27,11 +27,10 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DB_PATH = "./data/jobs.db"
 
 SKIP_REASON_LABELS = {
-    "too_junior": "too junior / low seniority",
     "wrong_stack": "wrong stack or weak backend fit",
-    "not_dubai": "not Dubai / location concern",
+    "too_junior": "too junior / low seniority",
+    "too_senior": "too senior / over-scoped",
     "low_quality": "low-quality or suspicious posting",
-    "duplicate": "duplicate or already seen",
 }
 
 if not TOKEN or not CHAT_ID:
@@ -76,8 +75,7 @@ def record_feedback(job_id, action, reason=None):
 
 def mark_interested(job_id):
     conn = get_db()
-    conn.execute("UPDATE jobs SET status = 'interested' WHERE id = ?", (job_id,))
-    conn.commit()
+    scraper.mark_interested(conn, job_id)
     conn.close()
 
 
@@ -146,7 +144,11 @@ def build_interested_message(job):
 <b>Required Tech:</b> {job.get('tech_required', 'N/A')}
 <b>Nice to Have:</b> {job.get('tech_nice_to_have', 'N/A')}
 
-Please generate tailored resume and cover letter for this position, save the package, and stop before any application submission until Ala approves."""
+Please generate a tailored resume and cover letter, record application stage <code>package_generated</code>, then prepare LinkedIn safely:
+- detect Easy Apply vs external apply
+- reuse only confirmed cached answers
+- save screenshots/evidence for blockers or draft-ready state
+- stop before final Submit until Ala approves."""
 
 
 def build_details_message(job):

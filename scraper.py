@@ -356,12 +356,36 @@ def init_application_tracking(conn):
             approved_at TEXT,
             submitted_at TEXT,
             platform TEXT,
+            application_type TEXT,
             application_url TEXT,
+            evidence_path TEXT,
             notes TEXT,
             error TEXT
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS application_answers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            question_key TEXT NOT NULL UNIQUE,
+            question_text TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            answer_source TEXT NOT NULL DEFAULT 'ala_confirmed',
+            confirmed INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    for ddl in [
+        "ALTER TABLE applications ADD COLUMN application_type TEXT",
+        "ALTER TABLE applications ADD COLUMN evidence_path TEXT",
+    ]:
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
     conn.commit()
 
 
@@ -372,7 +396,9 @@ def record_application_stage(
     *,
     package_path=None,
     platform=None,
+    application_type=None,
     application_url=None,
+    evidence_path=None,
     notes=None,
     error=None,
     now=None,
@@ -393,8 +419,9 @@ def record_application_stage(
             UPDATE applications
             SET stage = ?, package_path = COALESCE(?, package_path), created_at = ?,
                 approved_at = COALESCE(?, approved_at), submitted_at = COALESCE(?, submitted_at),
-                platform = COALESCE(?, platform), application_url = COALESCE(?, application_url),
-                notes = ?, error = ?
+                platform = COALESCE(?, platform), application_type = COALESCE(?, application_type),
+                application_url = COALESCE(?, application_url), evidence_path = COALESCE(?, evidence_path),
+                notes = COALESCE(?, notes), error = ?
             WHERE id = ?
             """,
             (
@@ -404,7 +431,9 @@ def record_application_stage(
                 approved_at,
                 submitted_at,
                 platform,
+                application_type,
                 application_url,
+                evidence_path,
                 notes,
                 error,
                 application_id,
@@ -415,8 +444,8 @@ def record_application_stage(
             """
             INSERT INTO applications (
                 job_id, stage, package_path, created_at, approved_at, submitted_at,
-                platform, application_url, notes, error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                platform, application_type, application_url, evidence_path, notes, error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -426,7 +455,9 @@ def record_application_stage(
                 approved_at,
                 submitted_at,
                 platform,
+                application_type,
                 application_url,
+                evidence_path,
                 notes,
                 error,
             ),
@@ -434,6 +465,81 @@ def record_application_stage(
         application_id = cur.lastrowid
     conn.commit()
     return int(application_id)
+
+
+def normalize_question_key(question_text):
+    """Stable key for reusing confirmed application answers across runs."""
+    normalized = re.sub(r"\s+", " ", (question_text or "").strip().lower())
+    normalized = re.sub(r"[^a-z0-9 ]+", "", normalized)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+
+def cache_application_answer(
+    conn,
+    question_text,
+    answer,
+    *,
+    answer_source="ala_confirmed",
+    confirmed=True,
+    now=None,
+):
+    """Store a reusable answer only after Ala/user confirmation.
+
+    Borrowed from LinkedIn bot answer caches, but safer: callers should use this
+    only for stable facts Ala confirmed. Unknown legal/visa/salary questions must
+    be asked, not invented.
+    """
+    init_application_tracking(conn)
+    timestamp = (now or datetime.now(timezone.utc)).isoformat()
+    question_key = normalize_question_key(question_text)
+    conn.execute(
+        """
+        INSERT INTO application_answers (
+            question_key, question_text, answer, answer_source, confirmed, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(question_key) DO UPDATE SET
+            question_text = excluded.question_text,
+            answer = excluded.answer,
+            answer_source = excluded.answer_source,
+            confirmed = excluded.confirmed,
+            updated_at = excluded.updated_at
+        """,
+        (
+            question_key,
+            " ".join(str(question_text or "").split()),
+            str(answer),
+            answer_source,
+            1 if confirmed else 0,
+            timestamp,
+            timestamp,
+        ),
+    )
+    conn.commit()
+    return question_key
+
+
+def get_cached_application_answer(conn, question_text, *, confirmed_only=True):
+    """Return a previously confirmed answer for a repeated application question."""
+    init_application_tracking(conn)
+    question_key = normalize_question_key(question_text)
+    where = "question_key = ?"
+    params = [question_key]
+    if confirmed_only:
+        where += " AND confirmed = 1"
+    row = conn.execute(
+        f"""
+        SELECT question_key, question_text, answer, answer_source, confirmed, updated_at
+        FROM application_answers
+        WHERE {where}
+        """,
+        params,
+    ).fetchone()
+    if row is None:
+        return None
+    keys = ["question_key", "question_text", "answer", "answer_source", "confirmed", "updated_at"]
+    result = dict(zip(keys, row))
+    result["confirmed"] = bool(result["confirmed"])
+    return result
 
 
 def init_feedback_tracking(conn):
@@ -547,11 +653,18 @@ def mark_interested(conn, job_id):
     if cur.rowcount == 0:
         conn.commit()
         return False
+    row = conn.execute("SELECT source, url FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    source = row[0] if row else None
+    url = row[1] if row else None
+    platform = "LinkedIn" if str(source or "").lower() == "linkedin" else source
     record_application_stage(
         conn,
         job_id,
         "interested",
-        notes="Marked interested from JobHunter",
+        platform=platform,
+        application_type="linkedin_unknown" if platform == "LinkedIn" else None,
+        application_url=url,
+        notes="Marked interested from JobHunter; next safe step is package_generated then draft_ready before approval/submission.",
     )
     record_job_feedback(
         conn,
@@ -1302,11 +1415,10 @@ def format_job_message(job):
 
 def job_inline_keyboard(job):
     skip_reasons = [
-        ("Too junior", "too_junior"),
         ("Wrong stack", "wrong_stack"),
-        ("Not Dubai", "not_dubai"),
+        ("Too junior", "too_junior"),
+        ("Too senior", "too_senior"),
         ("Low quality", "low_quality"),
-        ("Duplicate", "duplicate"),
     ]
     return {
         "inline_keyboard": [
