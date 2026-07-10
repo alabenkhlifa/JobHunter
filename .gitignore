@@ -3,6 +3,7 @@
 
 # Data
 data/*
+!data/master-profile.example.json
 
 # Python
 __pycache__/

@@ -1,0 +1,61 @@
+{
+  "name": "Candidate Name",
+  "headline": "Senior Backend Engineer | Cloud | Distributed Systems",
+  "email": "candidate@example.com",
+  "phone": "+1 555 010 0000",
+  "linkedin": "linkedin.com/in/candidate-example",
+  "location": "City, Country",
+  "summary": "Truthful two-to-four sentence summary of the candidate's background, seniority, domains, and strongest technologies.",
+  "certifications": [
+    "Example Certification"
+  ],
+  "skills": {
+    "Backend": [
+      "Java",
+      "Spring Boot",
+      "REST APIs",
+      "Microservices"
+    ],
+    "Cloud & DevOps": [
+      "AWS",
+      "Docker",
+      "Kubernetes",
+      "Terraform"
+    ],
+    "Data": [
+      "PostgreSQL",
+      "Redis"
+    ]
+  },
+  "experience": [
+    {
+      "title": "Senior Software Engineer",
+      "company": "Example Company",
+      "subtitle": "Full-time",
+      "location": "City, Country",
+      "dates": "01/2021 – Present",
+      "bullets": [
+        "Designed and maintained backend services for a production system serving real users.",
+        "Improved reliability, observability, or performance with measurable outcomes.",
+        "Collaborated with product, QA, DevOps, and engineering peers."
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Example Degree",
+      "school": "Example University",
+      "location": "City, Country",
+      "dates": "09/2012 – 06/2016"
+    }
+  ],
+  "application_defaults": {
+    "title": "Mr/Ms/Dr/etc",
+    "date_of_birth": "DD/MM/YYYY if the user chooses to store it locally",
+    "citizenship": "Country or citizenship value if confirmed",
+    "notice_period": "Example: 1 month",
+    "current_work_location": "City, Country",
+    "allow_contact_for_other_vacancies": "yes/no",
+    "requires_visa_sponsorship": "ask_user"
+  }
+}

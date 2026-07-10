@@ -22,11 +22,12 @@ cron job reviews them with an LLM before suggesting offers.
 ## Architecture
 - **Scraper**: `scraper.py` — scraping + CLI utilities (get-job, send-doc, send-msg, mark-interested)
 - **Renderer**: `render_pdf.py` — dumb PDF renderer for resume and cover letter
-- **Profile**: `data/master-profile.json` — master resume data (never fabricated)
+- **Auto-apply engine**: `jobhunter_auto_apply/` — approval-gated browser/ATS inspection, upload/submit wrappers, and encrypted ATS credential vault
+- **Profile**: `data/master-profile.json` — local ignored master resume data (never fabricated); `data/master-profile.example.json` documents the schema
 - **Sources**: LinkedIn (guest HTML API), Foundit Gulf (JSON middleware API)
-- **Storage**: SQLite for deduplication and history (with `status` column)
+- **Storage**: SQLite for deduplication, job state, application state, and confirmed answer cache
 - **Notifications**: Telegram Bot API (HTML parse mode)
-- **Designed for**: Raspberry Pi via cron (lightweight, no headless browser)
+- **Designed for**: local/Hermes operation with optional cron and Chromium CDP for browser apply flows
 
 ## Scraping Strategy
 The scraper uses **breadth-first round-robin** across 2 buckets:
@@ -85,7 +86,7 @@ For each candidate job, the scraper fetches the full description and extracts:
    reviewed candidate IDs as `notified=1` to avoid repeats.
 
 ### When user replies "interested" for a job:
-Openclaw (AI) handles the intelligent tailoring; scripts handle rendering and sending.
+Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; scripts handle rendering, state tracking, and browser-page inspection.
 
 1. Get job details:
    ```bash
@@ -208,16 +209,25 @@ python3 render_pdf.py resume <input.json> <output.pdf>
 
 # Render cover letter PDF
 python3 render_pdf.py cover <input.json> <output.pdf>
+
+# Inspect currently open LinkedIn/ATS page through Chromium CDP
+python3 -m jobhunter_auto_apply.cli inspect --job-id <job_id>
+
+# Upload/submit only after explicit user approval
+python3 -m jobhunter_auto_apply.cli upload --job-id <job_id> --selector 'input[type=file]' --file <resume.pdf> --approved
+python3 -m jobhunter_auto_apply.cli submit --job-id <job_id> --selector 'button[type=submit]' --approved
 ```
 
 ## File Locations
 - Scraper: `scraper.py`
 - PDF renderer: `render_pdf.py`
-- Master profile: `data/master-profile.json`
-- Database: `data/jobs.db`
-- Logs: `data/scraper.log`
+- Master profile: `data/master-profile.json` (local, ignored)
+- Profile schema example: `data/master-profile.example.json`
+- Database: `data/jobs.db` (local, ignored)
+- Logs: `data/scraper.log` (local, ignored)
 - Config: `.env` (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
-- Dependencies: `requirements.txt` (requests, beautifulsoup4, python-dotenv, lxml, fpdf2)
+- Auto-apply engine: `jobhunter_auto_apply/`
+- Dependencies: `requirements.txt`
 
 ## Cron Setup (Raspberry Pi)
 ```bash

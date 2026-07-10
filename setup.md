@@ -18,7 +18,24 @@ Run tests:
 python -m pytest -q tests
 ```
 
-## 2. Environment variables
+## 2. Hermes Agent plug-and-play setup
+
+After cloning, start Hermes from the repo root:
+
+```bash
+cd JobHunter
+hermes
+```
+
+Hermes automatically reads `AGENTS.md` as project instructions. A good first prompt is:
+
+```text
+Set up JobHunter for me using setup.md. Keep credentials and personal data local, run the tests, and tell me what is missing.
+```
+
+The repo also includes `job-hunter.skill.md`. If you want it installed as a reusable Hermes skill outside this repo, copy or install it into your Hermes skills directory according to your Hermes setup.
+
+## 3. Environment variables
 
 Copy `.env.example` to `.env` and fill local secrets:
 
@@ -35,17 +52,17 @@ TELEGRAM_CHAT_ID=...
 
 Do not commit `.env`.
 
-## 3. Local personal profile data
+## 4. Local personal profile data
 
-The open-source repo does not include a real candidate profile. Create your own local file, for example:
+The open-source repo does not include a real candidate profile. Copy the example schema and fill it locally:
 
-```text
-data/master-profile.json
+```bash
+cp data/master-profile.example.json data/master-profile.json
 ```
 
-That file is ignored by git. It should contain only truthful resume/profile data. The tailoring flow may reorder or emphasize existing facts, but should not invent companies, dates, degrees, skills, or eligibility answers.
+`data/master-profile.json` is ignored by git. It should contain only truthful resume/profile data. The tailoring flow may reorder or emphasize existing facts, but should not invent companies, dates, degrees, skills, or eligibility answers.
 
-## 4. Dedicated application mailbox
+## 5. Dedicated application mailbox
 
 Use a dedicated mailbox for ATS registration, verification links, recruiter replies, and approved outbound emails.
 
@@ -88,7 +105,7 @@ https://www.googleapis.com/auth/gmail.modify
 
 These allow JobHunter to read verification/reply emails, send approved emails, and mark/label processed messages.
 
-## 5. LinkedIn browser profile
+## 6. LinkedIn browser profile
 
 Use a dedicated Chromium profile for LinkedIn automation, not your daily browser profile:
 
@@ -111,7 +128,7 @@ chromium \
 
 The user logs in manually and handles any 2FA/CAPTCHA. Automation later reuses the saved session through Chrome DevTools Protocol (CDP). Never print cookie values, tokens, or localStorage.
 
-## 6. Job recommendation flow
+## 7. Job recommendation flow
 
 Typical flow:
 
@@ -129,7 +146,7 @@ python scraper.py --get-job <job_id>
 python scraper.py --mark-interested <job_id>
 ```
 
-## 7. Auto-apply engine
+## 8. Auto-apply engine
 
 The repo includes a safe, approval-gated engine under:
 
@@ -179,7 +196,7 @@ python -m jobhunter_auto_apply.cli submit \
 
 Without `--approved`, the engine blocks and records `blocked_submit_approval`.
 
-## 8. Privacy Notice / Terms & Conditions gates
+## 9. Privacy Notice / Terms & Conditions gates
 
 When an ATS asks for a Privacy Notice, Terms & Conditions, certification, or similar legal acknowledgement:
 
@@ -197,7 +214,7 @@ When an ATS asks for a Privacy Notice, Terms & Conditions, certification, or sim
    - **Decline / stop this application**
 4. Save the decision in application state before continuing.
 
-## 9. ATS account credentials
+## 10. ATS account credentials
 
 Use the encrypted local vault for generated ATS passwords:
 
@@ -217,7 +234,7 @@ Default local paths:
 
 The key and encrypted vault are outside the repo. Do not store generated passwords in plaintext SQLite or Markdown.
 
-## 10. Application states
+## 11. Application states
 
 Recommended non-secret states in SQLite:
 
@@ -246,7 +263,7 @@ Stop and ask the user on:
 - privacy/T&C/certification gates
 - final submit, unless explicitly approved for that exact application
 
-## 11. Git hygiene for open source
+## 12. Git hygiene for open source
 
 Keep these out of git:
 
