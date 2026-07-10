@@ -3,10 +3,6 @@
 
 # Data
 data/*
-!data/friend/
-data/friend/*.db
-data/friend/*.log
-data/friend/output/
 
 # Python
 __pycache__/
@@ -17,6 +13,11 @@ dist/
 build/
 .venv/
 venv/
+
+# Local logs/backups
+*.log
+*.backup
+*.backup-*
 
 # Browser/session profiles and local automation artifacts
 browser-profiles/
