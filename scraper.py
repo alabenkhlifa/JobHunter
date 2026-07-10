@@ -601,6 +601,77 @@ def get_feedback_summary(conn):
     return {"by_action": by_action, "by_reason": by_reason}
 
 
+def _feedback_reason_count(summary, *needles):
+    reasons = summary.get("by_reason", {}) if summary else {}
+    total = 0
+    for reason, count in reasons.items():
+        text = str(reason or "").lower()
+        if any(needle in text for needle in needles):
+            total += int(count)
+    return total
+
+
+def apply_feedback_learning(job, feedback_summary):
+    """Attach lightweight learned ranking signals from Interested/Skip feedback.
+
+    This is deliberately transparent rather than ML-heavy: repeated skip reasons
+    create small demotions for similar future jobs, while repeated Interested
+    feedback boosts backend/platform-aligned senior roles. The LLM reviewer sees
+    the resulting notes and adjusted score but still makes the final judgment.
+    """
+    item = dict(job)
+    text = " ".join(
+        str(item.get(key) or "")
+        for key in (
+            "title",
+            "company",
+            "description",
+            "tech_required",
+            "tech_nice_to_have",
+            "credibility_notes",
+        )
+    ).lower()
+    adjustment = 0
+    notes = []
+
+    wrong_stack_count = _feedback_reason_count(feedback_summary, "wrong stack", "not backend")
+    if wrong_stack_count and any(term in text for term in ("frontend", "front-end", "react", "mobile", "ios", "android", "qa", "sdet", "devops", "sre")):
+        delta = -min(6, 2 * wrong_stack_count)
+        adjustment += delta
+        notes.append(f"wrong_stack:{delta}")
+
+    junior_count = _feedback_reason_count(feedback_summary, "too junior", "low seniority", "junior")
+    if junior_count and any(term in text for term in ("junior", "entry level", "entry-level", "graduate", "trainee", "0-3 years", "1-3 years")):
+        delta = -min(6, 3 * junior_count)
+        adjustment += delta
+        notes.append(f"too_junior:{delta}")
+
+    senior_count = _feedback_reason_count(feedback_summary, "too senior", "over-scoped")
+    if senior_count and any(term in text for term in ("15+", "12+", "director", "vp", "chief", "head of")):
+        delta = -min(4, 2 * senior_count)
+        adjustment += delta
+        notes.append(f"too_senior:{delta}")
+
+    low_quality_count = _feedback_reason_count(feedback_summary, "low-quality", "low quality", "suspicious", "duplicate")
+    if low_quality_count and any(term in text for term in ("unknown staffing", "aggregator", "vague", "confidential", "staffing", "recruitment")):
+        delta = -min(5, 2 * low_quality_count)
+        adjustment += delta
+        notes.append(f"low_quality:{delta}")
+
+    interested_count = int((feedback_summary or {}).get("by_action", {}).get("interested", 0) or 0)
+    backend_interest_count = _feedback_reason_count(feedback_summary, "backend", "strong backend", "architecture")
+    if interested_count and any(term in text for term in ("backend", "back-end", "microservices", "api", "spring boot", "java", "kotlin", "platform", "architect")):
+        delta = min(5, 1 + backend_interest_count)
+        adjustment += delta
+        notes.append(f"interested_backend:+{delta}")
+
+    base_score = int(item.get("score") or 0)
+    item["feedback_adjustment"] = adjustment
+    item["feedback_adjusted_score"] = base_score + adjustment
+    item["feedback_learning_notes"] = ", ".join(notes) if notes else "neutral"
+    return item
+
+
 def save_job(conn, job):
     metadata = normalize_recruiter_metadata(job)
     if not metadata["credibility_notes"]:

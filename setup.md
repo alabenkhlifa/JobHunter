@@ -133,10 +133,11 @@ The user logs in manually and handles any 2FA/CAPTCHA. Automation later reuses t
 Typical flow:
 
 1. `scraper.py --collect-only` collects candidates into local SQLite.
-2. Review/ranking logic filters weak or irrelevant jobs.
-3. Telegram sends at most the best 5 CTA job cards per day.
-4. User taps **Interested**.
-5. `callback_handler.py` marks the job as `interested` and asks the agent to generate a package and prepare the apply draft.
+2. Interested/Skip feedback is summarized from the `job_feedback` table.
+3. Review/ranking logic uses that feedback to demote repeatedly declined patterns and boost similar interested matches.
+4. Telegram sends at most the best 5 CTA job cards per day.
+5. User taps **Interested** or **Skip**.
+6. `callback_handler.py` records feedback/application state and asks the agent to generate a package and prepare the apply draft.
 
 Useful commands:
 

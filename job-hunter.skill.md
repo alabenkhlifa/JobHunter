@@ -79,8 +79,8 @@ For each candidate job, the scraper fetches the full description and extracts:
 3. For each new job passing hard filters and keyword score threshold:
    - Saves to SQLite database
    - Does **not** notify directly
-4. Hermes cron reviews unnotified candidates with an LLM against Ala's profile
-   and rejects low-seniority/student/intern/junior roles, non-Dubai roles,
+4. Hermes cron reviews unnotified candidates with an LLM against Ala's profile,
+   feedback-adjusted score, and `feedback_learning_notes`; it rejects low-seniority/student/intern/junior roles, non-Dubai roles,
    local-only/no-relocation roles, and unrelated frontend/QA/data/ML/DevOps-only roles.
 5. Hermes sends at most the best 5 human-approved recommendations back to Telegram and marks
    reviewed candidate IDs as `notified=1` to avoid repeats.

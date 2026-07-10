@@ -97,6 +97,46 @@ def test_feedback_summary_counts_actions_and_reasons():
     }
 
 
+def test_feedback_learning_demotes_jobs_matching_repeated_skip_reasons():
+    summary = {"by_action": {"skip": 4}, "by_reason": {"wrong stack": 2, "too junior / low seniority": 1, "low-quality or suspicious posting": 1}}
+    job = {
+        "title": "Junior Frontend Developer",
+        "company": "Unknown Staffing",
+        "description": "Entry level frontend role with suspicious vague requirements.",
+        "tech_required": "react, css",
+        "tech_nice_to_have": "",
+        "credibility_notes": "posted by agency/aggregator",
+        "score": 10,
+    }
+
+    learned = scraper.apply_feedback_learning(job, summary)
+
+    assert learned["feedback_adjustment"] < 0
+    assert learned["feedback_adjusted_score"] < job["score"]
+    assert "wrong_stack" in learned["feedback_learning_notes"]
+    assert "too_junior" in learned["feedback_learning_notes"]
+    assert "low_quality" in learned["feedback_learning_notes"]
+
+
+def test_feedback_learning_boosts_jobs_similar_to_interested_backend_roles():
+    summary = {"by_action": {"interested": 3}, "by_reason": {"strong backend fit": 2}}
+    job = {
+        "title": "Senior Backend Engineer",
+        "company": "ExampleCo",
+        "description": "Own backend APIs, architecture, and microservices.",
+        "tech_required": "java, spring boot, microservices, aws",
+        "tech_nice_to_have": "kubernetes",
+        "credibility_notes": "",
+        "score": 12,
+    }
+
+    learned = scraper.apply_feedback_learning(job, summary)
+
+    assert learned["feedback_adjustment"] > 0
+    assert learned["feedback_adjusted_score"] > job["score"]
+    assert "interested_backend" in learned["feedback_learning_notes"]
+
+
 def test_application_stage_tracks_linkedin_type_and_evidence():
     conn = make_conn_with_jobs()
 
