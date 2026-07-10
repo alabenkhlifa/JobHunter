@@ -19,6 +19,11 @@ build/
 .venv/
 venv/
 
+# Browser/session profiles and local automation artifacts
+browser-profiles/
+tmp_cdp_*.py
+open-linkedin-profile.sh
+
 # IDE
 .idea/
 .vscode/
