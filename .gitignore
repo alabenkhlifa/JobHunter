@@ -3,7 +3,6 @@
 
 # Data
 data/*
-!data/master-profile.json
 !data/friend/
 data/friend/*.db
 data/friend/*.log
