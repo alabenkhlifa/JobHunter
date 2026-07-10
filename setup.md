@@ -1,85 +1,84 @@
-# JobHunter setup notes
+# JobHunter setup
 
-This document captures the safe setup flow used to connect JobHunter to a dedicated Gmail mailbox and a logged-in LinkedIn browser profile for approval-gated job applications.
+JobHunter is an open-source, approval-gated job-search and application assistant. It can scrape/review jobs, send Telegram CTA cards, generate tailored application packages, and prepare browser-based applications while stopping at privacy/legal/final-submit gates.
 
-> Security note: do **not** commit OAuth tokens, client secrets, service-account keys, browser profiles, cookies, generated passwords, or application evidence screenshots. Keep those in local ignored paths or a secret manager.
+> Security note: never commit OAuth tokens, client secrets, browser profiles, cookies, generated passwords, resumes, screenshots, databases, or personal profile data. The repo is configured to ignore local runtime data under `data/`, browser profiles, `.env`, logs, and temporary CDP helpers.
 
-## 1. Dedicated Gmail mailbox
+## 1. Install
 
-Create a dedicated mailbox for JobHunter, for example:
-
-```text
-jobs.example@gmail.com
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-This mailbox is used for:
+Run tests:
 
-- ATS account creation and verification links
-- recruiter/application replies
-- rejection/interview notifications
-- sending application emails when explicitly approved
+```bash
+python -m pytest -q tests
+```
 
-Avoid temporary/disposable email providers for job applications because ATS systems and recruiters may distrust or block them.
+## 2. Environment variables
 
-## 2. Why Gmail service accounts are not enough
+Copy `.env.example` to `.env` and fill local secrets:
 
-A Google service account JSON is **not** the right credential for a normal consumer Gmail account.
+```bash
+cp .env.example .env
+```
 
-Service accounts can access Gmail user data only when a Google Workspace administrator configures **domain-wide delegation**. A normal `@gmail.com` account has no Workspace admin who can grant that delegation.
+Required for Telegram notifications/buttons:
 
-For consumer Gmail accounts, use one of these instead:
+```text
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
 
-1. Gmail App Password via IMAP/SMTP, if App Passwords are available.
-2. OAuth 2.0 Desktop Client, if App Passwords are unavailable or API access is preferred.
+Do not commit `.env`.
 
-## 3. Gmail OAuth setup used here
+## 3. Local personal profile data
 
-App Passwords were unavailable for the dedicated Gmail account, so we used a Google OAuth Desktop Client.
+The open-source repo does not include a real candidate profile. Create your own local file, for example:
 
-### Google Cloud setup
+```text
+data/master-profile.json
+```
 
-1. Open Google Cloud Console and create/select a project.
-2. Enable the Gmail API:
+That file is ignored by git. It should contain only truthful resume/profile data. The tailoring flow may reorder or emphasize existing facts, but should not invent companies, dates, degrees, skills, or eligibility answers.
 
-   ```text
-   https://console.cloud.google.com/apis/library/gmail.googleapis.com
-   ```
+## 4. Dedicated application mailbox
 
-3. Configure the OAuth consent screen / Google Auth Platform branding:
-   - App name: `JobHunter`
-   - User support email: the dedicated Gmail account
-   - Developer contact email: the dedicated Gmail account or maintainer email
-   - Audience: External
-   - Publishing status can be Testing or Published
+Use a dedicated mailbox for ATS registration, verification links, recruiter replies, and approved outbound emails.
 
+Avoid disposable email providers because ATS systems and recruiters may distrust them.
+
+### Gmail options
+
+For consumer Gmail accounts:
+
+1. Prefer Gmail App Password + IMAP/SMTP if App Passwords are available.
+2. If App Passwords are unavailable, use OAuth 2.0 Desktop Client.
+
+A Google service account JSON is not enough for a normal `@gmail.com` mailbox. Service accounts can access Gmail user data only when a Google Workspace administrator configures domain-wide delegation.
+
+### Gmail OAuth Desktop Client flow
+
+Google Cloud setup:
+
+1. Create/select a Google Cloud project.
+2. Enable Gmail API.
+3. Configure OAuth consent screen / Google Auth Platform branding.
 4. If the app is in Testing, add the dedicated Gmail account as a test user.
-5. Create an OAuth client:
-   - Credentials → Create Credentials → OAuth client ID
-   - Application type: **Desktop app**
-   - Name: for example `JobHunter Hermes Pi`
+5. Create OAuth client ID with application type **Desktop app**.
 6. Download the OAuth client JSON.
 
-Do **not** use a service-account key for a consumer Gmail mailbox.
-
-### Local OAuth files
-
-Store the downloaded OAuth client JSON outside git, for example:
+Store OAuth files outside the repo, for example:
 
 ```text
-~/.hermes/google_client_secret.json
+~/.jobhunter/google_client_secret.json
+~/.jobhunter/google_token.json
 ```
 
-The resulting OAuth refresh token is also local-only, for example:
-
-```text
-~/.hermes/google_token.json
-```
-
-Both files must remain secret and must not be committed.
-
-### Requested Gmail scopes
-
-Use the smallest useful Gmail scope set:
+Recommended minimal scopes:
 
 ```text
 https://www.googleapis.com/auth/gmail.readonly
@@ -87,113 +86,152 @@ https://www.googleapis.com/auth/gmail.send
 https://www.googleapis.com/auth/gmail.modify
 ```
 
-These allow JobHunter to:
+These allow JobHunter to read verification/reply emails, send approved emails, and mark/label processed messages.
 
-- search/read incoming ATS and recruiter messages
-- send emails when approved
-- mark/label messages as processed
+## 5. LinkedIn browser profile
 
-Do not request Calendar, Drive, Docs, or Sheets scopes unless the product actually needs them.
-
-### OAuth authorization flow
-
-Generate an authorization URL with:
-
-- `response_type=code`
-- OAuth desktop client ID
-- redirect URI matching the client JSON, e.g. `http://localhost`
-- Gmail scopes listed above
-- `access_type=offline`
-- `prompt=consent`
-- PKCE `code_challenge` / `code_verifier`
-
-Open the URL while logged into the dedicated Gmail account. After approval, Google redirects to a localhost URL like:
+Use a dedicated Chromium profile for LinkedIn automation, not your daily browser profile:
 
 ```text
-http://localhost/?state=...&code=...&scope=...
+browser-profiles/linkedin
 ```
 
-The page may fail to load because no local web server is listening. That is expected. Copy the full redirected URL and exchange its `code` for tokens using the saved PKCE verifier.
-
-After exchange, verify the live Gmail profile:
-
-```python
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-
-creds = Credentials.from_authorized_user_file("~/.hermes/google_token.json")
-service = build("gmail", "v1", credentials=creds)
-profile = service.users().getProfile(userId="me").execute()
-print(profile["emailAddress"])
-```
-
-Expected result: the dedicated JobHunter Gmail address.
-
-## 4. LinkedIn persistent browser profile
-
-Use a dedicated Chromium profile for LinkedIn automation, not the user's normal browser profile:
-
-```text
-/home/<user>/JobHunter/browser-profiles/linkedin
-```
-
-Launch Chromium with that profile:
+Example launch command:
 
 ```bash
 chromium \
-  --user-data-dir=/home/<user>/JobHunter/browser-profiles/linkedin \
+  --user-data-dir="$PWD/browser-profiles/linkedin" \
   --profile-directory=Default \
   --no-first-run \
   --disable-dev-shm-usage \
+  --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port=9222 \
   https://www.linkedin.com/login
 ```
 
-The user logs in manually through VNC/desktop access and handles any 2FA/CAPTCHA. The automation later reuses the saved browser session.
+The user logs in manually and handles any 2FA/CAPTCHA. Automation later reuses the saved session through Chrome DevTools Protocol (CDP). Never print cookie values, tokens, or localStorage.
 
-Verification should check only login state, not print cookies or tokens. For example, verify that the profile contains LinkedIn auth cookie names and that an authenticated LinkedIn page loads. Never log cookie values.
+## 6. Job recommendation flow
 
-## 5. Safe LinkedIn application flow
+Typical flow:
 
-When a user marks a job as interested:
+1. `scraper.py --collect-only` collects candidates into local SQLite.
+2. Review/ranking logic filters weak or irrelevant jobs.
+3. Telegram sends one CTA card per recommended job.
+4. User taps **Interested**.
+5. `callback_handler.py` marks the job as `interested` and asks the agent to generate a package and prepare the apply draft.
 
-1. Create/update an `applications` row with stage `interested`.
-2. Generate tailored resume and cover letter.
-3. Open the LinkedIn job using the persistent browser profile.
-4. Detect apply type:
-   - Easy Apply
-   - external/company apply
-   - blocked/login/CAPTCHA/unknown question
-5. Stop before sensitive actions unless the user has approved them.
+Useful commands:
 
-For external apply jobs, LinkedIn may show a prompt like:
-
-```text
-Share your profile?
+```bash
+python scraper.py --collect-only
+python scraper.py --get-job <job_id>
+python scraper.py --mark-interested <job_id>
 ```
 
-Treat this as a user-approval gate. Only click Continue after explicit approval, because it shares the user's LinkedIn profile with the job poster.
+## 7. Auto-apply engine
 
-## 6. External ATS account handling
+The repo includes a safe, approval-gated engine under:
 
-Some external ATS pages require registration before applying. The intended design is:
+```text
+jobhunter_auto_apply/
+```
 
-- create ATS accounts only when needed
-- use the dedicated JobHunter Gmail mailbox
-- generate a strong unique password per ATS/company
-- store credentials in an encrypted local vault, not in plaintext SQLite
-- use the JobHunter database only for non-secret references and workflow state
+Main pieces:
 
-Recommended non-secret application states include:
+| File | Purpose |
+|---|---|
+| `jobhunter_auto_apply/cdp.py` | Minimal standard-library CDP client for Chromium |
+| `jobhunter_auto_apply/engine.py` | Page inspection, approval gates, upload/submit wrappers, DB state recording |
+| `jobhunter_auto_apply/vault.py` | Local encrypted ATS credential vault |
+| `jobhunter_auto_apply/cli.py` | CLI wrapper around inspection/upload/submit actions |
+
+### Inspect current browser page
+
+Start Chromium with remote debugging, open a LinkedIn/ATS application page, then run:
+
+```bash
+python -m jobhunter_auto_apply.cli inspect --job-id <job_id>
+```
+
+This records application state and prints a compact page review. It detects common blockers such as CAPTCHA, phone verification, privacy/T&C text, salary, visa/work-authorization, and final-certification language.
+
+### Upload only with approval
+
+```bash
+python -m jobhunter_auto_apply.cli upload \
+  --job-id <job_id> \
+  --selector 'input[type=file]' \
+  --file data/output/<job_id>/resume.pdf \
+  --approved
+```
+
+Without `--approved`, the engine blocks and records `blocked_resume_upload_approval`.
+
+### Submit only with approval
+
+```bash
+python -m jobhunter_auto_apply.cli submit \
+  --job-id <job_id> \
+  --selector 'button[type=submit]' \
+  --approved
+```
+
+Without `--approved`, the engine blocks and records `blocked_submit_approval`.
+
+## 8. Privacy Notice / Terms & Conditions gates
+
+When an ATS asks for a Privacy Notice, Terms & Conditions, certification, or similar legal acknowledgement:
+
+1. Read the linked notice when accessible.
+2. Summarize only critical concerns:
+   - unusual data sharing
+   - long retention
+   - background/security checks
+   - international data transfers
+   - marketing consent
+   - automated decision-making
+   - broad or unclear consent
+3. Ask the user with clear CTA options, for example:
+   - **Accept Privacy Notice and continue**
+   - **Decline / stop this application**
+4. Save the decision in application state before continuing.
+
+## 9. ATS account credentials
+
+Use the encrypted local vault for generated ATS passwords:
+
+```python
+from jobhunter_auto_apply.vault import CredentialVault
+
+vault = CredentialVault()
+password = vault.put_generated_ats_password("ats/example-company", username="candidate@example.com")
+```
+
+Default local paths:
+
+```text
+~/.jobhunter/secrets/vault.key
+~/.jobhunter/secrets/ats_credentials.json.enc
+```
+
+The key and encrypted vault are outside the repo. Do not store generated passwords in plaintext SQLite or Markdown.
+
+## 10. Application states
+
+Recommended non-secret states in SQLite:
 
 ```text
 interested
 package_generated
+draft_inspected
 draft_ready
 blocked_login_required
 blocked_profile_share_prompt
 blocked_resume_upload_approval
-blocked_unknown_question
-blocked_captcha
+blocked_unknown_questions
+blocked_site_challenge
+blocked_submit_approval
 approved
 submitted
 failed
@@ -205,23 +243,30 @@ Stop and ask the user on:
 - phone verification
 - unknown legal/visa/work-authorization questions
 - salary questions without confirmed defaults
-- final submit, unless the platform/company is explicitly allowlisted
+- privacy/T&C/certification gates
+- final submit, unless explicitly approved for that exact application
 
-## 7. Local files that should be ignored
+## 11. Git hygiene for open source
 
-Add/keep these out of git:
+Keep these out of git:
 
 ```text
+.env
+.venv/
 browser-profiles/
-*.sqlite-wal
-*.sqlite-shm
-/home/*/.hermes/google_client_secret.json
-/home/*/.hermes/google_token.json
-/home/*/.hermes/google_oauth_pending.json
-/home/*/.hermes/google-workspace-venv/
-data/output/
-data/*.db
-data/*.log
+data/
+*.log
+*.backup
+*.backup-*
+tmp_cdp_*.py
+open-linkedin-profile.sh
 ```
 
-For an open-source release, document environment variables and setup steps, but never include real credentials, tokens, cookies, generated resumes, screenshots, or personal profile data.
+Before pushing, run:
+
+```bash
+git status --short
+python -m pytest -q tests
+```
+
+Optionally scan tracked files for real secrets or personal data before release.
