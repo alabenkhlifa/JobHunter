@@ -82,7 +82,7 @@ For each candidate job, the scraper fetches the full description and extracts:
 4. Hermes cron reviews unnotified candidates with an LLM against Ala's profile
    and rejects low-seniority/student/intern/junior roles, non-Dubai roles,
    local-only/no-relocation roles, and unrelated frontend/QA/data/ML/DevOps-only roles.
-5. Hermes sends only human-approved recommendations back to Telegram and marks
+5. Hermes sends at most the best 5 human-approved recommendations back to Telegram and marks
    reviewed candidate IDs as `notified=1` to avoid repeats.
 
 ### When user replies "interested" for a job:

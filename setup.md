@@ -134,7 +134,7 @@ Typical flow:
 
 1. `scraper.py --collect-only` collects candidates into local SQLite.
 2. Review/ranking logic filters weak or irrelevant jobs.
-3. Telegram sends one CTA card per recommended job.
+3. Telegram sends at most the best 5 CTA job cards per day.
 4. User taps **Interested**.
 5. `callback_handler.py` marks the job as `interested` and asks the agent to generate a package and prepare the apply draft.
 

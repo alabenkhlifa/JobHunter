@@ -6,7 +6,7 @@ It can:
 
 - collect job opportunities from supported sources;
 - store and deduplicate jobs in local SQLite;
-- send Telegram CTA cards for review;
+- send at most the best 5 Telegram CTA job cards per day for review;
 - generate truthful tailored resume / cover-letter packages from a local candidate profile;
 - inspect LinkedIn / external ATS application pages through Chromium CDP;
 - upload or submit only after explicit user approval;
