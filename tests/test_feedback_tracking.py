@@ -40,14 +40,14 @@ def make_conn_with_jobs():
     return conn
 
 
-def test_job_inline_keyboard_uses_callback_for_details_so_we_can_learn_feedback():
+def test_job_inline_keyboard_opens_details_url_and_keeps_feedback_callbacks():
     keyboard = scraper.job_inline_keyboard({"id": "li-1", "url": "https://example.com"})
 
     buttons = keyboard["inline_keyboard"][0]
     assert buttons == [
         {"text": "✅ Interested", "callback_data": "interested:li-1"},
         {"text": "❌ Skip", "callback_data": "skip:li-1"},
-        {"text": "📄 Details", "callback_data": "details:li-1"},
+        {"text": "📄 Details", "url": "https://example.com"},
     ]
     assert keyboard["inline_keyboard"][1] == [
         {"text": "Wrong stack", "callback_data": "skip_reason:wrong_stack:li-1"},

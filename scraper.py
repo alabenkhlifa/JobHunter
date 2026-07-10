@@ -1491,13 +1491,15 @@ def job_inline_keyboard(job):
         ("Too senior", "too_senior"),
         ("Low quality", "low_quality"),
     ]
+    primary_row = [
+        {"text": "\u2705 Interested", "callback_data": f"interested:{job['id']}"},
+        {"text": "\u274c Skip", "callback_data": f"skip:{job['id']}"},
+    ]
+    if job.get("url"):
+        primary_row.append({"text": "\U0001f4c4 Details", "url": job["url"]})
     return {
         "inline_keyboard": [
-            [
-                {"text": "\u2705 Interested", "callback_data": f"interested:{job['id']}"},
-                {"text": "\u274c Skip", "callback_data": f"skip:{job['id']}"},
-                {"text": "\U0001f4c4 Details", "callback_data": f"details:{job['id']}"},
-            ],
+            primary_row,
             [
                 {"text": text, "callback_data": f"skip_reason:{code}:{job['id']}"}
                 for text, code in skip_reasons
