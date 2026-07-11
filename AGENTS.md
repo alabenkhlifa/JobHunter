@@ -6,6 +6,7 @@ This repository is intended to be operated by Hermes Agent or another coding age
 
 - Never commit or print real credentials, cookies, OAuth codes, refresh tokens, generated ATS passwords, browser profiles, resumes, screenshots, or SQLite databases.
 - Keep candidate data local in `data/master-profile.json`; use `data/master-profile.example.json` for documentation/tests/examples.
+- For Google integrations, use `jobhunter_integrations.google_tracker` and `jobhunter_integrations.gmail_watcher` with local ignored OAuth token/config paths; never hardcode real spreadsheet IDs, Gmail addresses, or machine paths in tracked code.
 - Do not fabricate resume facts, employment dates, degrees, skills, certifications, salary, work authorization, visa status, or legal declarations.
 - Do not bypass CAPTCHA, anti-bot checks, phone verification, identity verification, or suspicious sites.
 - Stop before final submit unless the user explicitly approves that exact application.

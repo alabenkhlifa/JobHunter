@@ -131,6 +131,17 @@ https://www.googleapis.com/auth/drive.file
 
 `spreadsheets` allows JobHunter to update tracker rows. `drive.file` allows JobHunter to create/upload the specific Drive files it manages, such as uploaded evidence screenshots, sent resumes, and sent cover letters. After the jobs Gmail creates a Drive evidence folder, make sure the main/personal Google account has access to that folder/files so the human owner can open the tracker links.
 
+### Gmail watcher
+
+After OAuth is configured, run the repo-provided watcher module:
+
+```bash
+python -m jobhunter_integrations.gmail_watcher \
+  --google-token "$GOOGLE_TOKEN_PATH"
+```
+
+It prints nothing when there is nothing new to report, so it is safe for script-only cron jobs. Schedule it against the dedicated jobs Gmail account, for example at 10:00 and 15:00.
+
 ## 6. LinkedIn browser profile
 
 Use a dedicated Chromium profile for LinkedIn automation, not your daily browser profile:
@@ -318,7 +329,14 @@ Recommended setup:
 1. Create a Google Sheet from the main/personal Google account.
 2. Share it with the dedicated jobs Gmail account as **Editor**.
 3. Store the spreadsheet ID in local config outside the repo, for example under `~/.hermes/state/` or `~/.jobhunter/`.
-4. Run a local sync script using the jobs Gmail OAuth token.
+4. Run the repo-provided sync module using the jobs Gmail OAuth token:
+
+   ```bash
+   python -m jobhunter_integrations.google_tracker \
+     --spreadsheet-id "$JOBHUNTER_TRACKER_SPREADSHEET_ID" \
+     --google-token "$GOOGLE_TOKEN_PATH"
+   ```
+
 5. Upload evidence screenshots, sent resumes, and sent cover letters to a Drive folder created/managed by the jobs Gmail.
 6. Grant the main/personal Google account access to that Drive folder/files. This is required so the human owner can click `Open resume`, `Open cover letter`, and `Open screenshot` links from the Sheet.
 

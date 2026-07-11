@@ -130,8 +130,8 @@ python -m jobhunter_auto_apply.cli submit \
 | `callback_handler.py` | Telegram button handler |
 | `render_pdf.py` | Resume and cover-letter PDF renderer |
 | `jobhunter_auto_apply/` | Approval-gated browser apply helpers |
-| `~/.hermes/scripts/jobhunter_sync_application_tracker.py` | Local deployment script that syncs application status into the shared Sheet |
-| `~/.hermes/scripts/jobhunter_gmail_watcher.py` | Local deployment script that watches the jobs Gmail mailbox for ATS/recruiter replies |
+| `jobhunter_integrations/google_tracker.py` | Open-source-safe Google Sheets/Drive tracker sync CLI |
+| `jobhunter_integrations/gmail_watcher.py` | Open-source-safe Gmail watcher CLI for recruiter/ATS replies |
 | `job-hunter.skill.md` | Hermes skill/runbook for this project |
 | `setup.md` | Full setup guide |
 | `data/master-profile.example.json` | Safe candidate-profile schema example |
@@ -151,6 +151,23 @@ Recommended permissions:
 4. Files uploaded by the jobs Gmail, such as resumes, cover letters, and screenshots, must also be shared with the main/personal Google account so the owner can open links from the Sheet.
 
 Recommended formatting includes wrapped text, taller rows, frozen headers, `dd/mm/yyyy hh:mm`-style dates, and status colors such as green for `submitted`, red for blockers/failures, blue for package/draft states, purple for `interested`, and grey for `skipped`.
+
+Run a tracker sync:
+
+```bash
+python -m jobhunter_integrations.google_tracker \
+  --spreadsheet-id "$JOBHUNTER_TRACKER_SPREADSHEET_ID" \
+  --google-token "$GOOGLE_TOKEN_PATH"
+```
+
+Run the Gmail watcher once:
+
+```bash
+python -m jobhunter_integrations.gmail_watcher \
+  --google-token "$GOOGLE_TOKEN_PATH"
+```
+
+Both commands are safe to schedule from cron/Hermes cron. They read secrets only from local ignored files/env variables.
 
 ## Safety model
 
