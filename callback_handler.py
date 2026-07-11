@@ -148,7 +148,7 @@ Please generate a tailored resume and cover letter, record application stage <co
 - detect Easy Apply vs external apply
 - reuse only confirmed cached answers
 - save screenshots/evidence for blockers or draft-ready state
-- stop before final Submit until Ala approves."""
+- stop before final Submit until the user approves."""
 
 
 def build_details_message(job):

@@ -61,7 +61,7 @@ def test_gmail_watcher_relevance_uses_keywords_and_job_terms():
 def test_gmail_watcher_ignores_google_sheet_share_mail_even_with_application_word():
     jobs = [{"title": "Backend Engineer", "company": "ExampleCo"}]
     text = (
-        "Ala Khlifa via Google Sheets drive-shares-dm-noreply@google.com "
+        "Candidate User via Google Sheets drive-shares-dm-noreply@google.com "
         "Spreadsheet shared with you: Job Applications has invited you to edit "
         "the following spreadsheet: Job Applications"
     )

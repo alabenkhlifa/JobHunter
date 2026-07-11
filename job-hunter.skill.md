@@ -79,7 +79,7 @@ For each candidate job, the scraper fetches the full description and extracts:
 3. For each new job passing hard filters and keyword score threshold:
    - Saves to SQLite database
    - Does **not** notify directly
-4. Hermes cron reviews unnotified candidates with an LLM against Ala's profile,
+4. Hermes cron reviews unnotified candidates with an LLM against the local candidate profile,
    feedback-adjusted score, and `feedback_learning_notes`; it rejects low-seniority/student/intern/junior roles, non-Dubai roles,
    local-only/no-relocation roles, and unrelated frontend/QA/data/ML/DevOps-only roles.
 5. Hermes sends at most the best 5 human-approved recommendations back to Telegram and marks
@@ -238,7 +238,7 @@ pip install -r requirements.txt
 cp .env.example .env  # Edit with real values
 
 # Daily at 8 AM
-0 8 * * * cd /home/pi/JobScrapper && .venv/bin/python3 scraper.py >> data/cron.log 2>&1
+0 8 * * * cd /path/to/JobHunter && .venv/bin/python3 scraper.py >> data/cron.log 2>&1
 ```
 
 ## Resume Tailoring Rules (MANDATORY)

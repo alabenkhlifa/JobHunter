@@ -4,6 +4,18 @@
 # Data
 data/*
 !data/master-profile.example.json
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated/private documents and screenshots
+*.pdf
+*.doc
+*.docx
+*.png
+*.jpg
+*.jpeg
+*.webp
 
 # Python
 __pycache__/
@@ -24,9 +36,11 @@ venv/
 browser-profiles/
 tmp_cdp_*.py
 open-linkedin-profile.sh
+.claude/settings.local.json
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+.DS_Store

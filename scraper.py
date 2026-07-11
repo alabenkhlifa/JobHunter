@@ -143,114 +143,6 @@ def load_profile_config(profile_name):
     return merged
 
 
-# ── ntfy Notifications ───────────────────────────────────────────────────────
-
-
-def send_ntfy(topic, title, message, tags=None):
-    """Send a notification via ntfy.sh."""
-    headers = {"Title": title}
-    if tags:
-        headers["Tags"] = ",".join(tags) if isinstance(tags, list) else tags
-    try:
-        resp = requests.post(
-            f"https://ntfy.sh/{topic}",
-            data=message.encode("utf-8"),
-            headers=headers,
-            timeout=15,
-        )
-        if resp.status_code != 200:
-            log.warning(f"ntfy returned {resp.status_code}: {resp.text}")
-            return False
-        return True
-    except requests.RequestException as e:
-        log.warning(f"ntfy send failed: {e}")
-        return False
-
-
-def send_ntfy_file(topic, file_path, filename=None):
-    """Send a file via ntfy.sh PUT upload."""
-    file_path = Path(file_path)
-    fname = filename or file_path.name
-    try:
-        with open(file_path, "rb") as f:
-            resp = requests.put(
-                f"https://ntfy.sh/{topic}",
-                data=f,
-                headers={"Filename": fname},
-                timeout=30,
-            )
-        if resp.status_code != 200:
-            log.warning(f"ntfy file upload returned {resp.status_code}: {resp.text}")
-            return False
-        return True
-    except (requests.RequestException, OSError) as e:
-        log.warning(f"ntfy file upload failed: {e}")
-        return False
-
-
-def format_job_message_plain(job):
-    """Format a job as plain text for ntfy (includes job ID for reply flow)."""
-    score = job["score"]
-    if score >= 18:
-        tier = "HOT MATCH"
-    elif score >= 15:
-        tier = "STRONG MATCH"
-    else:
-        tier = "GOOD MATCH"
-
-    wm = job.get("work_model", "on-site")
-    exp = job.get("min_experience", -1)
-    sal = job.get("salary", "")
-    age = job_age(job.get("date_posted", ""))
-    req = job.get("tech_required", "")
-    nice = job.get("tech_nice_to_have", "")
-    bd = job.get("score_breakdown", "")
-
-    lines = [
-        f"{tier} (Score: {score})",
-        "",
-        f"Job: {job['title']}",
-        f"Company: {job['company']}",
-        f"Location: {job['location']}",
-        f"Source: {job['source']}",
-    ]
-    if wm != "on-site":
-        lines.append(f"Work: {wm.capitalize()}")
-    if age:
-        lines.append(f"Posted: {age}")
-    if exp > 0:
-        lines.append(f"Experience: {exp}+ years")
-    if sal:
-        lines.append(f"Salary: {sal}")
-    if bd:
-        lines.append(f"Score: {bd}")
-    if req:
-        lines.append(f"\nRequired: {req}")
-    if nice:
-        lines.append(f"Nice to have: {nice}")
-    lines.extend(["", job["url"], "", f"Reply with: {job['id']}"])
-    return "\n".join(lines)
-
-
-def notify_new_jobs_ntfy(topic, jobs):
-    """Send job notifications via ntfy."""
-    if not jobs:
-        return
-
-    sorted_jobs = sorted(jobs, key=lambda j: j["score"], reverse=True)
-    send_ntfy(topic, "Job Hunter", f"{len(sorted_jobs)} new matching job(s) found!", tags=["briefcase"])
-    time.sleep(1)
-
-    for job in sorted_jobs:
-        msg = format_job_message_plain(job)
-        title = f"{job['title']} @ {job['company']}"
-        if send_ntfy(topic, title, msg, tags=["mag"]):
-            log.info(f"Sent (ntfy): {job['title']} @ {job['company']}")
-        else:
-            log.warning(f"Failed to send (ntfy): {job['title']}")
-        time.sleep(1)
-
-
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -479,14 +371,14 @@ def cache_application_answer(
     question_text,
     answer,
     *,
-    answer_source="ala_confirmed",
+    answer_source="user_confirmed",
     confirmed=True,
     now=None,
 ):
-    """Store a reusable answer only after Ala/user confirmation.
+    """Store a reusable answer only after user confirmation.
 
     Borrowed from LinkedIn bot answer caches, but safer: callers should use this
-    only for stable facts Ala confirmed. Unknown legal/visa/salary questions must
+    only for stable facts the user confirmed. Unknown legal/visa/salary questions must
     be asked, not invented.
     """
     init_application_tracking(conn)
@@ -575,7 +467,7 @@ def record_job_feedback(conn, job_id, action, *, reason=None, source="manual", n
 
 
 def get_feedback_summary(conn):
-    """Return compact counts showing what Ala tends to skip or like."""
+    """Return compact counts showing what the user tends to skip or like."""
     init_feedback_tracking(conn)
     by_action = _dict_counts(
         conn.execute(
@@ -1540,8 +1432,8 @@ def parse_args():
     parser.add_argument("--profile", metavar="NAME", help="Load profile from data/<NAME>/config.json")
     parser.add_argument("--collect-only", action="store_true", help="Scrape and store matches without sending notifications")
     parser.add_argument("--get-job", metavar="ID", help="Print job JSON to stdout")
-    parser.add_argument("--send-doc", metavar="PATH", help="Send document via Telegram/ntfy")
-    parser.add_argument("--send-msg", metavar="TEXT", help="Send message via Telegram/ntfy")
+    parser.add_argument("--send-doc", metavar="PATH", help="Send document via Telegram")
+    parser.add_argument("--send-msg", metavar="TEXT", help="Send message via Telegram")
     parser.add_argument("--mark-interested", metavar="ID", help="Mark job as interested in DB")
     parser.add_argument("--job-stats", action="store_true", help="Print JSON backlog/status counters")
     parser.add_argument("--archive-stale-days", type=int, metavar="DAYS", help="Archive unnotified new jobs older than DAYS")
@@ -1607,51 +1499,29 @@ def main():
         }, indent=2, sort_keys=True))
         return
 
-    # Determine notification backend
-    notif_config = CONFIG.get("notification", {})
-    notif_type = notif_config.get("type", "telegram")
-
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    ntfy_publish_topic = notif_config.get("publish_topic")
 
     if args.send_doc:
-        if notif_type == "ntfy":
-            if not ntfy_publish_topic:
-                print("ntfy publish_topic not configured in profile", file=sys.stderr)
-                sys.exit(1)
-            ok = send_ntfy_file(ntfy_publish_topic, args.send_doc, filename=Path(args.send_doc).name)
-        else:
-            if not token or not chat_id:
-                print("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set", file=sys.stderr)
-                sys.exit(1)
-            ok = send_telegram_document(token, chat_id, args.send_doc, args.caption)
+        if not token or not chat_id:
+            print("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set", file=sys.stderr)
+            sys.exit(1)
+        ok = send_telegram_document(token, chat_id, args.send_doc, args.caption)
         sys.exit(0 if ok else 1)
 
     if args.send_msg:
-        if notif_type == "ntfy":
-            if not ntfy_publish_topic:
-                print("ntfy publish_topic not configured in profile", file=sys.stderr)
-                sys.exit(1)
-            ok = send_ntfy(ntfy_publish_topic, "Job Hunter", args.send_msg)
-        else:
-            if not token or not chat_id:
-                print("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set", file=sys.stderr)
-                sys.exit(1)
-            ok = send_telegram(token, chat_id, args.send_msg)
+        if not token or not chat_id:
+            print("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set", file=sys.stderr)
+            sys.exit(1)
+        ok = send_telegram(token, chat_id, args.send_msg)
         sys.exit(0 if ok else 1)
 
     # ── Normal scraping mode ──────────────────────────────────────────────────
     setup_logging()
 
-    if notif_type == "ntfy":
-        notifications_enabled = bool(ntfy_publish_topic)
-        if not notifications_enabled:
-            log.warning("ntfy publish_topic not configured — running without notifications")
-    else:
-        notifications_enabled = bool(token and chat_id)
-        if not notifications_enabled:
-            log.warning("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — running without notifications")
+    notifications_enabled = bool(token and chat_id)
+    if not notifications_enabled:
+        log.warning("TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set — running without notifications")
 
     log.info("Starting job scraper")
 
@@ -1779,10 +1649,7 @@ def main():
     elif new_jobs:
         log.info(f"Found {len(new_jobs)} new matching job(s)")
         if notifications_enabled:
-            if notif_type == "ntfy":
-                notify_new_jobs_ntfy(ntfy_publish_topic, new_jobs)
-            else:
-                notify_new_jobs(token, chat_id, new_jobs)
+            notify_new_jobs(token, chat_id, new_jobs)
             mark_notified(conn, [j["id"] for j in new_jobs])
         else:
             log.info("Telegram disabled — printing results to console")

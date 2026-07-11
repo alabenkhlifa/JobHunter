@@ -82,7 +82,7 @@ def test_record_application_stage_inserts_then_updates_latest_state():
         conn,
         "li-1",
         "interested",
-        notes="Ala tapped Interested",
+        notes="User tapped Interested",
         now=now,
     )
     second = scraper.record_application_stage(

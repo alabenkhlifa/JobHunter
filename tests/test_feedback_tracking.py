@@ -169,7 +169,7 @@ def test_application_answer_cache_reuses_only_confirmed_answers():
     conn = make_conn_with_jobs()
 
     scraper.cache_application_answer(conn, "Are you willing to relocate?", "Yes", confirmed=True)
-    scraper.cache_application_answer(conn, "Expected salary?", "Ask Ala", confirmed=False)
+    scraper.cache_application_answer(conn, "Expected salary?", "Ask user", confirmed=False)
 
     cached_relocation = scraper.get_cached_application_answer(conn, "Are you willing to relocate?")
     cached_salary = scraper.get_cached_application_answer(conn, "Expected salary?", confirmed_only=False)
@@ -178,4 +178,4 @@ def test_application_answer_cache_reuses_only_confirmed_answers():
     assert cached_relocation["answer"] == "Yes"
     assert scraper.get_cached_application_answer(conn, "Expected salary?") is None
     assert cached_salary is not None
-    assert cached_salary["answer"] == "Ask Ala"
+    assert cached_salary["answer"] == "Ask user"
