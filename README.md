@@ -17,6 +17,8 @@ It can:
 
 JobHunter is intentionally **not** a blind mass-apply bot. It stops on privacy notices, T&C, salary, visa/work authorization, CAPTCHA/security checks, and final submit unless the user explicitly approves.
 
+![Sanitized Telegram job recommendation card example](assets/telegram-job-card-example.svg)
+
 ## Quick start
 
 ```bash
@@ -142,6 +144,12 @@ python -m jobhunter_auto_apply.cli submit \
 JobHunter can maintain a Google Sheet tracker that mirrors local application state from SQLite. The Sheet is intended for humans; the database remains the automation source of truth.
 
 Typical tracker fields include application date, status, company/title, platform, job/application URLs, linked resume, linked cover letter, linked evidence screenshot, notes, and next action.
+
+![Sanitized application tracker sheet example](assets/application-tracker-example.svg)
+
+The tracker can also link generated artifacts and evidence files so the main account can open application packages without accessing local runtime data directly.
+
+![Sanitized tracker attachment links and screenshot preview](assets/application-tracker-attachments-example.svg)
 
 Recommended permissions:
 

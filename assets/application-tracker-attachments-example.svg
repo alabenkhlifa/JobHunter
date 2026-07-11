@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+  <title id="title">Sanitized application tracker attachment example</title>
+  <desc id="desc">Spreadsheet columns showing job URLs, application URLs, resume links, cover letter links, package folders, evidence screenshots, notes, and a file preview popover.</desc>
+  <rect width="1280" height="360" fill="#ffffff"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#111827">
+    <rect x="0" y="0" width="1280" height="24" fill="#f3f4f6"/>
+    <g fill="#374151" font-size="12">
+      <text x="15" y="55">1</text>
+      <text x="15" y="110">2</text>
+      <text x="15" y="185">3</text>
+      <text x="15" y="260">4</text>
+      <text x="15" y="335">5</text>
+    </g>
+    <g fill="#374151" font-size="13" font-weight="700" text-anchor="middle">
+      <text x="260" y="18">G</text>
+      <text x="575" y="18">H</text>
+      <text x="815" y="18">I</text>
+      <text x="920" y="18">J</text>
+      <text x="1055" y="18">K</text>
+      <text x="1188" y="18">L</text>
+    </g>
+
+    <rect x="34" y="24" width="1246" height="44" fill="#dbe7fb"/>
+    <rect x="34" y="68" width="1246" height="75" fill="#dff1d8"/>
+    <rect x="34" y="143" width="1246" height="75" fill="#dce9ff"/>
+    <rect x="34" y="218" width="1246" height="75" fill="#f7d6cc"/>
+    <rect x="34" y="293" width="1246" height="59" fill="#dce9ff"/>
+
+    <g stroke="#c7cdd8" stroke-width="1">
+      <line x1="34" y1="0" x2="34" y2="360"/>
+      <line x1="350" y1="0" x2="350" y2="360"/>
+      <line x1="720" y1="0" x2="720" y2="360"/>
+      <line x1="840" y1="0" x2="840" y2="360"/>
+      <line x1="955" y1="0" x2="955" y2="360"/>
+      <line x1="1160" y1="0" x2="1160" y2="360"/>
+      <line x1="1238" y1="0" x2="1238" y2="360"/>
+      <line x1="1280" y1="0" x2="1280" y2="360"/>
+      <line x1="0" y1="24" x2="1280" y2="24"/>
+      <line x1="0" y1="68" x2="1280" y2="68"/>
+      <line x1="0" y1="143" x2="1280" y2="143"/>
+      <line x1="0" y1="218" x2="1280" y2="218"/>
+      <line x1="0" y1="293" x2="1280" y2="293"/>
+      <line x1="0" y1="352" x2="1280" y2="352"/>
+    </g>
+
+    <g font-size="18" font-weight="700">
+      <text x="356" y="52">Application URL</text>
+      <text x="726" y="44">Resume</text>
+      <text x="726" y="62">Sent</text>
+      <text x="846" y="44">Cover Letter</text>
+      <text x="846" y="62">Sent</text>
+      <text x="961" y="52">Package Folder</text>
+      <text x="1166" y="44">Evidence</text>
+      <text x="1166" y="62">Screenshot</text>
+      <text x="1244" y="52">Notes</text>
+    </g>
+
+    <g font-size="16">
+      <text x="40" y="96" fill="#1d4ed8">https://linkedin.example/jobs/123</text>
+      <text x="356" y="96" fill="#1d4ed8">https://ats.example.com/apply/123</text>
+      <text x="726" y="96" fill="#1d4ed8">Open resume</text>
+      <text x="846" y="96" fill="#1d4ed8">Open cover letter</text>
+      <text x="961" y="96">data/output/job-123</text>
+      <text x="1166" y="96" fill="#1d4ed8">Open</text>
+      <text x="1166" y="116" fill="#1d4ed8">screenshot</text>
+      <text x="1244" y="96">submitted</text>
+
+      <text x="40" y="171" fill="#1d4ed8">https://linkedin.example/jobs/456</text>
+      <text x="356" y="171" fill="#1d4ed8">https://linkedin.example/jobs/456</text>
+      <text x="726" y="171" fill="#1d4ed8">Open resume</text>
+      <text x="846" y="171" fill="#1d4ed8">Open cover letter</text>
+      <text x="961" y="171">data/output/job-456</text>
+      <text x="1166" y="171" fill="#1d4ed8">Open</text>
+      <text x="1166" y="191" fill="#1d4ed8">screenshot</text>
+      <text x="1244" y="171">tailored package ready</text>
+
+      <text x="40" y="246" fill="#1d4ed8">https://linkedin.example/jobs/789</text>
+      <text x="356" y="246" fill="#1d4ed8">https://ats.example.com/apply/789</text>
+      <text x="726" y="246" fill="#1d4ed8">Open resume</text>
+      <text x="846" y="246" fill="#1d4ed8">Open cover letter</text>
+      <text x="961" y="246">data/output/job-789</text>
+      <text x="1166" y="246" fill="#1d4ed8">Open</text>
+      <text x="1166" y="266" fill="#1d4ed8">screenshot</text>
+      <text x="1244" y="246">login required</text>
+
+      <text x="40" y="321" fill="#1d4ed8">https://example.com/jobs/321</text>
+      <text x="356" y="321" fill="#1d4ed8">https://ats.example.com/apply/321</text>
+      <text x="726" y="321" fill="#1d4ed8">Open resume</text>
+      <text x="846" y="321" fill="#1d4ed8">Open cover letter</text>
+      <text x="961" y="321">data/output/job-321</text>
+      <text x="1166" y="321" fill="#1d4ed8">Open</text>
+    </g>
+
+    <g>
+      <rect x="870" y="110" width="330" height="210" rx="8" fill="#ffffff" stroke="#c7cdd8"/>
+      <rect x="870" y="110" width="330" height="34" rx="8" fill="#f9fafb"/>
+      <text x="902" y="133" font-size="14" font-weight="700" fill="#2563eb">job-123-success-screenshot.png</text>
+      <text x="1066" y="133" font-size="18" fill="#374151">⧉</text>
+      <text x="1098" y="133" font-size="18" fill="#374151">✎</text>
+      <text x="1130" y="133" font-size="18" fill="#374151">⌁</text>
+      <rect x="890" y="154" width="290" height="112" rx="6" fill="#f3f4f6" stroke="#d1d5db"/>
+      <text x="908" y="184" font-size="16" fill="#374151">Application Success</text>
+      <circle cx="1035" cy="214" r="17" fill="#e5e7eb" stroke="#6b7280" stroke-width="2"/>
+      <path d="M1026 214 l7 7 l13 -16" fill="none" stroke="#111827" stroke-width="3"/>
+      <text x="982" y="252" font-size="11" fill="#4b5563">Screenshot evidence preview</text>
+      <text x="900" y="296" font-size="14" fill="#374151">Shared with the main account</text>
+    </g>
+  </g>
+</svg>

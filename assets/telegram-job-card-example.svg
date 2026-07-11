@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="980" viewBox="0 0 720 980" role="img" aria-labelledby="title desc">
+  <title id="title">Sanitized Telegram job recommendation card example</title>
+  <desc id="desc">A Telegram-style job recommendation message with ranking, fit label, location, source, score, reasons, concerns, verdict, link, and Interested Skip Details buttons.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#112235"/>
+      <stop offset="1" stop-color="#07131f"/>
+    </linearGradient>
+  </defs>
+  <rect width="720" height="980" fill="url(#bg)"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <rect x="0" y="0" width="720" height="84" fill="#1f3348"/>
+    <circle cx="58" cy="42" r="30" fill="#2a4660"/>
+    <path d="M66 27 L50 42 L66 57" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="150" cy="42" r="38" fill="#e75a8b"/>
+    <text x="150" y="52" text-anchor="middle" font-size="28" font-weight="700" fill="#ffffff">JH</text>
+    <text x="206" y="36" font-size="28" font-weight="700" fill="#ffffff">JobHunter Bot</text>
+    <text x="206" y="64" font-size="20" fill="#a7b3c2">bot</text>
+    <circle cx="664" cy="42" r="30" fill="#2a4660"/>
+    <text x="664" y="54" text-anchor="middle" font-size="36" fill="#ffffff">⋮</text>
+
+    <rect x="18" y="112" width="684" height="56" rx="18" fill="#1f3348"/>
+    <text x="360" y="148" text-anchor="middle" font-size="22" fill="#28a7ff">📷 Set Profile Photo</text>
+
+    <rect x="0" y="208" width="720" height="44" fill="#223443"/>
+    <text x="360" y="238" text-anchor="middle" font-size="23" font-weight="700" fill="#ffffff">Unread Messages</text>
+
+    <rect x="22" y="274" width="600" height="552" rx="18" fill="#213342"/>
+    <text x="44" y="318" font-size="29" font-weight="700" fill="#ffffff">#1 Strong fit: Senior Backend Engineer</text>
+    <text x="44" y="354" font-size="29" font-weight="700" fill="#ffffff">@ ExampleCloud</text>
+    <text x="44" y="397" font-size="29" font-weight="700" fill="#ffffff">Location:</text>
+    <text x="176" y="397" font-size="29" fill="#ffffff">Dubai, United Arab Emirates</text>
+    <text x="44" y="448" font-size="29" font-weight="700" fill="#ffffff">Meta:</text>
+    <text x="130" y="448" font-size="29" fill="#ffffff">Source: LinkedIn · Scraper score: 18</text>
+    <text x="44" y="490" font-size="29" font-weight="700" fill="#ffffff">Why chosen:</text>
+    <text x="44" y="532" font-size="28" fill="#ffffff">• Backend/platform role with APIs,</text>
+    <text x="44" y="568" font-size="28" fill="#ffffff">  microservices, cloud, and ownership.</text>
+    <text x="44" y="618" font-size="28" fill="#ffffff">• Senior scope fits the candidate profile</text>
+    <text x="44" y="654" font-size="28" fill="#ffffff">  and recent feedback patterns.</text>
+    <text x="44" y="704" font-size="29" font-weight="700" fill="#ffffff">Concerns:</text>
+    <text x="44" y="746" font-size="28" fill="#ffffff">• Verify visa, relocation, salary, and</text>
+    <text x="44" y="782" font-size="28" fill="#ffffff">  final application questions manually.</text>
+    <text x="44" y="830" font-size="29" font-weight="700" fill="#ffffff">Verdict:</text>
+    <text x="160" y="830" font-size="29" fill="#ffffff">Strong fit</text>
+    <text x="44" y="876" font-size="29" fill="#8bd3ff" text-decoration="underline">https://linkedin.example/jobs/123456</text>
+    <text x="526" y="810" font-size="20" fill="#9aa8b7">6:26 PM</text>
+
+    <g font-size="28" font-weight="700" fill="#ffffff">
+      <rect x="22" y="838" width="220" height="74" rx="10" fill="#223747"/>
+      <text x="48" y="886">✅ Interested</text>
+      <rect x="252" y="838" width="220" height="74" rx="10" fill="#223747"/>
+      <text x="314" y="886">❌ Skip</text>
+      <rect x="482" y="838" width="220" height="74" rx="10" fill="#223747"/>
+      <text x="526" y="886">📄 Details</text>
+      <rect x="22" y="922" width="162" height="48" rx="10" fill="#223747"/>
+      <text x="36" y="955" font-size="24">Wrong stack</text>
+      <rect x="194" y="922" width="162" height="48" rx="10" fill="#223747"/>
+      <text x="214" y="955" font-size="24">Too junior</text>
+      <rect x="366" y="922" width="162" height="48" rx="10" fill="#223747"/>
+      <text x="382" y="955" font-size="24">Too senior</text>
+      <rect x="538" y="922" width="162" height="48" rx="10" fill="#223747"/>
+      <text x="552" y="955" font-size="24">Low quality</text>
+    </g>
+  </g>
+</svg>
