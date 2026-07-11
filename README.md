@@ -167,7 +167,7 @@ python -m jobhunter_integrations.gmail_watcher \
   --google-token "$GOOGLE_TOKEN_PATH"
 ```
 
-Both commands are safe to schedule from cron/Hermes cron. They read secrets only from local ignored files/env variables.
+Both commands are safe to schedule from cron/Hermes cron. They read secrets only from local ignored files/env variables. The Gmail watcher marks inspected messages as read so the dedicated jobs mailbox stays clean.
 
 ## Safety model
 

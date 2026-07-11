@@ -140,7 +140,7 @@ python -m jobhunter_integrations.gmail_watcher \
   --google-token "$GOOGLE_TOKEN_PATH"
 ```
 
-It prints nothing when there is nothing new to report, so it is safe for script-only cron jobs. Schedule it against the dedicated jobs Gmail account, for example at 10:00 and 15:00.
+It prints nothing when there is nothing new to report, so it is safe for script-only cron jobs. It marks every inspected message as read to keep the jobs mailbox clean. Schedule it against the dedicated jobs Gmail account, for example at 10:00 and 15:00.
 
 ## 6. LinkedIn browser profile
 

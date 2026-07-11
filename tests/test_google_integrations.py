@@ -56,3 +56,53 @@ def test_gmail_watcher_relevance_uses_keywords_and_job_terms():
 
     noisy, _ = gmail_watcher.is_relevant("Weekly newsletter unsubscribe promotion", jobs)
     assert not noisy
+
+
+def test_gmail_watcher_ignores_google_sheet_share_mail_even_with_application_word():
+    jobs = [{"title": "Backend Engineer", "company": "ExampleCo"}]
+    text = (
+        "Ala Khlifa via Google Sheets drive-shares-dm-noreply@google.com "
+        "Spreadsheet shared with you: Job Applications has invited you to edit "
+        "the following spreadsheet: Job Applications"
+    )
+    relevant, reasons = gmail_watcher.is_relevant(text, jobs)
+    assert not relevant
+    assert reasons == []
+
+
+class FakeModifyCall:
+    def __init__(self, calls):
+        self.calls = calls
+    def execute(self):
+        self.calls.append("execute")
+
+
+class FakeMessages:
+    def __init__(self):
+        self.args = None
+        self.calls = []
+    def modify(self, **kwargs):
+        self.args = kwargs
+        return FakeModifyCall(self.calls)
+
+
+class FakeUsers:
+    def __init__(self):
+        self.messages_obj = FakeMessages()
+    def messages(self):
+        return self.messages_obj
+
+
+class FakeService:
+    def __init__(self):
+        self.users_obj = FakeUsers()
+    def users(self):
+        return self.users_obj
+
+
+def test_gmail_watcher_marks_processed_message_read():
+    service = FakeService()
+    gmail_watcher.mark_message_read(service, "msg-1")
+    messages = service.users_obj.messages_obj
+    assert messages.args == {"userId": "me", "id": "msg-1", "body": {"removeLabelIds": ["UNREAD"]}}
+    assert messages.calls == ["execute"]

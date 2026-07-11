@@ -32,6 +32,15 @@ POSITIVE_KEYWORDS = [
     "your application", "job application", "workday", "greenhouse", "lever", "avature",
 ]
 NEGATIVE_NOISE = ["newsletter", "unsubscribe", "promotion", "marketing", "security alert"]
+GOOGLE_SHARE_NOISE = [
+    "drive-shares-dm-noreply@google.com",
+    "via google sheets",
+    "spreadsheet shared with you",
+    "shared a spreadsheet",
+    "has invited you to edit the following spreadsheet",
+    "google sheets",
+    "google drive",
+]
 
 
 def default_repo_root() -> Path:
@@ -138,6 +147,8 @@ def job_terms(jobs: list[dict[str, str]]) -> set[str]:
 def is_relevant(message_text: str, jobs: list[dict[str, str]]) -> tuple[bool, list[str]]:
     text = normalize(message_text)
     reasons: list[str] = []
+    if any(noise in text for noise in GOOGLE_SHARE_NOISE):
+        return False, []
     if any(noise in text for noise in NEGATIVE_NOISE) and not any(k in text for k in POSITIVE_KEYWORDS):
         return False, []
     hits = [k for k in POSITIVE_KEYWORDS if k in text]
@@ -177,6 +188,19 @@ def format_alert(matches: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def mark_message_read(service, msg_id: str) -> None:
+    """Mark a message read after the watcher has inspected it."""
+    try:
+        service.users().messages().modify(
+            userId="me",
+            id=msg_id,
+            body={"removeLabelIds": ["UNREAD"]},
+        ).execute()
+    except Exception:
+        # Do not make notification checks fail solely because label cleanup failed.
+        pass
+
+
 def check_mail(args: argparse.Namespace) -> list[dict[str, Any]]:
     service = gmail_service(args.google_token)
     jobs = interested_jobs(args.db_path)
@@ -190,6 +214,7 @@ def check_mail(args: argparse.Namespace) -> list[dict[str, Any]]:
         if msg_id in seen:
             continue
         summary = message_summary(service, msg_id)
+        mark_message_read(service, msg_id)
         relevant, reasons = is_relevant(summary["text"], jobs)
         new_seen.add(msg_id)
         if relevant:
