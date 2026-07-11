@@ -62,11 +62,25 @@ cp data/master-profile.example.json data/master-profile.json
 
 `data/master-profile.json` is ignored by git. It should contain only truthful resume/profile data. The tailoring flow may reorder or emphasize existing facts, but should not invent companies, dates, degrees, skills, or eligibility answers.
 
-## 5. Dedicated application mailbox
+## 5. Dedicated application mailbox and dual-account model
 
-Use a dedicated mailbox for ATS registration, verification links, recruiter replies, and approved outbound emails.
+Use a dedicated jobs/agent mailbox for ATS registration, verification links, recruiter replies, and approved outbound emails.
 
 Avoid disposable email providers because ATS systems and recruiters may distrust them.
+
+JobHunter works best with **two Google accounts**:
+
+| Account | Purpose |
+|---|---|
+| Main/personal Google account | Human-owned account. Owns/views the tracker sheet and Drive evidence folder. |
+| Dedicated jobs/agent Gmail account | Automation account used by JobHunter for Gmail, Sheets, and Drive API calls. |
+
+Recommended pattern:
+
+1. Create the tracker spreadsheet from the main/personal account.
+2. Share that spreadsheet with the dedicated jobs Gmail as **Editor**.
+3. Authorize JobHunter OAuth using the dedicated jobs Gmail account, not the personal account.
+4. When JobHunter creates/uploads files into a Drive evidence folder through the jobs Gmail, grant the main/personal account access to that folder/files. Otherwise the tracker may contain Drive links that the human owner cannot open.
 
 ### Gmail options
 
@@ -82,7 +96,10 @@ A Google service account JSON is not enough for a normal `@gmail.com` mailbox. S
 Google Cloud setup:
 
 1. Create/select a Google Cloud project.
-2. Enable Gmail API.
+2. Enable the required APIs:
+   - Gmail API
+   - Google Sheets API, if using the application tracker
+   - Google Drive API, if uploading/linking resumes, cover letters, or screenshots
 3. Configure OAuth consent screen / Google Auth Platform branding.
 4. If the app is in Testing, add the dedicated Gmail account as a test user.
 5. Create OAuth client ID with application type **Desktop app**.
@@ -95,7 +112,7 @@ Store OAuth files outside the repo, for example:
 ~/.jobhunter/google_token.json
 ```
 
-Recommended minimal scopes:
+Recommended Gmail-only scopes:
 
 ```text
 https://www.googleapis.com/auth/gmail.readonly
@@ -104,6 +121,15 @@ https://www.googleapis.com/auth/gmail.modify
 ```
 
 These allow JobHunter to read verification/reply emails, send approved emails, and mark/label processed messages.
+
+If using the shared Google Sheet application tracker, add:
+
+```text
+https://www.googleapis.com/auth/spreadsheets
+https://www.googleapis.com/auth/drive.file
+```
+
+`spreadsheets` allows JobHunter to update tracker rows. `drive.file` allows JobHunter to create/upload the specific Drive files it manages, such as uploaded evidence screenshots, sent resumes, and sent cover letters. After the jobs Gmail creates a Drive evidence folder, make sure the main/personal Google account has access to that folder/files so the human owner can open the tracker links.
 
 ## 6. LinkedIn browser profile
 
@@ -264,7 +290,55 @@ Stop and ask the user on:
 - privacy/T&C/certification gates
 - final submit, unless explicitly approved for that exact application
 
-## 12. Git hygiene for open source
+## 12. Shared application tracker
+
+JobHunter can sync application state to a shared Google Sheet for easy human access.
+
+Recommended tracker columns:
+
+```text
+Applied At
+Last Updated
+Status
+Job Title
+Company
+Platform
+Job URL
+Application URL
+Resume Sent
+Cover Letter Sent
+Package Folder
+Evidence Screenshot
+Notes
+Next Action
+```
+
+Recommended setup:
+
+1. Create a Google Sheet from the main/personal Google account.
+2. Share it with the dedicated jobs Gmail account as **Editor**.
+3. Store the spreadsheet ID in local config outside the repo, for example under `~/.hermes/state/` or `~/.jobhunter/`.
+4. Run a local sync script using the jobs Gmail OAuth token.
+5. Upload evidence screenshots, sent resumes, and sent cover letters to a Drive folder created/managed by the jobs Gmail.
+6. Grant the main/personal Google account access to that Drive folder/files. This is required so the human owner can click `Open resume`, `Open cover letter`, and `Open screenshot` links from the Sheet.
+
+Useful formatting for the tracker:
+
+- date strings like `18/07/2026 15:47`;
+- wrapped text;
+- taller rows;
+- auto-sized columns;
+- frozen header row;
+- status colors, for example:
+  - `submitted` → green
+  - `blocked_*`, `failed`, `unavailable` → soft red
+  - `package_generated`, `package_prepared`, `draft_ready`, `approved` → blue
+  - `interested` → purple
+  - `skipped` → grey
+
+Keep the Sheet as a human-friendly mirror. SQLite remains the source of truth for automation.
+
+## 13. Git hygiene for open source
 
 Keep these out of git:
 
