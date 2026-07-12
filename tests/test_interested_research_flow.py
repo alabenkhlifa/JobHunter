@@ -96,9 +96,34 @@ def test_build_research_brief_is_brief_warn_only_and_includes_salary_target(monk
 
     assert "Research brief" in message
     assert "Warn only" in message
+    assert "Confidence:" in message
+    assert "Verified signals:" in message
+    assert "Missing / not verified:" in message
+    assert "Recommendation:" in message
     assert "AED 30k/month" in message
     assert "Salary not published" in message
-    assert len(message) < 2500
+    assert len(message) < 3000
+
+
+def test_low_confidence_research_is_actionable_not_generic(monkeypatch):
+    monkeypatch.setenv("JOBHUNTER_TARGET_SALARY_AED_MONTHLY", "30000")
+    job = sample_job(
+        company="TrueForge",
+        title="Solutions Architect / Lead Consultant",
+        company_website="",
+        recruiter_name="",
+        recruiter_profile_url="",
+        salary="",
+    )
+
+    research = flow.build_default_research(job)
+    message = flow.build_research_brief_message(job, research)
+
+    assert research.confidence == "Low"
+    assert "quick public web/company-page check" not in message
+    assert "Official company website/careers page not confirmed" in message
+    assert "Published salary not found" in message
+    assert "Low-confidence: verify the employer and official application path" in message
 
 
 def test_research_brief_keyboard_has_apply_ignore_and_details():

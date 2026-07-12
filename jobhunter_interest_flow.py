@@ -35,6 +35,10 @@ class JobResearch:
     salary_range: str = "Salary not published; use configured target as anchor."
     sources: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    confidence: str = "Low"
+    verified_signals: list[str] = field(default_factory=list)
+    missing_signals: list[str] = field(default_factory=list)
+    recommendation: str = "Use Details to verify the official application path before investing time."
 
 
 @dataclass
@@ -126,6 +130,8 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     if company_results:
         top = company_results[0]
         research.company_summary = f"Top web result: {top['title']} — {top['snippet'][:180]}"
+        research.confidence = "Medium"
+        research.verified_signals.append(f"Web result found: {top['title']}.")
         research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in company_results)]))[:5]
         risky_terms = ("scam", "fraud", "fake", "complaint")
         if any(term in (r["title"] + " " + r["snippet"]).lower() for r in company_results for term in risky_terms):
@@ -133,13 +139,17 @@ def research_job(job: dict[str, Any]) -> JobResearch:
             research.legitimacy = "Warn only: suspicious terms appeared in search results; do not block automatically."
         else:
             research.legitimacy = "Warn only: web results found; no obvious scam/fake keyword in top snippets."
+            research.recommendation = "Proceed only if the Details link or official company site confirms the role and application path."
     else:
         research.warnings.append("No useful web result found for company/recruiter query.")
+        research.missing_signals.append("No public company/recruiter result found from the bounded web lookup.")
     if salary_results:
         research.salary_range = f"{research.salary_range} Salary search context: {salary_results[0]['title']} — {salary_results[0]['snippet'][:140]}"
+        research.verified_signals.append(f"Salary context result found: {salary_results[0]['title']}.")
         research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in salary_results)]))[:5]
     else:
         research.warnings.append("No useful salary web result found.")
+        research.missing_signals.append("No role-specific salary evidence found; salary is a market estimate only.")
     return research
 
 
@@ -166,32 +176,62 @@ def estimate_salary_range(job: dict[str, Any]) -> str:
 def build_default_research(job: dict[str, Any]) -> JobResearch:
     company = job.get("company") or "the company"
     website = (job.get("company_website") or "").strip()
-    summary_bits = []
+    credibility = str(job.get("credibility_notes") or "").strip()
+    is_aggregator = "aggregator" in credibility.lower() or "agency" in credibility.lower()
+
+    summary_bits: list[str] = []
+    verified_signals: list[str] = []
+    missing_signals: list[str] = []
+    warnings: list[str] = []
+
     if website:
-        summary_bits.append(f"{company} has a listed website: {website}.")
+        summary_bits.append(f"{company} has a stored website: {website}.")
+        verified_signals.append(f"Stored company website: {website}.")
     else:
-        summary_bits.append(f"{company} needs a quick public web/company-page check before investing time.")
+        summary_bits.append("No independent company evidence found yet from stored data or bounded lookup.")
+        missing_signals.append("Official company website/careers page not confirmed.")
+        warnings.append("Company website not verified.")
+
     if job.get("description"):
-        summary_bits.append("The job description is specific enough to review stack and scope.")
-    warnings = []
+        summary_bits.append("Stored job description is available for stack/scope review.")
+        verified_signals.append("Job description text is available.")
+    else:
+        missing_signals.append("No job description available for stack/scope review.")
+
     if not (job.get("salary") or "").strip():
         warnings.append("Salary not published.")
-    if not website:
-        warnings.append("Company website not stored yet.")
-    if (job.get("credibility_notes") or "").strip():
-        warnings.append(str(job["credibility_notes"]))
+        missing_signals.append("Published salary not found.")
+    if credibility:
+        warnings.append(credibility)
+        if is_aggregator:
+            missing_signals.append("Direct employer / official application path not confirmed.")
+
     recruiter = "Not found"
     if (job.get("recruiter_name") or "").strip():
         recruiter = str(job["recruiter_name"])
         if (job.get("recruiter_profile_url") or "").strip():
             recruiter += f" — {job['recruiter_profile_url']}"
+        verified_signals.append(f"Recruiter/poster stored: {recruiter}.")
+    else:
+        missing_signals.append("Recruiter/poster not found.")
+
+    confidence = "Low" if (not website or is_aggregator) else "Medium"
+    recommendation = (
+        "Low-confidence: verify the employer and official application path before generating documents."
+        if confidence == "Low"
+        else "Worth continuing if role scope and salary match your target."
+    )
     return JobResearch(
         company_summary=" ".join(summary_bits),
-        legitimacy="Warn only: no automatic block. Verify salary, contract, and official application path before applying.",
+        legitimacy="Warn only: missing evidence is not an automatic block, but it should lower confidence until verified.",
         recruiter=recruiter,
         salary_range=estimate_salary_range(job),
         sources=[value for value in [website, job.get("url")] if value],
-        warnings=warnings,
+        warnings=list(dict.fromkeys(warnings)),
+        confidence=confidence,
+        verified_signals=list(dict.fromkeys(verified_signals)),
+        missing_signals=list(dict.fromkeys(missing_signals)),
+        recommendation=recommendation,
     )
 
 
@@ -204,16 +244,30 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
     sources = research.sources[:3]
     warning_lines = "\n".join(f"• {_esc(w)}" for w in warnings)
     source_lines = "\n".join(f"• {_esc(s)}" for s in sources) if sources else "• Not captured"
+    verified = research.verified_signals or ["No independent company/job signal verified yet."]
+    missing = research.missing_signals or ["No critical missing signal captured."]
+    verified_lines = "\n".join(f"• {_esc(v)}" for v in verified[:4])
+    missing_lines = "\n".join(f"• {_esc(m)}" for m in missing[:4])
     return f"""🔎 <b>Research brief</b>
 
 <b>{_esc(job.get('title'))}</b>
 {_esc(job.get('company'))} — {_esc(job.get('location'))}
 
-<b>Company:</b> {_esc(research.company_summary)}
-<b>Legit/fake check:</b> {_esc(research.legitimacy)}
+<b>Confidence:</b> {_esc(research.confidence)}
+<b>Company/job summary:</b> {_esc(research.company_summary)}
+
+<b>Verified signals:</b>
+{verified_lines}
+
+<b>Missing / not verified:</b>
+{missing_lines}
+
+<b>Risk check:</b> {_esc(research.legitimacy)}
 <b>Recruiter:</b> {_esc(research.recruiter)}
 <b>Salary:</b> {_esc(research.salary_range)}
 <b>Your target:</b> {_esc(target_salary_label())}
+
+<b>Recommendation:</b> {_esc(research.recommendation)}
 
 <b>Warnings — Warn only:</b>
 {warning_lines}
