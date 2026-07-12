@@ -39,6 +39,7 @@ class JobResearch:
     verified_signals: list[str] = field(default_factory=list)
     missing_signals: list[str] = field(default_factory=list)
     recommendation: str = "Use Details to verify the official application path before investing time."
+    salary_sources: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -165,6 +166,67 @@ def web_search_results(
     return parse_duckduckgo_results(response.text)
 
 
+def salary_search_queries(title: str, location: str) -> list[str]:
+    city = str(location or "Dubai").split(",", 1)[0].strip() or "Dubai"
+    normalized_title = " ".join(str(title or "software architect").replace("/", " ").split())
+    return [
+        f"site:gulftalent.com UAE {normalized_title} salary",
+        f"site:payscale.com Dubai {normalized_title} salary",
+        f"site:glassdoor.com Dubai {normalized_title} salary",
+        f"site:indeed.com Dubai {normalized_title} salary AED",
+        f"UAE {normalized_title} salary AED monthly GulfTalent Glassdoor PayScale Indeed",
+        f"{city} {normalized_title} salary AED monthly",
+    ]
+
+
+def _salary_source_name(url: str, title: str) -> str:
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    if "gulftalent" in host:
+        return "GulfTalent"
+    if "glassdoor" in host:
+        return "Glassdoor"
+    if "payscale" in host:
+        return "PayScale"
+    if "indeed" in host:
+        return "Indeed"
+    if "salaryexpert" in host:
+        return "SalaryExpert"
+    return host or title.split(" - ")[0]
+
+
+def collect_salary_sources(title: str, location: str, *, max_sources: int = 4) -> list[dict[str, str]]:
+    trusted_domains = ("gulftalent.com", "payscale.com", "glassdoor.com", "indeed.com", "salaryexpert.com")
+    seen_domains: set[str] = set()
+    trusted: list[dict[str, str]] = []
+    fallback: list[dict[str, str]] = []
+    for query in salary_search_queries(title, location):
+        for result in web_search_results(query)[:5]:
+            url = result.get("url", "")
+            domain = urlparse(url).netloc.lower().removeprefix("www.")
+            text = f"{result.get('title', '')} {result.get('snippet', '')}".lower()
+            if not domain or domain in seen_domains:
+                continue
+            if not any(term in text for term in ("salary", "salaries", "aed", "pay", "compensation")):
+                continue
+            seen_domains.add(domain)
+            item = {
+                "source": _salary_source_name(url, result.get("title", "")),
+                "title": result.get("title", ""),
+                "url": url,
+                "snippet": result.get("snippet", ""),
+            }
+            if any(domain == trusted_domain or domain.endswith("." + trusted_domain) for trusted_domain in trusted_domains):
+                trusted.append(item)
+            else:
+                fallback.append(item)
+            combined = [*trusted, *fallback]
+            if len(trusted) >= max_sources:
+                return trusted[:max_sources]
+            if len(combined) >= max_sources and len(trusted) >= 2:
+                return combined[:max_sources]
+    return [*trusted, *fallback][:max_sources]
+
+
 def research_job(job: dict[str, Any]) -> JobResearch:
     """Build a brief company/recruiter/salary research card with web fallback.
 
@@ -187,7 +249,7 @@ def research_job(job: dict[str, Any]) -> JobResearch:
             if company_lc and company_lc in f"{r.get('title', '')} {r.get('url', '')} {r.get('snippet', '')}".lower()
         ]
         company_results = (preferred_company_results or raw_company_results)[:3]
-        salary_results = web_search_results(f"{location} {title} salary AED monthly")[:3]
+        salary_sources = collect_salary_sources(str(title), str(location))
     except Exception as exc:  # noqa: BLE001 - callback must stay reliable
         research.warnings.append(f"Web research unavailable: {exc.__class__.__name__}.")
         return research
@@ -222,10 +284,12 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     else:
         research.warnings.append("No useful web result found for company/recruiter query.")
         research.missing_signals.append("No public company/recruiter result found from the bounded web lookup.")
-    if salary_results:
-        research.salary_range = f"{research.salary_range} Salary search context: {salary_results[0]['title']} — {salary_results[0]['snippet'][:140]}"
-        research.verified_signals.append(f"Salary context result found: {salary_results[0]['title']}.")
-        research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in salary_results)]))[:5]
+    if salary_sources:
+        research.salary_sources = salary_sources
+        research.verified_signals.append(f"Salary evidence found from {len(salary_sources)} source(s).")
+        first = salary_sources[0]
+        research.salary_range = f"{research.salary_range} Salary evidence includes {first['source']}: {first['snippet'][:140]}"
+        research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in salary_sources)]))[:8]
     else:
         research.warnings.append("No useful salary web result found.")
         research.missing_signals.append("No role-specific salary evidence found; salary is a market estimate only.")
@@ -327,6 +391,14 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
     missing = research.missing_signals or ["No critical missing signal captured."]
     verified_lines = "\n".join(f"• {_esc(v)}" for v in verified[:4])
     missing_lines = "\n".join(f"• {_esc(m)}" for m in missing[:4])
+    salary_evidence = research.salary_sources[:4]
+    if salary_evidence:
+        salary_lines = "\n".join(
+            f"• <b>{_esc(item.get('source'))}:</b> {_esc(item.get('snippet'))} — {_esc(item.get('url'))}"
+            for item in salary_evidence
+        )
+    else:
+        salary_lines = "• No independent salary source found; using market estimate only."
     return f"""🔎 <b>Research brief</b>
 
 <b>{_esc(job.get('title'))}</b>
@@ -343,7 +415,9 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
 
 <b>Risk check:</b> {_esc(research.legitimacy)}
 <b>Recruiter:</b> {_esc(research.recruiter)}
-<b>Salary:</b> {_esc(research.salary_range)}
+<b>Salary estimate:</b> {_esc(research.salary_range)}
+<b>Salary evidence:</b>
+{salary_lines}
 <b>Your target:</b> {_esc(target_salary_label())}
 
 <b>Recommendation:</b> {_esc(research.recommendation)}

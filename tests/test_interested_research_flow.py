@@ -141,8 +141,34 @@ def test_research_job_uses_web_results_and_warns_on_scam_terms(monkeypatch):
 
     assert calls
     assert "Top web result" in research.company_summary
-    assert "Salary search context" in research.salary_range
+    assert "Salary evidence includes" in research.salary_range
+    assert research.salary_sources
     assert any("scam/fraud/fake/complaint" in warning for warning in research.warnings)
+
+
+def test_collect_salary_sources_dedupes_multiple_salary_sites(monkeypatch):
+    calls = []
+
+    def fake_search(query, **kwargs):
+        calls.append(query)
+        if "gulftalent" in query.lower():
+            return [
+                {"title": "Senior Solutions Architect Salaries in UAE | GulfTalent", "url": "https://www.gulftalent.com/uae/salaries/senior-solutions-architect", "snippet": "Average AED 29,500 per month, up to AED 45,000."},
+                {"title": "Duplicate GulfTalent", "url": "https://www.gulftalent.com/uae/salaries/solution-architect", "snippet": "AED 25,000 per month."},
+            ]
+        if "payscale" in query.lower():
+            return [{"title": "Solutions Architect Salary in UAE | PayScale", "url": "https://www.payscale.com/research/AE/Job=Solutions_Architect/Salary", "snippet": "Average annual salary AED 300,000."}]
+        if "glassdoor" in query.lower():
+            return [{"title": "Solutions Architect Salaries in Dubai | Glassdoor", "url": "https://www.glassdoor.com/Salaries/dubai-solutions-architect-salary.htm", "snippet": "Average salary AED 28,133."}]
+        return []
+
+    monkeypatch.setattr(flow, "web_search_results", fake_search)
+
+    sources = flow.collect_salary_sources("Solutions Architect", "Dubai, UAE", max_sources=4)
+
+    assert [s["source"] for s in sources] == ["GulfTalent", "PayScale", "Glassdoor"]
+    assert len({s["url"].split('/')[2] for s in sources}) == 3
+    assert len(calls) >= 3
 
 
 def test_build_research_brief_is_brief_warn_only_and_includes_salary_target(monkeypatch):
