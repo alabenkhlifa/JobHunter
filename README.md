@@ -204,6 +204,8 @@ JobHunter should always:
 - save evidence screenshots for blockers/draft-ready states when useful;
 - ask the user with clear CTA options at approval gates.
 
+For CAPTCHA or other human-verification blockers, pause automation and let the user complete the challenge in the live browser. A practical remote-handoff pattern for Raspberry Pi deployments is VNC from a phone: enable VNC/remote desktop on the Pi, connect with a mobile VNC app to `<pi-lan-or-vpn-ip>:5900`, complete the CAPTCHA manually, then tell the agent to continue. Use LAN/VPN access only; never expose VNC, cookies, browser profiles, or CDP ports to the public internet.
+
 ## Git hygiene
 
 The repo ignores local runtime/private data, including:

@@ -32,6 +32,8 @@ Use `jobhunter_auto_apply` conservatively:
 
 When missing fields appear, inspect local profile data and cached confirmed answers first. Ask only for unconfirmed or sensitive fields, with clear CTA-style options.
 
+For CAPTCHA or other human-verification blockers, do not click/solve them. If the browser runs on a Raspberry Pi or remote desktop, instruct the user to connect with a phone VNC client over LAN/VPN, complete the challenge manually, and report back before continuing.
+
 ## Development rules
 
 - Prefer small, testable changes.

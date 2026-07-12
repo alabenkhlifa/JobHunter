@@ -234,6 +234,31 @@ python -m jobhunter_auto_apply.cli submit \
 
 Without `--approved`, the engine blocks and records `blocked_submit_approval`.
 
+### Human CAPTCHA handoff from a phone
+
+JobHunter must not bypass CAPTCHA, phone verification, identity verification, or other anti-bot checks. When an ATS blocks on one of these checks, pause automation and let the human complete it on the live browser session.
+
+If JobHunter runs on a Raspberry Pi or another always-on desktop machine, the user can connect from a phone with VNC:
+
+1. Enable VNC/remote desktop on the machine that owns the Chromium profile. On Raspberry Pi OS Bookworm this is commonly `wayvnc`; older images may use RealVNC or `x11vnc`.
+2. Find the machine address:
+
+   ```bash
+   hostname -I
+   ```
+
+3. From the phone, install a VNC client such as **RealVNC Viewer**, **Screens**, or **bVNC**.
+4. Connect to `<machine-ip>:5900` on the same LAN. If away from home, connect over a private VPN such as Tailscale and use the machine's VPN IP instead of exposing VNC to the public internet.
+5. Complete the CAPTCHA/verification manually in the visible Chromium window.
+6. Tell the agent the human check is complete so it can inspect the result, continue if approved, and record the application state/evidence.
+
+Security notes:
+
+- Use a VNC password or OS login; never expose VNC directly to the public internet.
+- Prefer LAN or VPN-only access.
+- Do not share browser profiles, cookies, or remote-debugging ports outside the machine.
+- The agent may continue after the user finishes the CAPTCHA, but it should never solve the CAPTCHA itself.
+
 ## 9. Privacy Notice / Terms & Conditions gates
 
 When an ATS asks for a Privacy Notice, Terms & Conditions, certification, or similar legal acknowledgement:
