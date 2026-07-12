@@ -96,8 +96,64 @@ def parse_duckduckgo_results(html_text: str, *, limit: int = 5) -> list[dict[str
     return results
 
 
-def web_search_results(query: str, *, timeout: float | None = None, fetcher=requests.get) -> list[dict[str, str]]:
+def _env_value_from_file(path: Path, key: str) -> str:
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            name, value = stripped.split("=", 1)
+            if name.strip() == key:
+                return value.strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    return ""
+
+
+def firecrawl_api_url() -> str:
+    return (
+        os.getenv("FIRECRAWL_API_URL", "").strip()
+        or _env_value_from_file(Path.home() / ".hermes" / ".env", "FIRECRAWL_API_URL")
+    ).rstrip("/")
+
+
+def firecrawl_search_results(query: str, *, timeout: float, poster=requests.post) -> list[dict[str, str]]:
+    base_url = firecrawl_api_url()
+    if not base_url:
+        return []
+    response = poster(
+        f"{base_url}/v1/search",
+        json={"query": query, "limit": 5},
+        headers={"Content-Type": "application/json"},
+        timeout=timeout,
+    )
+    if response.status_code >= 400:
+        return []
+    payload = response.json()
+    rows = payload.get("data") if isinstance(payload, dict) else []
+    results: list[dict[str, str]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        title = " ".join(str(row.get("title") or "").split())
+        url = str(row.get("url") or "").strip()
+        snippet = " ".join(str(row.get("description") or row.get("snippet") or row.get("content") or "").split())
+        if title and url:
+            results.append({"title": title, "url": url, "snippet": snippet})
+    return results
+
+
+def web_search_results(
+    query: str,
+    *,
+    timeout: float | None = None,
+    fetcher=requests.get,
+    poster=requests.post,
+) -> list[dict[str, str]]:
     timeout = timeout if timeout is not None else float(os.getenv("JOBHUNTER_WEB_RESEARCH_TIMEOUT", "8"))
+    firecrawl_results = firecrawl_search_results(query, timeout=timeout, poster=poster)
+    if firecrawl_results:
+        return firecrawl_results
     response = fetcher(
         "https://duckduckgo.com/html/",
         params={"q": query},
@@ -122,7 +178,15 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     title = job.get("title") or ""
     location = job.get("location") or "Dubai"
     try:
-        company_results = web_search_results(f"{company} company {location} {title} recruiter")[:3]
+        city = str(location).split(",", 1)[0].strip() or str(location)
+        company_query = f"{company} {city} {title}"
+        raw_company_results = web_search_results(company_query)[:5]
+        company_lc = str(company).lower()
+        preferred_company_results = [
+            r for r in raw_company_results
+            if company_lc and company_lc in f"{r.get('title', '')} {r.get('url', '')} {r.get('snippet', '')}".lower()
+        ]
+        company_results = (preferred_company_results or raw_company_results)[:3]
         salary_results = web_search_results(f"{location} {title} salary AED monthly")[:3]
     except Exception as exc:  # noqa: BLE001 - callback must stay reliable
         research.warnings.append(f"Web research unavailable: {exc.__class__.__name__}.")
@@ -132,6 +196,21 @@ def research_job(job: dict[str, Any]) -> JobResearch:
         research.company_summary = f"Top web result: {top['title']} — {top['snippet'][:180]}"
         research.confidence = "Medium"
         research.verified_signals.append(f"Web result found: {top['title']}.")
+        official_results = [
+            r for r in company_results
+            if company_lc and company_lc in str(r.get("url", "")).lower()
+        ]
+        if official_results:
+            official = official_results[0]
+            research.verified_signals.append(f"Official company/careers page found: {official['url']}.")
+            research.missing_signals = [
+                item for item in research.missing_signals
+                if "Official company website/careers page" not in item
+            ]
+            research.warnings = [
+                item for item in research.warnings
+                if "Company website not verified" not in item
+            ]
         research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in company_results)]))[:5]
         risky_terms = ("scam", "fraud", "fake", "complaint")
         if any(term in (r["title"] + " " + r["snippet"]).lower() for r in company_results for term in risky_terms):

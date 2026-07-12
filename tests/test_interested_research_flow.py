@@ -61,6 +61,70 @@ def test_web_research_parser_extracts_result_and_unwraps_redirect():
     ]
 
 
+def test_web_search_prefers_firecrawl_when_configured(monkeypatch):
+    monkeypatch.setenv("FIRECRAWL_API_URL", "http://127.0.0.1:58427/")
+    get_calls = []
+    post_calls = []
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "success": True,
+                "data": [
+                    {
+                        "title": "Careers | TrueForge FZ-LLC",
+                        "url": "https://trueforge.ae/career/",
+                        "description": "Solutions Architect / Lead Consultant in Dubai.",
+                    }
+                ],
+            }
+
+    def fake_post(url, **kwargs):
+        post_calls.append((url, kwargs))
+        return Response()
+
+    def fake_get(*args, **kwargs):
+        get_calls.append((args, kwargs))
+        raise AssertionError("DuckDuckGo fallback should not be used when Firecrawl returns results")
+
+    results = flow.web_search_results("TrueForge Dubai", timeout=4, fetcher=fake_get, poster=fake_post)
+
+    assert results == [
+        {
+            "title": "Careers | TrueForge FZ-LLC",
+            "url": "https://trueforge.ae/career/",
+            "snippet": "Solutions Architect / Lead Consultant in Dubai.",
+        }
+    ]
+    assert post_calls[0][0] == "http://127.0.0.1:58427/v1/search"
+    assert not get_calls
+
+
+def test_web_search_falls_back_to_duckduckgo_when_firecrawl_empty(monkeypatch):
+    monkeypatch.setenv("FIRECRAWL_API_URL", "http://127.0.0.1:58427")
+
+    class FirecrawlResponse:
+        status_code = 200
+
+        def json(self):
+            return {"success": True, "data": []}
+
+    class DuckDuckGoResponse:
+        status_code = 200
+        text = '<a class="result__a" href="https://agapi.ae/">AGAPI</a><a class="result__snippet">Dubai software.</a>'
+
+    results = flow.web_search_results(
+        "AGAPI Dubai",
+        timeout=4,
+        poster=lambda *args, **kwargs: FirecrawlResponse(),
+        fetcher=lambda *args, **kwargs: DuckDuckGoResponse(),
+    )
+
+    assert results[0]["url"] == "https://agapi.ae/"
+
+
 def test_research_job_uses_web_results_and_warns_on_scam_terms(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "true")
     calls = []
