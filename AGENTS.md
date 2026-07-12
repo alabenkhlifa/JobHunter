@@ -25,6 +25,10 @@ This repository is intended to be operated by Hermes Agent or another coding age
 
 Use `jobhunter_auto_apply` conservatively:
 
+- Telegram **Interested** should first show the brief research card from `jobhunter_interest_flow`: best-effort web company/recruiter/salary lookup, stored company context, recruiter/poster if known, warning-only legitimacy notes, and salary guidance vs `JOBHUNTER_TARGET_SALARY_AED_MONTHLY`.
+- Research-card **Apply** generates the resume + cover-letter package and records `package_generated`; it does not submit anything.
+- Research-card **Ignore/Pause** records skip/paused feedback without affecting other profiles or listeners.
+- Final application prep starts only after the **Proceed to apply** CTA, and final submission remains separately approval-gated.
 - `python -m jobhunter_auto_apply.cli inspect --job-id <job_id>` to inspect current ATS/browser page.
 - `upload ... --approved` only after explicit approval to upload a document.
 - `submit ... --approved` only after explicit approval to submit.

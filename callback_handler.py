@@ -12,6 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 import scraper
+import jobhunter_interest_flow as interest_flow
 
 # Setup
 load_dotenv()
@@ -89,7 +90,7 @@ def get_job(job_id):
     return dict(row)
 
 
-def send_message(text):
+def send_message(text, reply_markup=None):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -97,6 +98,8 @@ def send_message(text):
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     try:
         resp = requests.post(url, json=payload, timeout=10)
         return resp.status_code == 200
@@ -180,12 +183,52 @@ def handle_interested(job_id, callback_query_id):
         return
 
     mark_interested(job_id)
-    answer_callback(callback_query_id, "✓ Marked as interested")
+    answer_callback(callback_query_id, "✓ Research brief ready")
 
-    message = build_interested_message(job)
+    research = interest_flow.research_job(job)
+    message = interest_flow.build_research_brief_message(job, research)
 
-    send_message(message)
-    log.info(f"Interested: {job['title']} @ {job['company']} - notified Hermes JobHunter")
+    send_message(message, reply_markup=interest_flow.research_brief_keyboard(job_id, job.get("url")))
+    log.info(f"Interested: {job['title']} @ {job['company']} - sent research brief")
+
+
+def handle_apply(job_id, callback_query_id):
+    job = get_job(job_id)
+    if not job:
+        answer_callback(callback_query_id, "Job not found")
+        return
+
+    package = interest_flow.prepare_application_package(job_id)
+    answer_callback(callback_query_id, "✓ Package generated")
+    send_message(
+        interest_flow.build_package_ready_message(job, package),
+        reply_markup=interest_flow.package_ready_keyboard(job_id),
+    )
+    log.info(f"Application package generated: {job['title']} @ {job['company']}")
+
+
+def handle_ignore(job_id, callback_query_id):
+    mark_skipped(job_id, reason="ignored after research brief")
+    answer_callback(callback_query_id, "✓ Ignored")
+
+
+def handle_proceed_apply(job_id, callback_query_id):
+    db = get_db()
+    try:
+        scraper.record_application_stage(
+            db,
+            job_id,
+            "approved_to_prepare_apply",
+            notes="User clicked Proceed to apply after package generation; final submit still requires approval.",
+        )
+    finally:
+        db.close()
+    answer_callback(callback_query_id, "✓ Apply prep approved")
+    job = get_job(job_id)
+    if job:
+        send_message(
+            f"🚀 <b>Apply prep approved</b>\n\n<b>{job['title']}</b>\n{job['company']} — {job['location']}\n\nI can now open/fill the application path, but final submission remains approval-gated."
+        )
 
 
 def handle_details(job_id, callback_query_id):
@@ -247,6 +290,12 @@ def poll_updates(offset=0):
                     handle_skip(job_id, callback_id, reason_code=reason_code)
                 elif action == "interested":
                     handle_interested(payload, callback_id)
+                elif action == "apply":
+                    handle_apply(payload, callback_id)
+                elif action == "ignore":
+                    handle_ignore(payload, callback_id)
+                elif action == "proceed_apply":
+                    handle_proceed_apply(payload, callback_id)
                 elif action == "details":
                     handle_details(payload, callback_id)
                 else:

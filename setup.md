@@ -50,6 +50,16 @@ TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
 ```
 
+Optional Interested-stage salary target, used in brief research cards and compensation ask guidance:
+
+```text
+JOBHUNTER_TARGET_SALARY_AED_MONTHLY=30000
+JOBHUNTER_INTERESTED_WEB_RESEARCH=true
+JOBHUNTER_WEB_RESEARCH_TIMEOUT=8
+```
+
+`JOBHUNTER_INTERESTED_WEB_RESEARCH` does best-effort company/recruiter/salary web lookup after **Interested**. It is warning-only and falls back to stored metadata if search fails.
+
 Do not commit `.env`.
 
 ## 4. Local personal profile data
@@ -174,7 +184,10 @@ Typical flow:
 3. Review/ranking logic uses that feedback to demote repeatedly declined patterns and boost similar interested matches.
 4. Telegram sends at most the best 5 CTA job cards per day.
 5. User taps **Interested** or **Skip**.
-6. `callback_handler.py` records feedback/application state and asks the agent to generate a package and prepare the apply draft.
+6. **Interested** records feedback/application state and sends a concise research brief: company context, recruiter/poster if known, warning-only legitimacy notes, and salary guidance vs `JOBHUNTER_TARGET_SALARY_AED_MONTHLY`.
+7. The research brief offers **Apply**, **Ignore**, and **Details** CTAs.
+8. **Apply** generates a truthful resume + cover-letter package from `data/master-profile.json`, records `package_generated`, and sends a final **Proceed to apply** / **Pause** CTA.
+9. **Proceed to apply** starts application preparation only. Final submit, CAPTCHA, legal/visa/salary questions, and sensitive confirmations remain approval-gated.
 
 Useful commands:
 

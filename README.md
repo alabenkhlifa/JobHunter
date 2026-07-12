@@ -8,6 +8,7 @@ It can:
 - store and deduplicate jobs in local SQLite;
 - send at most the best 5 Telegram CTA job cards per day for review;
 - learn from Interested/Skip feedback to demote repeatedly declined patterns and boost similar strong matches;
+- run a brief Interested-stage company/recruiter/salary research check before generating an application package;
 - generate truthful tailored resume / cover-letter packages from a local candidate profile;
 - inspect LinkedIn / external ATS application pages through Chromium CDP;
 - upload or submit only after explicit user approval;
@@ -97,6 +98,22 @@ Mark a job as interested:
 
 ```bash
 python scraper.py --mark-interested <job_id>
+```
+
+Telegram CTA flow:
+
+```text
+Interested → brief research card → Apply / Ignore / Details
+Apply      → generate resume + cover-letter package → Proceed to apply / Pause
+Proceed   → begin application prep only; final submit remains explicitly approval-gated
+```
+
+The research card is intentionally brief and warning-only. It does a best-effort web lookup for company/recruiter/salary context, then falls back to stored metadata if search fails. It summarizes company context, recruiter/poster info when stored, obvious legitimacy concerns, and a salary note compared with the configurable monthly AED target:
+
+```env
+JOBHUNTER_TARGET_SALARY_AED_MONTHLY=30000
+JOBHUNTER_INTERESTED_WEB_RESEARCH=true
+JOBHUNTER_WEB_RESEARCH_TIMEOUT=8
 ```
 
 Inspect the currently open application page through Chromium CDP:
