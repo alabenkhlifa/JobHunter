@@ -177,6 +177,16 @@ python -m jobhunter_integrations.gmail_watcher \
 
 Both commands are safe to schedule from cron/Hermes cron. They read secrets only from local ignored files/env variables. The Gmail watcher marks inspected messages as read so the dedicated jobs mailbox stays clean.
 
+To keep the Sheet live while applying, enable best-effort auto-sync after every application stage update:
+
+```env
+JOBHUNTER_AUTO_SYNC_TRACKER=true
+JOBHUNTER_TRACKER_SYNC_COMMAND=/absolute/path/to/jobhunter_sync_application_tracker.sh
+JOBHUNTER_TRACKER_SYNC_TIMEOUT=120
+```
+
+Auto-sync failures are logged but do not block application progress; SQLite remains the source of truth.
+
 ## Safety model
 
 JobHunter should never:

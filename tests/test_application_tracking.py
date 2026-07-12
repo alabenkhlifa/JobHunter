@@ -147,3 +147,69 @@ def test_mark_interested_missing_job_does_not_create_application():
     scraper.init_application_tracking(conn)
     count = conn.execute("SELECT COUNT(*) FROM applications WHERE job_id = 'missing'").fetchone()[0]
     assert count == 0
+
+
+def test_record_application_stage_auto_syncs_when_enabled_for_file_db(tmp_path, monkeypatch):
+    db_path = tmp_path / "jobs.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE jobs (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            company TEXT,
+            location TEXT,
+            url TEXT,
+            source TEXT,
+            score INTEGER,
+            date_posted TEXT,
+            date_scraped TEXT,
+            notified INTEGER DEFAULT 0,
+            description TEXT DEFAULT '',
+            tech_required TEXT DEFAULT '',
+            tech_nice_to_have TEXT DEFAULT '',
+            min_experience INTEGER DEFAULT -1,
+            salary TEXT DEFAULT '',
+            work_model TEXT DEFAULT 'on-site',
+            score_breakdown TEXT DEFAULT '',
+            status TEXT DEFAULT 'new'
+        )
+        """
+    )
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "synced"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return Result()
+
+    monkeypatch.setenv("JOBHUNTER_AUTO_SYNC_TRACKER", "true")
+    monkeypatch.setenv("JOBHUNTER_TRACKER_SYNC_COMMAND", "/tmp/sync-tracker --fast")
+    monkeypatch.setattr(scraper.subprocess, "run", fake_run)
+
+    scraper.record_application_stage(conn, "li-1", "package_generated")
+
+    assert calls
+    assert calls[0][0] == ["/tmp/sync-tracker", "--fast"]
+    assert calls[0][1]["check"] is False
+
+
+def test_record_application_stage_auto_sync_failure_does_not_block(tmp_path, monkeypatch):
+    db_path = tmp_path / "jobs.db"
+    conn = sqlite3.connect(db_path)
+
+    def fake_run(command, **kwargs):
+        raise TimeoutError("slow tracker")
+
+    monkeypatch.setenv("JOBHUNTER_AUTO_SYNC_TRACKER", "true")
+    monkeypatch.setenv("JOBHUNTER_TRACKER_SYNC_COMMAND", "/tmp/sync-tracker")
+    monkeypatch.setattr(scraper.subprocess, "run", fake_run)
+
+    app_id = scraper.record_application_stage(conn, "li-1", "blocked_captcha")
+
+    assert isinstance(app_id, int)
+    assert conn.execute("SELECT stage FROM applications WHERE job_id = 'li-1'").fetchone()[0] == "blocked_captcha"

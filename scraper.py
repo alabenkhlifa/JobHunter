@@ -8,7 +8,9 @@ import logging
 import os
 import random
 import re
+import shlex
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone, timedelta
@@ -281,6 +283,63 @@ def init_application_tracking(conn):
     conn.commit()
 
 
+def _env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def sync_application_tracker_if_enabled():
+    """Best-effort Google Sheet tracker sync after an application stage change.
+
+    The open-source default is disabled so local/test users are not required to
+    configure Google credentials. Deployments can enable it with:
+
+    JOBHUNTER_AUTO_SYNC_TRACKER=true
+    JOBHUNTER_TRACKER_SYNC_COMMAND=/path/to/jobhunter_sync_application_tracker.sh
+    """
+    # record_application_stage is used from scripts/tests that may not have
+    # already called scraper.main(), so load .env lazily and non-destructively.
+    load_dotenv(override=False)
+    if not _env_flag("JOBHUNTER_AUTO_SYNC_TRACKER"):
+        return False
+
+    command = os.getenv("JOBHUNTER_TRACKER_SYNC_COMMAND", "").strip()
+    if not command:
+        log.warning("JOBHUNTER_AUTO_SYNC_TRACKER=true but JOBHUNTER_TRACKER_SYNC_COMMAND is not set")
+        return False
+
+    timeout = int(os.getenv("JOBHUNTER_TRACKER_SYNC_TIMEOUT", "120"))
+    try:
+        completed = subprocess.run(
+            shlex.split(command),
+            cwd=Path.cwd(),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception as exc:  # noqa: BLE001 - tracker sync must never block stage recording
+        log.warning("Application tracker auto-sync failed to start: %s", exc)
+        return False
+
+    if completed.returncode != 0:
+        stderr = (completed.stderr or completed.stdout or "").strip()
+        log.warning("Application tracker auto-sync failed with exit %s: %s", completed.returncode, stderr[:500])
+        return False
+    log.info("Application tracker auto-sync completed")
+    return True
+
+
+def _connection_has_file_database(conn):
+    try:
+        rows = conn.execute("PRAGMA database_list").fetchall()
+    except sqlite3.Error:
+        return True
+    return any((row[2] if len(row) > 2 else "") for row in rows)
+
+
 def record_application_stage(
     conn,
     job_id,
@@ -356,6 +415,8 @@ def record_application_stage(
         )
         application_id = cur.lastrowid
     conn.commit()
+    if _connection_has_file_database(conn):
+        sync_application_tracker_if_enabled()
     return int(application_id)
 
 

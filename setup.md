@@ -337,8 +337,16 @@ Recommended setup:
      --google-token "$GOOGLE_TOKEN_PATH"
    ```
 
-5. Upload evidence screenshots, sent resumes, and sent cover letters to a Drive folder created/managed by the jobs Gmail.
-6. Grant the main/personal Google account access to that Drive folder/files. This is required so the human owner can click `Open resume`, `Open cover letter`, and `Open screenshot` links from the Sheet.
+5. To keep the tracker live while applying, enable best-effort auto-sync in local `.env` or deployment env:
+
+   ```env
+   JOBHUNTER_AUTO_SYNC_TRACKER=true
+   JOBHUNTER_TRACKER_SYNC_COMMAND=/absolute/path/to/jobhunter_sync_application_tracker.sh
+   JOBHUNTER_TRACKER_SYNC_TIMEOUT=120
+   ```
+
+6. Upload evidence screenshots, sent resumes, and sent cover letters to a Drive folder created/managed by the jobs Gmail.
+7. Grant the main/personal Google account access to that Drive folder/files. This is required so the human owner can click `Open resume`, `Open cover letter`, and `Open screenshot` links from the Sheet.
 
 Useful formatting for the tracker:
 
