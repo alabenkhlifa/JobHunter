@@ -15,7 +15,17 @@ import scraper
 import jobhunter_interest_flow as interest_flow
 
 # Setup
-load_dotenv()
+PROJECT_DIR = Path(__file__).resolve().parent
+
+
+def project_path(value):
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_DIR / path
+    return path.resolve()
+
+
+load_dotenv(dotenv_path=PROJECT_DIR / ".env")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -25,7 +35,9 @@ log = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DB_PATH = "./data/jobs.db"
+DB_PATH = project_path(os.getenv("JOBHUNTER_DB_PATH", "data/jobs.db"))
+PROFILE_PATH = project_path(os.getenv("JOBHUNTER_PROFILE_PATH", "data/master-profile.json"))
+OUTPUT_DIR = project_path(os.getenv("JOBHUNTER_OUTPUT_DIR", "data/output"))
 
 SKIP_REASON_LABELS = {
     "wrong_stack": "wrong stack or weak backend fit",
@@ -40,7 +52,7 @@ if not TOKEN or not CHAT_ID:
 
 
 def get_db():
-    return sqlite3.connect(DB_PATH)
+    return sqlite3.connect(str(DB_PATH))
 
 
 def skip_reason_label(reason_code):
@@ -198,7 +210,12 @@ def handle_apply(job_id, callback_query_id):
         answer_callback(callback_query_id, "Job not found")
         return
 
-    package = interest_flow.prepare_application_package(job_id)
+    package = interest_flow.prepare_application_package(
+        job_id,
+        db_path=DB_PATH,
+        profile_path=PROFILE_PATH,
+        output_dir=OUTPUT_DIR,
+    )
     answer_callback(callback_query_id, "✓ Package generated")
     send_message(
         interest_flow.build_package_ready_message(job, package),

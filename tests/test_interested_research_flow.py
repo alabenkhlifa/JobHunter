@@ -853,6 +853,14 @@ def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_
     assert "Resume and cover letter generated" in row[2]
 
 
+def test_application_package_defaults_are_project_anchored():
+    project_dir = Path(flow.__file__).resolve().parent
+
+    assert flow.DEFAULT_DB_PATH == project_dir / "data" / "jobs.db"
+    assert flow.DEFAULT_PROFILE_PATH == project_dir / "data" / "master-profile.json"
+    assert flow.DEFAULT_OUTPUT_DIR == project_dir / "data" / "output"
+
+
 def test_package_ready_keyboard_requires_final_apply_approval():
     keyboard = flow.package_ready_keyboard("li-1")
     buttons = [button for row in keyboard["inline_keyboard"] for button in row]

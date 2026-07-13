@@ -1,5 +1,6 @@
 import importlib
 import os
+from pathlib import Path
 
 
 def load_callback_handler(monkeypatch):
@@ -88,18 +89,47 @@ def test_handle_apply_generates_package_and_sends_final_apply_cta(monkeypatch, t
     )
 
     monkeypatch.setattr(callback_handler, "get_job", lambda job_id: job if job_id == "li-1" else None)
-    monkeypatch.setattr(callback_handler.interest_flow, "prepare_application_package", lambda job_id: package)
+    package_calls = []
+    monkeypatch.setattr(
+        callback_handler.interest_flow,
+        "prepare_application_package",
+        lambda job_id, **kwargs: package_calls.append((job_id, kwargs)) or package,
+    )
     monkeypatch.setattr(callback_handler, "answer_callback", lambda callback_id, text=None: calls.append(("answer", callback_id, text)))
     monkeypatch.setattr(callback_handler, "send_message", lambda text, reply_markup=None: calls.append(("send", text, reply_markup)) or True)
 
     callback_handler.handle_apply("li-1", "callback-1")
 
+    assert package_calls == [
+        (
+            "li-1",
+            {
+                "db_path": callback_handler.DB_PATH,
+                "profile_path": callback_handler.PROFILE_PATH,
+                "output_dir": callback_handler.OUTPUT_DIR,
+            },
+        )
+    ]
     assert ("answer", "callback-1", "✓ Package generated") in calls
     sent = [(call[1], call[2]) for call in calls if call[0] == "send"]
     assert len(sent) == 1
     assert "Application package ready" in sent[0][0]
     buttons = [button for row in sent[0][1]["inline_keyboard"] for button in row]
     assert {button.get("callback_data") for button in buttons if "callback_data" in button} >= {"proceed_apply:li-1", "ignore:li-1"}
+
+
+def test_runtime_paths_are_project_anchored_outside_repo(monkeypatch, tmp_path):
+    monkeypatch.setenv("JOBHUNTER_DB_PATH", "data/test-jobs.db")
+    monkeypatch.setenv("JOBHUNTER_PROFILE_PATH", "data/test-profile.json")
+    monkeypatch.setenv("JOBHUNTER_OUTPUT_DIR", "data/test-output")
+    monkeypatch.chdir(tmp_path)
+
+    callback_handler = load_callback_handler(monkeypatch)
+    project_dir = Path(callback_handler.__file__).resolve().parent
+
+    assert callback_handler.DB_PATH == project_dir / "data" / "test-jobs.db"
+    assert callback_handler.PROFILE_PATH == project_dir / "data" / "test-profile.json"
+    assert callback_handler.OUTPUT_DIR == project_dir / "data" / "test-output"
 
 
 def test_handle_details_records_feedback_and_sends_details(monkeypatch):

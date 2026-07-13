@@ -29,6 +29,10 @@ import scraper
 
 DEFAULT_TARGET_SALARY_AED_MONTHLY = 30000
 COMPANY_PAY_PLATFORMS = ("Glassdoor", "Indeed", "PayScale", "GulfTalent", "Levels.fyi")
+PROJECT_DIR = Path(__file__).resolve().parent
+DEFAULT_DB_PATH = PROJECT_DIR / "data" / "jobs.db"
+DEFAULT_PROFILE_PATH = PROJECT_DIR / "data" / "master-profile.json"
+DEFAULT_OUTPUT_DIR = PROJECT_DIR / "data" / "output"
 
 
 @dataclass
@@ -1205,9 +1209,9 @@ def _render_pdf(mode: str, input_path: Path, output_path: Path) -> None:
 def prepare_application_package(
     job_id: str,
     *,
-    db_path: Path | str = "data/jobs.db",
-    profile_path: Path | str = "data/master-profile.json",
-    output_dir: Path | str = "data/output",
+    db_path: Path | str = DEFAULT_DB_PATH,
+    profile_path: Path | str = DEFAULT_PROFILE_PATH,
+    output_dir: Path | str = DEFAULT_OUTPUT_DIR,
     render_pdfs: bool = True,
 ) -> ApplicationPackage:
     with _connect(db_path) as conn:
@@ -1241,7 +1245,7 @@ def prepare_application_package(
         return package
 
 
-def render_research_dry_run(job_id: str, *, db_path: Path | str = "data/jobs.db") -> str:
+def render_research_dry_run(job_id: str, *, db_path: Path | str = DEFAULT_DB_PATH) -> str:
     """Run live research without sending Telegram or mutating application state."""
     resolved_db = Path(db_path).resolve()
     conn = sqlite3.connect(f"file:{resolved_db.as_posix()}?mode=ro", uri=True)
