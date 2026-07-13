@@ -299,7 +299,12 @@ def _compact_company_summary(company: str, location: str, results: list[dict[str
     city = str(location or "").split(",", 1)[0].strip()
     text = " ".join(f"{item.get('title', '')} {item.get('snippet', '')}" for item in results)
     lowered = text.lower()
-    if any(term in lowered for term in ("technology consultancy", "technology consulting", "tech consultancy")):
+    financial_product_terms = sum(
+        term in lowered for term in ("spending", "saving", "investing", "exchanging")
+    )
+    if "fintech" in lowered or "financial technology" in lowered or financial_product_terms >= 3:
+        company_type = "financial technology company"
+    elif any(term in lowered for term in ("technology consultancy", "technology consulting", "tech consultancy")):
         company_type = "technology consultancy"
     elif any(term in lowered for term in ("software company", "software development")):
         company_type = "software company"
@@ -317,6 +322,8 @@ def _compact_company_summary(company: str, location: str, results: list[dict[str
         focus.append("cloud platforms")
     if "artificial intelligence" in lowered or "machine learning" in lowered or re.search(r"\bai\b", lowered):
         focus.append("AI")
+    if financial_product_terms >= 3:
+        focus.append("digital financial services")
 
     company_pattern = re.escape(str(company or "").lower())
     city_pattern = re.escape(city.lower()) if city else ""
@@ -327,14 +334,37 @@ def _compact_company_summary(company: str, location: str, results: list[dict[str
             lowered,
         )
     )
-    scope = f"{city}-based " if explicit_city else ("global " if "global" in lowered else "")
+    global_scope = any(term in lowered for term in ("global", "worldwide", "around the world"))
+    scope = f"{city}-based " if explicit_city else ("global " if global_scope else "")
     base = f"{company} is a {scope}{company_type}"
     if focus:
         base += f" focused on {', '.join(dict.fromkeys(focus[:3]))}"
     size_match = re.search(r"\b(\d{1,4})\s*(?:-|–|to)\s*(\d{1,4})\s+employees\b", lowered)
+    facts: list[str] = []
     if size_match:
-        base += f" ({size_match.group(1)}–{size_match.group(2)} employees)"
+        facts.append(f"{size_match.group(1)}–{size_match.group(2)} employees")
+    else:
+        employee_match = re.search(r"\b(\d{1,3}(?:,\d{3})*\+?)\s+(?:employees|people working)\b", lowered)
+        if employee_match:
+            facts.append(f"{employee_match.group(1)} employees")
+    customer_match = re.search(r"\b(\d+\+?\s+million)\s+customers\b", lowered)
+    if customer_match:
+        facts.append(f"{customer_match.group(1)} customers")
+    if facts:
+        base += f" ({'; '.join(facts[:2])})"
     return base + "."
+
+
+def _company_summary_from_job_description(company: str, description: str) -> str:
+    """Use the employer's own About section as a labelled fallback."""
+    value = " ".join(str(description or "").split())
+    company_pattern = re.escape(str(company or "").strip())
+    if not company_pattern or not re.search(rf"\bAbout\s+{company_pattern}\b", value, flags=re.IGNORECASE):
+        return ""
+    about_section = re.split(r"\bAbout\s+(?:The\s+)?Role\b", value, maxsplit=1, flags=re.IGNORECASE)[0]
+    if len(about_section) < 80:
+        return ""
+    return _compact_company_summary(company, "", [{"snippet": about_section}])
 
 
 def _plain_text_from_html(html_text: str, *, limit: int = 6000) -> str:
@@ -380,15 +410,6 @@ def fetch_verified_company_pages(
     elif company_token:
         candidates.extend(f"https://{company_token}.{tld}" for tld in ("ae", "com", "io", "ai"))
 
-    urls: list[str] = []
-    seen: set[str] = set()
-    for base_url in candidates:
-        for path in ("/career/", "/careers/", "/about/", "/"):
-            url = base_url.rstrip("/") + path
-            if url not in seen:
-                seen.add(url)
-                urls.append(url)
-
     def fetch(url: str) -> dict[str, str] | None:
         try:
             response = fetcher(
@@ -412,8 +433,29 @@ def fetch_verified_company_pages(
             return None
         return {"title": final_url, "url": final_url, "snippet": snippet}
 
-    with ThreadPoolExecutor(max_workers=min(len(urls), 4) or 1) as executor:
-        results = [result for result in executor.map(fetch, urls) if result]
+    def fetch_parallel(urls: list[str]) -> list[dict[str, str]]:
+        if not urls:
+            return []
+        with ThreadPoolExecutor(max_workers=min(len(urls), 4)) as executor:
+            return [result for result in executor.map(fetch, urls) if result]
+
+    if official_url:
+        urls = [candidates[0].rstrip("/") + path for path in ("/career/", "/careers/", "/about/", "/")]
+        results = fetch_parallel(urls)
+    else:
+        # Probe one root per likely domain first. Expanding every guessed domain
+        # to four paths can multiply a single timeout into a 30+ second callback.
+        root_results = fetch_parallel([base.rstrip("/") + "/" for base in candidates])
+        verified_bases = list(dict.fromkeys(
+            f"{urlparse(item['url']).scheme}://{urlparse(item['url']).netloc}"
+            for item in root_results
+        ))
+        detail_urls = [
+            base.rstrip("/") + path
+            for base in verified_bases
+            for path in ("/career/", "/careers/", "/about/")
+        ]
+        results = [*root_results, *fetch_parallel(detail_urls)]
     deduped: list[dict[str, str]] = []
     seen_urls: set[str] = set()
     for result in results:
@@ -628,6 +670,8 @@ def estimate_salary_range(job: dict[str, Any]) -> str:
 def build_default_research(job: dict[str, Any]) -> JobResearch:
     company = job.get("company") or "the company"
     website = (job.get("company_website") or "").strip()
+    description = str(job.get("description") or "")
+    description_summary = _company_summary_from_job_description(str(company), description)
     credibility = str(job.get("credibility_notes") or "").strip()
     is_aggregator = "aggregator" in credibility.lower() or "agency" in credibility.lower()
 
@@ -640,12 +684,17 @@ def build_default_research(job: dict[str, Any]) -> JobResearch:
         summary_bits.append(f"{company} has a stored website: {website}.")
         verified_signals.append(f"Stored company website: {website}.")
     else:
-        summary_bits.append("No independent company evidence found yet from stored data or bounded lookup.")
+        if description_summary:
+            summary_bits.append(f"Job post: {description_summary}")
+            verified_signals.append("Employer description is present in the job post.")
+        else:
+            summary_bits.append("No independent company evidence found yet from stored data or bounded lookup.")
         missing_signals.append("Official company website/careers page not confirmed.")
         warnings.append("Company website not verified.")
 
-    if job.get("description"):
-        summary_bits.append("Stored job description is available for stack/scope review.")
+    if description:
+        if not description_summary:
+            summary_bits.append("Stored job description is available for stack/scope review.")
         verified_signals.append("Job description text is available.")
     else:
         missing_signals.append("No job description available for stack/scope review.")

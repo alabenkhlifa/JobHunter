@@ -256,7 +256,12 @@ def test_research_resolves_aggregator_employer_and_keeps_posting_company(monkeyp
     monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "false")
     job = sample_job(
         company="TALENTMATE",
-        description="Job Description About Revolut People deserve more from their money. We build financial products.",
+        description=(
+            "Job Description About Revolut People deserve more from their money. "
+            "Our products include spending, saving, investing, and exchanging for 75+ million customers. "
+            "We have 13,000+ people working around the world. About The Role We build our core platform."
+        ),
+        company_website="",
         credibility_notes="posted by agency/aggregator",
     )
 
@@ -266,6 +271,8 @@ def test_research_resolves_aggregator_employer_and_keeps_posting_company(monkeyp
     assert research.employer_name == "Revolut"
     assert research.posting_company == "TALENTMATE"
     assert "Revolut — Dubai, United Arab Emirates (via TALENTMATE)" in message
+    assert "Job post: Revolut is a global financial technology company focused on digital financial services" in message
+    assert "13,000+ employees; 75+ million customers" in message
     assert "no Revolut pay data" in message
 
 
@@ -344,6 +351,32 @@ def test_fetch_verified_company_pages_probes_likely_domain_when_search_is_noisy(
     assert "https://trueforge.ae/career/" in calls
     assert pages
     assert all("trueforge.ae" in page["url"] for page in pages)
+
+
+def test_fetch_verified_company_pages_does_not_expand_unverified_domains():
+    calls = []
+
+    class Response:
+        status_code = 404
+        headers = {"content-type": "text/html"}
+        text = "Not found"
+
+        def __init__(self, url):
+            self.url = url
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return Response(url)
+
+    pages = flow.fetch_verified_company_pages("Revolut", [], fetcher=fake_get)
+
+    assert pages == []
+    assert set(calls) == {
+        "https://revolut.ae/",
+        "https://revolut.com/",
+        "https://revolut.io/",
+        "https://revolut.ai/",
+    }
 
 
 def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
