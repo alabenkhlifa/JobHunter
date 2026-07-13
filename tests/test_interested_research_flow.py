@@ -240,6 +240,32 @@ def test_compact_company_summary_keeps_useful_verified_details():
     )
 
 
+def test_fetch_verified_company_pages_uses_only_discovered_official_domain():
+    calls = []
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "text/html"}
+        text = "<html><body>Technology consulting company focused on legacy modernization and systems integration.</body></html>"
+
+        def __init__(self, url):
+            self.url = url
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return Response(url)
+
+    pages = flow.fetch_verified_company_pages(
+        "TrueForge",
+        [{"url": "https://trueforge.ae/career/"}],
+        fetcher=fake_get,
+    )
+
+    assert set(calls) == {"https://trueforge.ae/", "https://trueforge.ae/about/"}
+    assert len(pages) == 2
+    assert all(page["url"].startswith("https://trueforge.ae/") for page in pages)
+
+
 def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_TARGET_SALARY_AED_MONTHLY", "30000")
     research = flow.JobResearch(

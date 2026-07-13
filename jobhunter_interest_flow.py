@@ -299,6 +299,52 @@ def _compact_company_summary(company: str, location: str, results: list[dict[str
     return base + "."
 
 
+def _plain_text_from_html(html_text: str, *, limit: int = 6000) -> str:
+    text = re.sub(r"<script\b.*?</script>", " ", html_text, flags=re.I | re.S)
+    text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return " ".join(html.unescape(text).split())[:limit]
+
+
+def fetch_verified_company_pages(
+    company: str,
+    sources: list[dict[str, str]],
+    *,
+    fetcher=requests.get,
+    timeout: float = 5,
+) -> list[dict[str, str]]:
+    """Fetch only a verified company domain discovered by search; never guess domains."""
+    official_url = next(
+        (str(item.get("url") or "") for item in sources if _is_official_company_result(company, str(item.get("url") or ""))),
+        "",
+    )
+    parsed = urlparse(official_url)
+    if not parsed.scheme or not parsed.netloc:
+        return []
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    urls = [base_url + "/", base_url + "/about/"]
+
+    def fetch(url: str) -> dict[str, str] | None:
+        try:
+            response = fetcher(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 JobHunter research bot"},
+                timeout=timeout,
+                allow_redirects=True,
+            )
+        except Exception:
+            return None
+        final_url = str(getattr(response, "url", url))
+        if response.status_code >= 400 or "html" not in response.headers.get("content-type", "").lower():
+            return None
+        if urlparse(final_url).netloc.lower().removeprefix("www.") != parsed.netloc.lower().removeprefix("www."):
+            return None
+        return {"title": final_url, "url": final_url, "snippet": _plain_text_from_html(response.text)}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        return [result for result in executor.map(fetch, urls) if result]
+
+
 def collect_company_salary_sources(
     company: str,
     title: str,
@@ -384,22 +430,36 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     location = job.get("location") or "Dubai"
     try:
         timeout = float(os.getenv("JOBHUNTER_WEB_RESEARCH_TIMEOUT", "12"))
-        profile_queries = company_profile_search_queries(str(company), str(title), str(location))
-        with ThreadPoolExecutor(max_workers=len(profile_queries)) as executor:
-            profile_result_groups = list(
-                executor.map(lambda query: web_search_results(query, timeout=timeout)[:5], profile_queries)
-            )
-        raw_company_results = [result for group in profile_result_groups for result in group]
-        preferred_company_results = [r for r in raw_company_results if _result_matches_company(str(company), r)]
+        search_timeout = min(timeout, 6)
+        company_salary_sources = collect_company_salary_sources(
+            str(company), str(title), str(location), timeout=search_timeout
+        )
+        official_search_results = [
+            item for item in company_salary_sources
+            if _is_official_company_result(str(company), str(item.get("url", "")))
+        ]
+        verified_pages = fetch_verified_company_pages(
+            str(company), official_search_results, timeout=min(timeout, 5)
+        )
+        profile_results: list[dict[str, str]] = []
+        if not verified_pages:
+            profile_queries = company_profile_search_queries(str(company), str(title), str(location))
+            with ThreadPoolExecutor(max_workers=len(profile_queries)) as executor:
+                profile_result_groups = list(
+                    executor.map(lambda query: web_search_results(query, timeout=search_timeout)[:5], profile_queries)
+                )
+            profile_results = [
+                result for group in profile_result_groups for result in group
+                if _result_matches_company(str(company), result)
+            ]
         combined_company_results: list[dict[str, str]] = []
         seen_company_urls: set[str] = set()
-        for result in preferred_company_results:
+        for result in [*verified_pages, *official_search_results, *profile_results]:
             url = result.get("url", "")
             if url and url not in seen_company_urls:
                 seen_company_urls.add(url)
                 combined_company_results.append(result)
         company_results = combined_company_results[:3]
-        company_salary_sources = collect_company_salary_sources(str(company), str(title), str(location), timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - callback must stay reliable
         research.warnings.append(f"Web research unavailable: {exc.__class__.__name__}.")
         return research
