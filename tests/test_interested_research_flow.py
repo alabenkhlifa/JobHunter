@@ -320,6 +320,43 @@ def test_levels_salary_fallback_validates_company_role_and_location(monkeypatch)
     assert calls[0][0] == "http://127.0.0.1:58427/v1/scrape"
 
 
+def test_levels_salary_fallback_tries_locale_variant_when_default_is_empty(monkeypatch):
+    monkeypatch.setenv("FIRECRAWL_API_URL", "http://127.0.0.1:58427")
+    requested_urls = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, markdown):
+            self.markdown = markdown
+
+        def json(self):
+            return {"success": True, "data": {"markdown": self.markdown}}
+
+    def fake_post(url, **kwargs):
+        requested_url = kwargs["json"]["url"]
+        requested_urls.append(requested_url)
+        if "/en-gb/" not in requested_url:
+            return Response("")
+        return Response(
+            "##### ByteDance\n"
+            "ByteDance Software Engineer Salaries in Greater Dubai Area\n"
+            "Software Engineer compensation in Greater Dubai Area at ByteDance ranges from "
+            "AED 409K per year to AED 481K per year."
+        )
+
+    source = flow.fetch_levels_salary_source(
+        "ByteDance",
+        "Backend Software Engineer, Office Intelligence",
+        "Dubai, United Arab Emirates",
+        poster=fake_post,
+    )
+
+    assert source is not None
+    assert "/en-gb/companies/bytedance/" in source["url"]
+    assert len(requested_urls) == 2
+
+
 def test_validated_levels_source_is_added_even_when_search_found_glassdoor(monkeypatch):
     monkeypatch.setattr(
         flow,

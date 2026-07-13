@@ -295,49 +295,52 @@ def fetch_levels_salary_source(
     salary_url = levels_salary_url(company, title, location)
     if not base_url or not salary_url:
         return None
-    try:
-        response = poster(
-            f"{base_url}/v1/scrape",
-            json={"url": salary_url, "formats": ["markdown"]},
-            headers={"Content-Type": "application/json"},
-            timeout=timeout,
-        )
-        if response.status_code >= 400:
-            return None
-        payload = response.json()
-    except Exception:
-        return None
-    data = payload.get("data") if isinstance(payload, dict) else None
-    markdown = str((data or {}).get("markdown") or (data or {}).get("content") or "")
-    if not markdown:
-        return None
+    locale_url = salary_url.replace("https://www.levels.fyi/", "https://www.levels.fyi/en-gb/", 1)
+    for candidate_url in (salary_url, locale_url):
+        try:
+            response = poster(
+                f"{base_url}/v1/scrape",
+                json={"url": candidate_url, "formats": ["markdown"]},
+                headers={"Content-Type": "application/json"},
+                timeout=timeout,
+            )
+            if response.status_code >= 400:
+                continue
+            payload = response.json()
+        except Exception:
+            continue
+        data = payload.get("data") if isinstance(payload, dict) else None
+        markdown = str((data or {}).get("markdown") or (data or {}).get("content") or "")
+        if not markdown:
+            continue
 
-    lines = [" ".join(line.split()) for line in markdown.splitlines() if line.strip()]
-    salary_line = next(
-        (
-            line for line in lines
-            if "aed" in line.lower()
-            and any(term in line.lower() for term in ("compensation", "salary", "pay", "ranges from"))
-        ),
-        "",
-    )
-    if salary_line:
-        salary_line = re.split(r"(?<=[A-Za-z0-9])\.(?=\s+[A-Z])", salary_line, maxsplit=1)[0].rstrip(".") + "."
-    evidence = {"title": " ".join(lines[:12]), "url": "", "snippet": salary_line}
-    location_evidence = {"title": "", "url": salary_url, "snippet": f"{salary_line} {' '.join(lines[:20])}"}
-    if (
-        not salary_line
-        or not _result_matches_company(company, evidence)
-        or not _result_matches_role(title, evidence)
-        or not _salary_source_matches_job_location(location_evidence, location)
-    ):
-        return None
-    return {
-        "source": "Levels.fyi",
-        "title": f"{company_search_name(company)} {salary_role_title(title)} salary in {_salary_city(location)}",
-        "url": salary_url,
-        "snippet": salary_line[:220],
-    }
+        lines = [" ".join(line.split()) for line in markdown.splitlines() if line.strip()]
+        salary_line = next(
+            (
+                line for line in lines
+                if "aed" in line.lower()
+                and any(term in line.lower() for term in ("compensation", "salary", "pay", "ranges from"))
+            ),
+            "",
+        )
+        if salary_line:
+            salary_line = re.split(r"(?<=[A-Za-z0-9])\.(?=\s+[A-Z])", salary_line, maxsplit=1)[0].rstrip(".") + "."
+        evidence = {"title": " ".join(lines[:12]), "url": "", "snippet": salary_line}
+        location_evidence = {"title": "", "url": candidate_url, "snippet": f"{salary_line} {' '.join(lines[:20])}"}
+        if (
+            not salary_line
+            or not _result_matches_company(company, evidence)
+            or not _result_matches_role(title, evidence)
+            or not _salary_source_matches_job_location(location_evidence, location)
+        ):
+            continue
+        return {
+            "source": "Levels.fyi",
+            "title": f"{company_search_name(company)} {salary_role_title(title)} salary in {_salary_city(location)}",
+            "url": candidate_url,
+            "snippet": salary_line[:220],
+        }
+    return None
 
 
 def _salary_source_name(url: str, title: str) -> str:
