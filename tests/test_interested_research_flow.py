@@ -141,7 +141,7 @@ def test_research_job_uses_web_results_and_warns_on_scam_terms(monkeypatch):
 
     assert calls
     assert "Top web result" in research.company_summary
-    assert "Salary evidence includes" in research.salary_range
+    assert "No company-specific range found" in research.salary_range
     assert research.salary_sources
     assert any("scam/fraud/fake/complaint" in warning for warning in research.warnings)
 
@@ -171,28 +171,32 @@ def test_collect_salary_sources_dedupes_multiple_salary_sites(monkeypatch):
     assert len(calls) >= 3
 
 
-def test_build_research_brief_is_brief_warn_only_and_includes_salary_target(monkeypatch):
+def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_TARGET_SALARY_AED_MONTHLY", "30000")
     research = flow.JobResearch(
         company_summary="AGAPI appears to be a Dubai software/data/security consultancy.",
         legitimacy="Looks plausible; verify contract and compensation before investing time.",
         recruiter="Francisco Cabilatazan — public LinkedIn job poster.",
-        salary_range="AED 15k–22k/month likely; ask AED 30k/month as configured target.",
+        salary_range="No company-specific range found. Market benchmark available.",
         sources=["https://agapi.ae/", "https://example.com/job"],
         warnings=["Salary not published."],
+        missing_signals=["Published salary not found."],
+        salary_sources=[{"source": "GulfTalent", "snippet": "Average AED 25k/month, up to AED 35k.", "url": "https://salary.example"}],
     )
 
     message = flow.build_research_brief_message(sample_job(), research)
 
     assert "Research brief" in message
-    assert "Warn only" in message
-    assert "Confidence:" in message
-    assert "Verified signals:" in message
-    assert "Missing / not verified:" in message
-    assert "Recommendation:" in message
+    assert "Verdict:" in message
+    assert "Salary — company-specific:" in message
+    assert "No company-specific salary range found" in message
+    assert "Salary — market backup:" in message
+    assert "GulfTalent" in message
+    assert "Target:" in message
     assert "AED 30k/month" in message
-    assert "Salary not published" in message
-    assert len(message) < 3000
+    assert "Verified signals:" not in message
+    assert "Warnings — Warn only:" not in message
+    assert len(message) < 1800
 
 
 def test_low_confidence_research_is_actionable_not_generic(monkeypatch):
@@ -211,9 +215,9 @@ def test_low_confidence_research_is_actionable_not_generic(monkeypatch):
 
     assert research.confidence == "Low"
     assert "quick public web/company-page check" not in message
-    assert "Official company website/careers page not confirmed" in message
-    assert "Published salary not found" in message
-    assert "Low-confidence: verify the employer and official application path" in message
+    assert "Official company page not confirmed" in message
+    assert "Employer did not publish salary" in message
+    assert "Verdict:" in message
 
 
 def test_research_brief_keyboard_has_apply_ignore_and_details():
