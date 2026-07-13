@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -843,8 +844,15 @@ def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_
     assert package.package_dir.exists()
     assert package.resume_json.exists()
     assert package.cover_json.exists()
-    assert package.resume_pdf.name.endswith(".pdf")
-    assert package.cover_pdf.name.endswith(".pdf")
+    assert package.resume_pdf.name == "Resume.pdf"
+    assert package.cover_pdf.name == "CoverLetter.pdf"
+    resume_payload = json.loads(package.resume_json.read_text(encoding="utf-8"))
+    resume_text = json.dumps(resume_payload, ensure_ascii=False).lower()
+    assert "tailored" not in resume_text
+    assert "generated" not in resume_text
+    assert "aligned with full stack developer" not in resume_text
+    assert "agapi" not in resume_payload["headline"].lower()
+    assert "full stack developer" not in resume_payload["headline"].lower()
     conn = sqlite3.connect(db)
     row = conn.execute("SELECT stage, package_path, notes FROM applications WHERE job_id='li-1'").fetchone()
     conn.close()

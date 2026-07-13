@@ -1155,14 +1155,17 @@ def _load_profile(profile_path: Path | str) -> dict[str, Any]:
 
 
 def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    """Return a credible resume payload without exposing tailoring/generation metadata.
+
+    The resume may be selected/ordered for a job internally, but the document itself
+    must read like a normal candidate resume. Never mention that it is tailored,
+    generated, or built for a specific job/company in the resume content.
+    """
     tailored = json.loads(json.dumps(profile))
-    title = job.get("title") or "the selected role"
-    company = job.get("company") or "the company"
-    tech = job.get("tech_required") or "backend, cloud, and distributed systems"
-    tailored["headline"] = f"Software Architect / Backend Lead — tailored for {title} at {company}"
-    tailored["summary"] = (
-        f"7+ years of backend/cloud engineering experience aligned with {title} at {company}. "
-        f"Relevant focus: {tech}."
+    tailored["headline"] = profile.get("headline") or "Software Architect / Backend Lead"
+    tailored["summary"] = profile.get("summary") or (
+        "7+ years of backend/cloud engineering experience across software architecture, "
+        "microservices, distributed systems, and cloud delivery."
     )
     return tailored
 
@@ -1177,9 +1180,9 @@ def _cover_letter(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any
         "recipient": job.get("company") or "Hiring Team",
         "subject": f"Application for {job.get('title') or 'Software Role'}",
         "paragraphs": [
-            f"Dear Hiring Team, I am interested in the {job.get('title')} role at {job.get('company')}. The backend/cloud scope of the role is closely aligned with my 7+ years of experience building scalable systems.",
-            f"The role's focus on {job.get('tech_required') or 'backend engineering and modern delivery practices'} matches my experience across architecture, APIs, cloud platforms, and reliable delivery.",
-            "I would welcome the chance to discuss how I can contribute to the team while keeping compensation expectations aligned early in the process.",
+            f"Dear Hiring Team, I am interested in the {job.get('title')} role at {job.get('company')}. My background includes 7+ years building scalable backend and cloud systems for production platforms.",
+            f"The role's focus on {job.get('tech_required') or 'backend engineering and modern delivery practices'} is a strong match for my experience across architecture, APIs, cloud platforms, and reliable delivery.",
+            "I would welcome the chance to discuss how I can contribute to the team and confirm compensation expectations early in the process.",
         ],
     }
 
@@ -1221,8 +1224,8 @@ def prepare_application_package(
         package_dir.mkdir(parents=True, exist_ok=True)
         resume_json = package_dir / "resume.json"
         cover_json = package_dir / "cover_letter.json"
-        resume_pdf = package_dir / "Resume_Tailored.pdf"
-        cover_pdf = package_dir / "CoverLetter_Tailored.pdf"
+        resume_pdf = package_dir / "Resume.pdf"
+        cover_pdf = package_dir / "CoverLetter.pdf"
         resume_json.write_text(json.dumps(_tailor_resume(profile, job), indent=2, ensure_ascii=False), encoding="utf-8")
         cover_json.write_text(json.dumps(_cover_letter(profile, job), indent=2, ensure_ascii=False), encoding="utf-8")
         if render_pdfs:
