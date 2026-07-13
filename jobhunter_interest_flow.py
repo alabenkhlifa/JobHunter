@@ -41,6 +41,7 @@ class JobResearch:
     recommendation: str = "Use Details to verify the official application path before investing time."
     salary_sources: list[dict[str, str]] = field(default_factory=list)
     company_salary_sources: list[dict[str, str]] = field(default_factory=list)
+    company_salary_checks: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -123,12 +124,15 @@ def firecrawl_search_results(query: str, *, timeout: float, poster=requests.post
     base_url = firecrawl_api_url()
     if not base_url:
         return []
-    response = poster(
-        f"{base_url}/v1/search",
-        json={"query": query, "limit": 5},
-        headers={"Content-Type": "application/json"},
-        timeout=timeout,
-    )
+    try:
+        response = poster(
+            f"{base_url}/v1/search",
+            json={"query": query, "limit": 5},
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+    except Exception:
+        return []
     if response.status_code >= 400:
         return []
     payload = response.json()
@@ -195,6 +199,21 @@ def company_salary_search_queries(company: str, title: str, location: str) -> li
         f"site:glassdoor.com {company} salary",
         f"site:payscale.com {company} salary",
         f"site:gulftalent.com {company} salary",
+        f"site:levels.fyi {company} salary",
+        f"site:indeed.com {company} {city} salary",
+        f"site:linkedin.com/jobs {company} {normalized_title} salary",
+    ]
+
+
+def company_salary_check_labels(company: str) -> list[str]:
+    company = " ".join(str(company or "company").split())
+    return [
+        f"{company} careers page",
+        "Glassdoor company salary",
+        "PayScale company salary",
+        "GulfTalent company salary",
+        "Levels.fyi company salary",
+        "Indeed/LinkedIn company job salary",
     ]
 
 
@@ -213,14 +232,21 @@ def _salary_source_name(url: str, title: str) -> str:
     return host or title.split(" - ")[0]
 
 
-def collect_company_salary_sources(company: str, title: str, location: str, *, max_sources: int = 2) -> list[dict[str, str]]:
+def collect_company_salary_sources(
+    company: str,
+    title: str,
+    location: str,
+    *,
+    max_sources: int = 2,
+    timeout: float | None = None,
+) -> list[dict[str, str]]:
     company_lc = str(company or "").lower()
     seen_urls: set[str] = set()
     sources: list[dict[str, str]] = []
     if not company_lc:
         return sources
     for query in company_salary_search_queries(company, title, location):
-        for result in web_search_results(query)[:5]:
+        for result in web_search_results(query, timeout=timeout)[:5]:
             url = result.get("url", "")
             text = f"{result.get('title', '')} {url} {result.get('snippet', '')}".lower()
             if not url or url in seen_urls or company_lc not in text:
@@ -256,7 +282,7 @@ def _excerpt_around_terms(text: str, terms: tuple[str, ...], *, max_len: int = 2
     return text[start:end].strip()
 
 
-def probe_company_pages(company: str, *, fetcher=requests.get, timeout: float = 6) -> list[dict[str, str]]:
+def probe_company_pages(company: str, *, fetcher=requests.get, timeout: float = 12) -> list[dict[str, str]]:
     slug = re.sub(r"[^a-z0-9]", "", str(company or "").lower())
     if len(slug) < 3:
         return []
@@ -285,13 +311,13 @@ def probe_company_pages(company: str, *, fetcher=requests.get, timeout: float = 
     return results
 
 
-def collect_salary_sources(title: str, location: str, *, max_sources: int = 3) -> list[dict[str, str]]:
+def collect_salary_sources(title: str, location: str, *, max_sources: int = 3, timeout: float | None = None) -> list[dict[str, str]]:
     trusted_domains = ("gulftalent.com", "payscale.com", "glassdoor.com", "indeed.com", "salaryexpert.com")
     seen_domains: set[str] = set()
     trusted: list[dict[str, str]] = []
     fallback: list[dict[str, str]] = []
     for query in salary_search_queries(title, location):
-        for result in web_search_results(query)[:5]:
+        for result in web_search_results(query, timeout=timeout)[:5]:
             url = result.get("url", "")
             domain = urlparse(url).netloc.lower().removeprefix("www.")
             text = f"{result.get('title', '')} {result.get('snippet', '')}".lower()
@@ -331,15 +357,16 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     title = job.get("title") or ""
     location = job.get("location") or "Dubai"
     try:
+        timeout = float(os.getenv("JOBHUNTER_WEB_RESEARCH_TIMEOUT", "12"))
         city = str(location).split(",", 1)[0].strip() or str(location)
         company_query = f"{company} {city} {title}"
-        raw_company_results = web_search_results(company_query)[:5]
+        raw_company_results = web_search_results(company_query, timeout=timeout)[:5]
         company_lc = str(company).lower()
         preferred_company_results = [
             r for r in raw_company_results
             if company_lc and company_lc in f"{r.get('title', '')} {r.get('url', '')} {r.get('snippet', '')}".lower()
         ]
-        probed_company_results = probe_company_pages(str(company))
+        probed_company_results = probe_company_pages(str(company), timeout=max(timeout, 12))
         combined_company_results: list[dict[str, str]] = []
         seen_company_urls: set[str] = set()
         for result in [*probed_company_results, *preferred_company_results, *raw_company_results]:
@@ -348,7 +375,7 @@ def research_job(job: dict[str, Any]) -> JobResearch:
                 seen_company_urls.add(url)
                 combined_company_results.append(result)
         company_results = combined_company_results[:3]
-        company_salary_sources = collect_company_salary_sources(str(company), str(title), str(location))
+        company_salary_sources = collect_company_salary_sources(str(company), str(title), str(location), timeout=timeout)
         if not company_salary_sources:
             for result in probed_company_results:
                 text = f"{result.get('title', '')} {result.get('snippet', '')}".lower()
@@ -363,7 +390,7 @@ def research_job(job: dict[str, Any]) -> JobResearch:
                         ),
                     })
                     break
-        salary_sources = collect_salary_sources(str(title), str(location))
+        salary_sources = collect_salary_sources(str(title), str(location), timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - callback must stay reliable
         research.warnings.append(f"Web research unavailable: {exc.__class__.__name__}.")
         return research
@@ -400,11 +427,13 @@ def research_job(job: dict[str, Any]) -> JobResearch:
         research.missing_signals.append("No public company/recruiter result found from the bounded web lookup.")
     if company_salary_sources:
         research.company_salary_sources = company_salary_sources
+        research.company_salary_checks = company_salary_check_labels(str(company))
         research.verified_signals.append("Company-specific compensation evidence found.")
         first_company_salary = company_salary_sources[0]
         research.salary_range = f"Company-specific: {first_company_salary['snippet'][:180]}"
         research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in company_salary_sources)]))[:8]
     else:
+        research.company_salary_checks = company_salary_check_labels(str(company))
         research.missing_signals.append("No company-specific salary range found.")
     if salary_sources:
         research.salary_sources = salary_sources
@@ -533,7 +562,10 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
             for item in company_salary
         )
     else:
-        company_salary_lines = "• No company-specific salary range found."
+        company_salary_lines = "• No exact company salary range found."
+    checked = research.company_salary_checks[:6]
+    checked_line = ", ".join(_esc(item) for item in checked) if checked else "company-specific salary sources"
+    company_salary_lines = f"{company_salary_lines}\n• Checked: {checked_line}"
 
     if market_salary:
         market_lines = "\n".join(

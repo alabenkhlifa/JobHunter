@@ -189,7 +189,8 @@ def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
     assert "Research brief" in message
     assert "Verdict:" in message
     assert "Salary — company-specific:" in message
-    assert "No company-specific salary range found" in message
+    assert "No exact company salary range found" in message
+    assert "Checked:" in message
     assert "Salary — market backup:" in message
     assert "GulfTalent" in message
     assert "Target:" in message
