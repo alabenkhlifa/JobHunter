@@ -512,6 +512,8 @@ def _compact_company_summary(company: str, location: str, results: list[dict[str
     )
     if "database platform" in lowered or "database technology" in lowered:
         company_type = "database technology company"
+    elif any(term in lowered for term in ("cloud services", "cloud provider", "aws cloud", "migrate to the cloud")):
+        company_type = "cloud technology company"
     elif "fintech" in lowered or "financial technology" in lowered or financial_product_terms >= 3:
         company_type = "financial technology company"
     elif any(term in lowered for term in ("technology consultancy", "technology consulting", "tech consultancy")):
@@ -528,7 +530,7 @@ def _compact_company_summary(company: str, location: str, results: list[dict[str
         focus.append("systems integration")
     if any(term in lowered for term in ("software architecture", "solution architecture", "architecture design")):
         focus.append("software architecture")
-    if "cloud" in lowered:
+    if "cloud" in lowered and company_type != "cloud technology company":
         focus.append("cloud platforms")
     if "artificial intelligence" in lowered or "machine learning" in lowered or re.search(r"\bai\b", lowered):
         focus.append("AI")
@@ -575,7 +577,27 @@ def _company_summary_from_job_description(company: str, description: str) -> str
     company_pattern = re.escape(str(company or "").strip())
     about_match = re.search(rf"\bAbout\s+{company_pattern}\b", value, flags=re.IGNORECASE) if company_pattern else None
     if not about_match:
-        return ""
+        alias_matches = [
+            match
+            for alias in company_identity_aliases(company)
+            if (match := re.search(rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])", value, flags=re.IGNORECASE))
+        ]
+        if not alias_matches:
+            return ""
+        first_match = min(alias_matches, key=lambda match: match.start())
+        context = value[max(0, first_match.start() - 120):first_match.start() + 900]
+        context = re.split(
+            r"\b(?:Key\s+Job\s+Responsibilities|Key\s+Responsibilities|Responsibilities|Requirements|Qualifications)\b",
+            context,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        if not any(
+            term in context.lower()
+            for term in ("customers", "platform", "products", "services", "software", "technology", "cloud", "database")
+        ):
+            return ""
+        return _compact_company_summary(company, "", [{"snippet": context}])
     about_tail = value[about_match.start():]
     about_section = re.split(
         r"\b(?:About\s+(?:The\s+)?Role|What\s+You(?:'|’)ll\s+Be\s+Doing|Responsibilities|Requirements)\b",

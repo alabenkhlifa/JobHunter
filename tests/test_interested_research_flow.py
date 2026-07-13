@@ -440,6 +440,31 @@ def test_company_summary_uses_only_late_about_section_not_role_requirements():
     assert "software architecture" not in summary
 
 
+def test_company_summary_uses_bounded_company_context_without_about_heading():
+    description = (
+        "Description The security team, part of Nimbus Cloud Services (NCS), provides scalable "
+        "cloud services to enterprise customers migrating workloads to the cloud. "
+        "Key job responsibilities Build compliance automation for one security team."
+    )
+
+    summary = flow._company_summary_from_job_description("Nimbus Cloud Services (NCS)", description)
+
+    assert summary == "Nimbus Cloud Services (NCS) is a cloud technology company."
+    assert "compliance" not in summary
+
+
+def test_company_summary_recognizes_company_alias_in_job_context():
+    description = (
+        "Description The AWS Security Assurance Services team, a part of Amazon Web Services, "
+        "provides scalable security solutions to enterprise customers as they migrate to the cloud. "
+        "Key job responsibilities Build compliance automation for the team."
+    )
+
+    summary = flow._company_summary_from_job_description("Amazon Web Services (AWS)", description)
+
+    assert summary == "Amazon Web Services (AWS) is a cloud technology company."
+
+
 def test_research_resolves_aggregator_employer_and_keeps_posting_company(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "false")
     job = sample_job(
