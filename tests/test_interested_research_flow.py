@@ -514,6 +514,32 @@ def test_research_skips_redundant_company_lookup_when_job_about_section_is_usefu
     assert research.company_summary.startswith("Job post: Revolut is a global financial technology company")
 
 
+def test_research_verifies_company_when_job_context_summary_is_generic(monkeypatch):
+    monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "true")
+    monkeypatch.setattr(flow, "collect_company_salary_sources", lambda *args, **kwargs: [])
+    calls = []
+
+    def fake_pages(company, sources, **kwargs):
+        calls.append(company)
+        return [{
+            "title": "ByteDance - Inspire Creativity, Enrich Life",
+            "url": "https://www.bytedance.com/en/",
+            "snippet": "ByteDance is a global technology company operating content and business platforms.",
+        }]
+
+    monkeypatch.setattr(flow, "fetch_verified_company_pages", fake_pages)
+    job = sample_job(
+        company="ByteDance",
+        company_website="",
+        description="Build ByteDance enterprise software products for internal staff services.",
+    )
+
+    research = flow.research_job(job)
+
+    assert calls == ["ByteDance"]
+    assert research.company_summary == "ByteDance is a global technology company."
+
+
 def test_legacy_salary_for_another_country_is_not_displayed():
     job = sample_job(
         company="Google",

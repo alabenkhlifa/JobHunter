@@ -610,6 +610,11 @@ def _company_summary_from_job_description(company: str, description: str) -> str
     return _compact_company_summary(company, "", [{"snippet": about_section}])
 
 
+def _company_summary_has_useful_detail(company: str, summary: str) -> bool:
+    normalized = " ".join(str(summary or "").split())
+    return bool(normalized and normalized != f"{company} is a technology company.")
+
+
 def _plain_text_from_html(html_text: str, *, limit: int = 6000) -> str:
     text = re.sub(r"<script\b.*?</script>", " ", html_text, flags=re.I | re.S)
     text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.I | re.S)
@@ -807,8 +812,11 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     company = employer
     title = job.get("title") or ""
     location = job.get("location") or "Dubai"
-    has_job_post_company_summary = bool(
-        _company_summary_from_job_description(str(company), str(job.get("description") or ""))
+    job_post_company_summary = _company_summary_from_job_description(
+        str(company), str(job.get("description") or "")
+    )
+    has_job_post_company_summary = _company_summary_has_useful_detail(
+        str(company), job_post_company_summary
     )
     try:
         timeout = float(os.getenv("JOBHUNTER_WEB_RESEARCH_TIMEOUT", "12"))
