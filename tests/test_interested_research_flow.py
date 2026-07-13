@@ -276,6 +276,49 @@ def test_company_salary_search_accepts_alias_and_rejects_wrong_role(monkeypatch)
     assert "solution-architect" in sources[0]["url"]
 
 
+def test_levels_salary_fallback_validates_company_role_and_location(monkeypatch):
+    monkeypatch.setenv("FIRECRAWL_API_URL", "http://127.0.0.1:58427")
+    calls = []
+
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {
+                "success": True,
+                "data": {
+                    "markdown": (
+                        "##### Amazon\n"
+                        "Amazon Solution Architect Salaries in Greater Dubai Area\n"
+                        "Solution Architect compensation in Greater Dubai Area at Amazon ranges from "
+                        "AED 505K per year for L5 to AED 1.04M per year for L7."
+                    )
+                },
+            }
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    source = flow.fetch_levels_salary_source(
+        "Amazon Web Services (AWS)",
+        "Security Assurance Solutions Architect, AWS Security Assurance Services",
+        "Dubai, United Arab Emirates",
+        poster=fake_post,
+    )
+
+    assert source == {
+        "source": "Levels.fyi",
+        "title": "Amazon Solutions Architect salary in Dubai",
+        "url": "https://www.levels.fyi/companies/amazon/salaries/solution-architect/locations/greater-dubai-area",
+        "snippet": (
+            "Solution Architect compensation in Greater Dubai Area at Amazon ranges from "
+            "AED 505K per year for L5 to AED 1.04M per year for L7."
+        ),
+    }
+    assert calls[0][0] == "http://127.0.0.1:58427/v1/scrape"
+
+
 def test_compact_company_summary_keeps_useful_verified_details():
     summary = flow._compact_company_summary(
         "TrueForge",

@@ -258,6 +258,86 @@ def company_salary_check_labels(company: str) -> list[str]:
     ]
 
 
+def _salary_slug(value: str) -> str:
+    normalized = str(value or "").replace("&", "")
+    return re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")
+
+
+def _salary_city(location: str) -> str:
+    country_labels = {
+        "france", "germany", "ksa", "netherlands", "saudi arabia", "spain", "uae",
+        "united arab emirates", "united kingdom", "united states", "usa",
+    }
+    parts = [part.strip() for part in str(location or "").split(",") if part.strip()]
+    return next((part for part in parts if part.lower() not in country_labels), parts[0] if parts else "")
+
+
+def levels_salary_url(company: str, title: str, location: str) -> str:
+    company_slug = _salary_slug(company_search_name(company))
+    role_slug = _salary_slug(salary_role_title(title)).replace("solutions-architect", "solution-architect")
+    city_slug = _salary_slug(_salary_city(location))
+    if not company_slug or not role_slug or not city_slug:
+        return ""
+    location_slug = city_slug if city_slug.startswith("greater-") else f"greater-{city_slug}-area"
+    return f"https://www.levels.fyi/companies/{company_slug}/salaries/{role_slug}/locations/{location_slug}"
+
+
+def fetch_levels_salary_source(
+    company: str,
+    title: str,
+    location: str,
+    *,
+    timeout: float | None = None,
+    poster=requests.post,
+) -> dict[str, str] | None:
+    """Fetch a predictable Levels.fyi page through Firecrawl and validate its contents."""
+    base_url = firecrawl_api_url()
+    salary_url = levels_salary_url(company, title, location)
+    if not base_url or not salary_url:
+        return None
+    try:
+        response = poster(
+            f"{base_url}/v1/scrape",
+            json={"url": salary_url, "formats": ["markdown"]},
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        if response.status_code >= 400:
+            return None
+        payload = response.json()
+    except Exception:
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    markdown = str((data or {}).get("markdown") or (data or {}).get("content") or "")
+    if not markdown:
+        return None
+
+    lines = [" ".join(line.split()) for line in markdown.splitlines() if line.strip()]
+    salary_line = next(
+        (
+            line for line in lines
+            if "aed" in line.lower()
+            and any(term in line.lower() for term in ("compensation", "salary", "pay", "ranges from"))
+        ),
+        "",
+    )
+    evidence = {"title": " ".join(lines[:12]), "url": "", "snippet": salary_line}
+    location_evidence = {"title": "", "url": salary_url, "snippet": f"{salary_line} {' '.join(lines[:20])}"}
+    if (
+        not salary_line
+        or not _result_matches_company(company, evidence)
+        or not _result_matches_role(title, evidence)
+        or not _salary_source_matches_job_location(location_evidence, location)
+    ):
+        return None
+    return {
+        "source": "Levels.fyi",
+        "title": f"{company_search_name(company)} {salary_role_title(title)} salary in {_salary_city(location)}",
+        "url": salary_url,
+        "snippet": salary_line[:220],
+    }
+
+
 def _salary_source_name(url: str, title: str) -> str:
     host = urlparse(url).netloc.lower().removeprefix("www.")
     if "gulftalent" in host:
@@ -627,6 +707,19 @@ def collect_company_salary_sources(
                 "url": url,
                 "snippet": result.get("snippet", ""),
             })
+    has_numeric_third_party = any(
+        source.get("source") != "Company careers page"
+        and _looks_like_salary_amount(f"{source.get('title') or ''} {source.get('snippet') or ''}")
+        for source in sources
+    )
+    if (
+        len(sources) < max_sources
+        and not has_numeric_third_party
+        and not any(source.get("source") == "Levels.fyi" for source in sources)
+    ):
+        levels_source = fetch_levels_salary_source(company, title, location, timeout=timeout)
+        if levels_source:
+            sources.append(levels_source)
     return sources[:max_sources]
 
 
