@@ -136,6 +136,7 @@ def test_research_job_does_not_add_general_salary_results(monkeypatch):
         return [{"title": "AGAPI complaint check", "url": "https://company.example", "snippet": "No scam report found, but verify contract."}]
 
     monkeypatch.setattr(flow, "web_search_results", fake_search)
+    monkeypatch.setattr(flow, "fetch_verified_company_pages", lambda *args, **kwargs: [])
 
     research = flow.research_job(sample_job())
 
@@ -246,7 +247,7 @@ def test_fetch_verified_company_pages_uses_only_discovered_official_domain():
     class Response:
         status_code = 200
         headers = {"content-type": "text/html"}
-        text = "<html><body>Technology consulting company focused on legacy modernization and systems integration.</body></html>"
+        text = "<html><body>TrueForge technology consulting company focused on legacy modernization and systems integration.</body></html>"
 
         def __init__(self, url):
             self.url = url
@@ -261,9 +262,38 @@ def test_fetch_verified_company_pages_uses_only_discovered_official_domain():
         fetcher=fake_get,
     )
 
-    assert set(calls) == {"https://trueforge.ae/", "https://trueforge.ae/about/"}
-    assert len(pages) == 2
+    assert set(calls) == {
+        "https://trueforge.ae/career/",
+        "https://trueforge.ae/careers/",
+        "https://trueforge.ae/about/",
+        "https://trueforge.ae/",
+    }
+    assert len(pages) == 3
     assert all(page["url"].startswith("https://trueforge.ae/") for page in pages)
+
+
+def test_fetch_verified_company_pages_probes_likely_domain_when_search_is_noisy():
+    calls = []
+
+    class Response:
+        status_code = 200
+        headers = {"content-type": "text/html"}
+        text = "<html><body>TrueForge careers compensation open positions in Dubai.</body></html>"
+
+        def __init__(self, url):
+            self.url = url
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        if url.startswith("https://trueforge.ae/"):
+            return Response(url)
+        raise OSError("not reachable")
+
+    pages = flow.fetch_verified_company_pages("TrueForge", [], fetcher=fake_get)
+
+    assert "https://trueforge.ae/career/" in calls
+    assert pages
+    assert all("trueforge.ae" in page["url"] for page in pages)
 
 
 def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):

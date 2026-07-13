@@ -306,6 +306,17 @@ def _plain_text_from_html(html_text: str, *, limit: int = 6000) -> str:
     return " ".join(html.unescape(text).split())[:limit]
 
 
+def _excerpt_around_terms(text: str, terms: tuple[str, ...], *, max_len: int = 220) -> str:
+    value = " ".join(str(text or "").split())
+    lowered = value.lower()
+    positions = [lowered.find(term) for term in terms if lowered.find(term) >= 0]
+    if not positions:
+        return value[:max_len]
+    start = min(positions)
+    end = min(len(value), start + max_len)
+    return value[start:end].strip()
+
+
 def fetch_verified_company_pages(
     company: str,
     sources: list[dict[str, str]],
@@ -313,16 +324,32 @@ def fetch_verified_company_pages(
     fetcher=requests.get,
     timeout: float = 5,
 ) -> list[dict[str, str]]:
-    """Fetch only a verified company domain discovered by search; never guess domains."""
+    """Fetch verified company-domain pages.
+
+    Prefer an official domain discovered by search. If search is noisy/empty,
+    probe a small set of likely employer-owned domains and accept only pages
+    whose final host still contains the normalized company token.
+    """
+    company_token = _company_identity_token(company)
     official_url = next(
         (str(item.get("url") or "") for item in sources if _is_official_company_result(company, str(item.get("url") or ""))),
         "",
     )
+    candidates: list[str] = []
     parsed = urlparse(official_url)
-    if not parsed.scheme or not parsed.netloc:
-        return []
-    base_url = f"{parsed.scheme}://{parsed.netloc}"
-    urls = [base_url + "/", base_url + "/about/"]
+    if parsed.scheme and parsed.netloc:
+        candidates.append(f"{parsed.scheme}://{parsed.netloc}")
+    elif company_token:
+        candidates.extend(f"https://{company_token}.{tld}" for tld in ("ae", "com", "io", "ai"))
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for base_url in candidates:
+        for path in ("/career/", "/careers/", "/about/", "/"):
+            url = base_url.rstrip("/") + path
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
 
     def fetch(url: str) -> dict[str, str] | None:
         try:
@@ -335,14 +362,28 @@ def fetch_verified_company_pages(
         except Exception:
             return None
         final_url = str(getattr(response, "url", url))
+        final_host = urlparse(final_url).netloc.lower().removeprefix("www.")
+        final_host_token = re.sub(r"[^a-z0-9]", "", final_host)
         if response.status_code >= 400 or "html" not in response.headers.get("content-type", "").lower():
             return None
-        if urlparse(final_url).netloc.lower().removeprefix("www.") != parsed.netloc.lower().removeprefix("www."):
+        if not company_token or company_token not in final_host_token:
             return None
-        return {"title": final_url, "url": final_url, "snippet": _plain_text_from_html(response.text)}
+        snippet = _plain_text_from_html(response.text)
+        snippet_token = re.sub(r"[^a-z0-9]", "", snippet.lower()[:1200])
+        if company_token not in snippet_token and not any(term in snippet.lower() for term in ("careers", "about", "compensation", "open positions")):
+            return None
+        return {"title": final_url, "url": final_url, "snippet": snippet}
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        return [result for result in executor.map(fetch, urls) if result]
+    with ThreadPoolExecutor(max_workers=min(len(urls), 4) or 1) as executor:
+        results = [result for result in executor.map(fetch, urls) if result]
+    deduped: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for result in results:
+        url = result["url"]
+        if url not in seen_urls:
+            seen_urls.add(url)
+            deduped.append(result)
+    return deduped[:3]
 
 
 def collect_company_salary_sources(
@@ -439,8 +480,22 @@ def research_job(job: dict[str, Any]) -> JobResearch:
             if _is_official_company_result(str(company), str(item.get("url", "")))
         ]
         verified_pages = fetch_verified_company_pages(
-            str(company), official_search_results, timeout=min(timeout, 5)
+            str(company), official_search_results, timeout=min(timeout, 8)
         )
+        if not company_salary_sources:
+            for page in verified_pages:
+                page_text = f"{page.get('title', '')} {page.get('snippet', '')}".lower()
+                if any(term in page_text for term in ("compensation", "bonus", "equity", "profit sharing", "salary", "pay")):
+                    company_salary_sources.append({
+                        "source": "Company careers page",
+                        "title": page.get("title", ""),
+                        "url": page.get("url", ""),
+                        "snippet": _excerpt_around_terms(
+                            page.get("snippet", ""),
+                            ("compensation", "bonus", "equity", "profit sharing", "salary", "pay"),
+                        ),
+                    })
+                    break
         profile_results: list[dict[str, str]] = []
         if not verified_pages:
             profile_queries = company_profile_search_queries(str(company), str(title), str(location))
