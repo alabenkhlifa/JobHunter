@@ -125,7 +125,7 @@ def test_web_search_falls_back_to_duckduckgo_when_firecrawl_empty(monkeypatch):
     assert results[0]["url"] == "https://agapi.ae/"
 
 
-def test_research_job_uses_web_results_and_warns_on_scam_terms(monkeypatch):
+def test_research_job_does_not_add_general_salary_results(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "true")
     calls = []
 
@@ -141,8 +141,9 @@ def test_research_job_uses_web_results_and_warns_on_scam_terms(monkeypatch):
 
     assert calls
     assert "Top web result" in research.company_summary
-    assert "No company-specific range found" in research.salary_range
-    assert research.salary_sources
+    assert not research.company_salary_sources
+    assert not research.salary_sources
+    assert "No company-specific salary range found." in research.missing_signals
     assert any("scam/fraud/fake/complaint" in warning for warning in research.warnings)
 
 
@@ -171,6 +172,52 @@ def test_collect_salary_sources_dedupes_multiple_salary_sites(monkeypatch):
     assert len(calls) >= 3
 
 
+def test_company_salary_search_rejects_snippet_only_false_positive(monkeypatch):
+    calls = []
+
+    def fake_search(query, **kwargs):
+        calls.append(query)
+        if "careers compensation" in query:
+            return [
+                {
+                    "title": "Careers | TrueForge FZ-LLC",
+                    "url": "https://trueforge.ae/career/",
+                    "snippet": "Performance bonuses and profit sharing; no salary range published.",
+                },
+                {
+                    "title": "Solutions Architect",
+                    "url": "https://my.fa.ru/jobs/123",
+                    "snippet": "Related result mentions TrueForge salary.",
+                },
+            ]
+        if "glassdoor.com" in query:
+            return [
+                {
+                    "title": "TrueForge Salaries",
+                    "url": "https://www.glassdoor.com/Salary/TrueForge-Salaries.htm",
+                    "snippet": "Solutions Architect AED 35k-45k/month.",
+                }
+            ]
+        if "indeed.com" in query:
+            return [
+                {
+                    "title": "Solutions Architect - S&P Global",
+                    "url": "https://www.linkedin.com/jobs/view/4327227809/",
+                    "snippet": "S&P never asks candidates to pay. Related: TrueForge Dubai.",
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(flow, "web_search_results", fake_search)
+
+    sources = flow.collect_company_salary_sources("TrueForge", "Solutions Architect", "Dubai")
+
+    assert len(calls) == len(flow.company_salary_search_queries("TrueForge", "Solutions Architect", "Dubai"))
+    assert [source["source"] for source in sources] == ["Company careers page", "Glassdoor"]
+    assert all("S&P" not in source["title"] for source in sources)
+    assert all("my.fa.ru" not in source["url"] for source in sources)
+
+
 def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_TARGET_SALARY_AED_MONTHLY", "30000")
     research = flow.JobResearch(
@@ -182,22 +229,39 @@ def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
         warnings=["Salary not published."],
         missing_signals=["Published salary not found."],
         salary_sources=[{"source": "GulfTalent", "snippet": "Average AED 25k/month, up to AED 35k.", "url": "https://salary.example"}],
+        company_salary_checks=flow.company_salary_check_labels("AGAPI"),
     )
 
     message = flow.build_research_brief_message(sample_job(), research)
 
-    assert "Research brief" in message
-    assert "Verdict:" in message
-    assert "Salary — company-specific:" in message
-    assert "No exact company salary range found" in message
-    assert "Checked:" in message
-    assert "Salary — market backup:" in message
-    assert "GulfTalent" in message
-    assert "Target:" in message
-    assert "AED 30k/month" in message
-    assert "Verified signals:" not in message
-    assert "Warnings — Warn only:" not in message
-    assert len(message) < 1800
+    assert "Research" in message
+    assert "Pay:" in message
+    assert "No verified AGAPI-specific range" in message
+    assert "Glassdoor, Indeed, PayScale, GulfTalent and Levels.fyi" in message
+    assert "market" not in message.lower()
+    assert "AED 25k" not in message
+    assert "Ask for the salary range" in message
+    assert len(message) < 600
+
+
+def test_research_brief_shows_company_salary_when_found():
+    research = flow.JobResearch(
+        company_summary="Official company page found.",
+        legitimacy="No obvious warning.",
+        sources=["https://agapi.ae/"],
+        company_salary_sources=[
+            {
+                "source": "Glassdoor",
+                "snippet": "AGAPI Solutions Architect AED 35k–45k/month.",
+                "url": "https://glassdoor.example/agapi",
+            }
+        ],
+    )
+
+    message = flow.build_research_brief_message(sample_job(), research)
+
+    assert "Glassdoor: AGAPI Solutions Architect AED 35k–45k/month." in message
+    assert "No verified AGAPI-specific range" not in message
 
 
 def test_low_confidence_research_is_actionable_not_generic(monkeypatch):
@@ -216,9 +280,9 @@ def test_low_confidence_research_is_actionable_not_generic(monkeypatch):
 
     assert research.confidence == "Low"
     assert "quick public web/company-page check" not in message
-    assert "Official company page not confirmed" in message
-    assert "Employer did not publish salary" in message
-    assert "Verdict:" in message
+    assert "Official page not confirmed" in message
+    assert "No verified TrueForge-specific range" in message
+    assert "Ask for the salary range" in message
 
 
 def test_research_brief_keyboard_has_apply_ignore_and_details():
@@ -294,3 +358,28 @@ def test_package_ready_keyboard_requires_final_apply_approval():
 
     assert {button["text"] for button in buttons} >= {"🚀 Proceed to apply", "⏸ Pause"}
     assert {button.get("callback_data") for button in buttons if "callback_data" in button} >= {"proceed_apply:li-1", "ignore:li-1"}
+
+
+def test_research_dry_run_reads_job_without_creating_state_tables(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT, salary TEXT, url TEXT)")
+    conn.execute(
+        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?)",
+        ("li-1", "Solutions Architect", "TrueForge", "Dubai", "", "https://example.com/job"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        flow,
+        "research_job",
+        lambda job: flow.JobResearch(company_summary="", legitimacy=""),
+    )
+
+    message = flow.render_research_dry_run("li-1", db_path=db)
+
+    assert "No verified TrueForge-specific range" in message
+    conn = sqlite3.connect(db)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert tables == {"jobs"}

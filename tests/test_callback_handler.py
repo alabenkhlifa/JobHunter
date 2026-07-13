@@ -58,8 +58,9 @@ def test_handle_interested_marks_job_and_sends_research_brief(monkeypatch):
     assert ("answer", "callback-1", "✓ Research brief ready") in calls
     sent = [(call[1], call[2]) for call in calls if call[0] == "send"]
     assert len(sent) == 1
-    assert "Research brief" in sent[0][0]
-    assert "Verdict:" in sent[0][0]
+    assert "Research" in sent[0][0]
+    assert "No verified ExampleCo-specific range" in sent[0][0]
+    assert "Next:</b> Ask for the salary range" in sent[0][0]
     assert "OpenClaw" not in sent[0][0]
     buttons = [button for row in sent[0][1]["inline_keyboard"] for button in row]
     assert {button["text"] for button in buttons} >= {"✅ Apply", "🚫 Ignore", "📄 Details"}

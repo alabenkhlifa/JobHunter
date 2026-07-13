@@ -7,6 +7,7 @@ network calls so Telegram callbacks remain reliable.
 
 from __future__ import annotations
 
+import argparse
 import html
 import json
 import os
@@ -14,17 +15,20 @@ import re
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 from datetime import datetime, timezone
+from dotenv import load_dotenv
 from pathlib import Path
 from typing import Any
 
 import scraper
 
 DEFAULT_TARGET_SALARY_AED_MONTHLY = 30000
+COMPANY_PAY_PLATFORMS = ("Glassdoor", "Indeed", "PayScale", "GulfTalent", "Levels.fyi")
 
 
 @dataclass
@@ -188,20 +192,16 @@ def salary_search_queries(title: str, location: str) -> list[str]:
 
 
 def company_salary_search_queries(company: str, title: str, location: str) -> list[str]:
-    city = str(location or "Dubai").split(",", 1)[0].strip() or "Dubai"
-    normalized_title = " ".join(str(title or "software architect").replace("/", " ").split())
     company = " ".join(str(company or "").split())
     if not company:
         return []
     return [
-        f"{company} {normalized_title} salary compensation",
-        f"{company} {city} salary engineer architect compensation",
-        f"site:glassdoor.com {company} salary",
-        f"site:payscale.com {company} salary",
-        f"site:gulftalent.com {company} salary",
-        f"site:levels.fyi {company} salary",
-        f"site:indeed.com {company} {city} salary",
-        f"site:linkedin.com/jobs {company} {normalized_title} salary",
+        f'"{company}" careers compensation salary benefits',
+        f'site:glassdoor.com/Salary "{company}"',
+        f'site:indeed.com/cmp "{company}" salaries',
+        f'site:payscale.com "{company}" salary',
+        f'site:gulftalent.com "{company}" salary',
+        f'site:levels.fyi/companies "{company}"',
     ]
 
 
@@ -210,10 +210,10 @@ def company_salary_check_labels(company: str) -> list[str]:
     return [
         f"{company} careers page",
         "Glassdoor company salary",
+        "Indeed company salary",
         "PayScale company salary",
         "GulfTalent company salary",
         "Levels.fyi company salary",
-        "Indeed/LinkedIn company job salary",
     ]
 
 
@@ -232,83 +232,68 @@ def _salary_source_name(url: str, title: str) -> str:
     return host or title.split(" - ")[0]
 
 
+def _company_identity_token(company: str) -> str:
+    words = re.findall(r"[a-z0-9]+", str(company or "").lower())
+    legal_suffixes = {"fz", "fze", "llc", "ltd", "limited", "inc", "corp", "company"}
+    while words and words[-1] in legal_suffixes:
+        words.pop()
+    return "".join(words)
+
+
+def _result_matches_company(company: str, result: dict[str, str]) -> bool:
+    """Require the employer identity in the title or URL, never only the snippet."""
+    company_token = _company_identity_token(company)
+    if len(company_token) < 4:
+        return False
+    title_token = re.sub(r"[^a-z0-9]", "", str(result.get("title") or "").lower())
+    parsed = urlparse(str(result.get("url") or ""))
+    url_token = re.sub(r"[^a-z0-9]", "", f"{parsed.netloc}{parsed.path}".lower())
+    return company_token in title_token or company_token in url_token
+
+
+def _is_official_company_result(company: str, url: str) -> bool:
+    company_token = _company_identity_token(company)
+    host_token = re.sub(r"[^a-z0-9]", "", urlparse(str(url or "")).netloc.lower().removeprefix("www."))
+    blocked_hosts = ("glassdoor", "indeed", "payscale", "gulftalent", "levels", "linkedin")
+    return bool(company_token and company_token in host_token and not any(host in host_token for host in blocked_hosts))
+
+
 def collect_company_salary_sources(
     company: str,
     title: str,
     location: str,
     *,
-    max_sources: int = 2,
+    max_sources: int = 4,
     timeout: float | None = None,
 ) -> list[dict[str, str]]:
-    company_lc = str(company or "").lower()
     seen_urls: set[str] = set()
     sources: list[dict[str, str]] = []
-    if not company_lc:
+    queries = company_salary_search_queries(company, title, location)
+    if not queries:
         return sources
-    for query in company_salary_search_queries(company, title, location):
-        for result in web_search_results(query, timeout=timeout)[:5]:
+
+    def run_search(query: str) -> list[dict[str, str]]:
+        return web_search_results(query, timeout=timeout)[:5]
+
+    with ThreadPoolExecutor(max_workers=min(len(queries), 6)) as executor:
+        result_groups = list(executor.map(run_search, queries))
+
+    for results in result_groups:
+        for result in results:
             url = result.get("url", "")
             text = f"{result.get('title', '')} {url} {result.get('snippet', '')}".lower()
-            if not url or url in seen_urls or company_lc not in text:
+            if not url or url in seen_urls or not _result_matches_company(company, result):
                 continue
             if not any(term in text for term in ("salary", "salaries", "aed", "pay", "compensation", "bonus", "equity", "profit sharing")):
                 continue
             seen_urls.add(url)
             sources.append({
-                "source": _salary_source_name(url, result.get("title", "")),
+                "source": "Company careers page" if _is_official_company_result(company, url) else _salary_source_name(url, result.get("title", "")),
                 "title": result.get("title", ""),
                 "url": url,
                 "snippet": result.get("snippet", ""),
             })
-            if len(sources) >= max_sources:
-                return sources
-    return sources
-
-
-def _plain_text_from_html(html_text: str, *, limit: int = 4000) -> str:
-    text = re.sub(r"<script\b.*?</script>", " ", html_text, flags=re.I | re.S)
-    text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.I | re.S)
-    text = re.sub(r"<[^>]+>", " ", text)
-    return " ".join(html.unescape(text).split())[:limit]
-
-
-def _excerpt_around_terms(text: str, terms: tuple[str, ...], *, max_len: int = 220) -> str:
-    lowered = text.lower()
-    positions = [lowered.find(term) for term in terms if lowered.find(term) >= 0]
-    if not positions:
-        return text[:max_len]
-    start = min(positions)
-    end = min(len(text), start + max_len)
-    return text[start:end].strip()
-
-
-def probe_company_pages(company: str, *, fetcher=requests.get, timeout: float = 12) -> list[dict[str, str]]:
-    slug = re.sub(r"[^a-z0-9]", "", str(company or "").lower())
-    if len(slug) < 3:
-        return []
-    results: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for tld in ("ae", "com", "io", "ai"):
-        for path in ("/career/", "/careers/", "/about/", "/"):
-            url = f"https://{slug}.{tld}{path}"
-            if url in seen:
-                continue
-            seen.add(url)
-            try:
-                response = fetcher(url, headers={"User-Agent": "Mozilla/5.0 JobHunter research bot"}, timeout=timeout, allow_redirects=True)
-            except Exception:
-                continue
-            if response.status_code >= 400 or "html" not in response.headers.get("content-type", ""):
-                continue
-            final_url = response.url
-            host = urlparse(final_url).netloc.lower().removeprefix("www.")
-            if slug not in re.sub(r"[^a-z0-9]", "", host):
-                continue
-            snippet = _plain_text_from_html(response.text)
-            results.append({"title": final_url, "url": final_url, "snippet": snippet})
-            if len(results) >= 3:
-                return results
-    return results
+    return sources[:max_sources]
 
 
 def collect_salary_sources(title: str, location: str, *, max_sources: int = 3, timeout: float | None = None) -> list[dict[str, str]]:
@@ -362,35 +347,16 @@ def research_job(job: dict[str, Any]) -> JobResearch:
         company_query = f"{company} {city} {title}"
         raw_company_results = web_search_results(company_query, timeout=timeout)[:5]
         company_lc = str(company).lower()
-        preferred_company_results = [
-            r for r in raw_company_results
-            if company_lc and company_lc in f"{r.get('title', '')} {r.get('url', '')} {r.get('snippet', '')}".lower()
-        ]
-        probed_company_results = probe_company_pages(str(company), timeout=max(timeout, 12))
+        preferred_company_results = [r for r in raw_company_results if _result_matches_company(str(company), r)]
         combined_company_results: list[dict[str, str]] = []
         seen_company_urls: set[str] = set()
-        for result in [*probed_company_results, *preferred_company_results, *raw_company_results]:
+        for result in preferred_company_results:
             url = result.get("url", "")
             if url and url not in seen_company_urls:
                 seen_company_urls.add(url)
                 combined_company_results.append(result)
         company_results = combined_company_results[:3]
         company_salary_sources = collect_company_salary_sources(str(company), str(title), str(location), timeout=timeout)
-        if not company_salary_sources:
-            for result in probed_company_results:
-                text = f"{result.get('title', '')} {result.get('snippet', '')}".lower()
-                if any(term in text for term in ("compensation", "bonus", "equity", "profit sharing", "salary", "pay")):
-                    company_salary_sources.append({
-                        "source": "Company careers page",
-                        "title": result.get("title", ""),
-                        "url": result.get("url", ""),
-                        "snippet": _excerpt_around_terms(
-                            result.get("snippet", ""),
-                            ("compensation", "bonus", "equity", "profit sharing", "salary", "pay"),
-                        ),
-                    })
-                    break
-        salary_sources = collect_salary_sources(str(title), str(location), timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - callback must stay reliable
         research.warnings.append(f"Web research unavailable: {exc.__class__.__name__}.")
         return research
@@ -435,18 +401,6 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     else:
         research.company_salary_checks = company_salary_check_labels(str(company))
         research.missing_signals.append("No company-specific salary range found.")
-    if salary_sources:
-        research.salary_sources = salary_sources
-        if company_salary_sources:
-            research.verified_signals.append(f"Market benchmark backup found from {len(salary_sources)} source(s).")
-        else:
-            research.verified_signals.append(f"Market salary benchmark found from {len(salary_sources)} source(s).")
-            first = salary_sources[0]
-            research.salary_range = f"No company-specific range found. Market benchmark: {first['source']}: {first['snippet'][:140]}"
-        research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in salary_sources)]))[:8]
-    else:
-        research.warnings.append("No useful salary web result found.")
-        research.missing_signals.append("No role-specific salary evidence found; salary is a market estimate only.")
     return research
 
 
@@ -548,69 +502,54 @@ def _best_company_source(company: str, sources: list[str]) -> str | None:
 
 
 def _looks_like_salary_amount(text: str) -> bool:
-    return bool(re.search(r"AED|\b\d{2,3}[kK]\b|\d[,\d]+", text or ""))
+    value = text or ""
+    amount = r"(?:(?:AED|USD|SAR)\s*\d[\d,]*(?:\.\d+)?[kK]?|[$£€]\s*\d[\d,]*(?:\.\d+)?[kK]?|\d[\d,]*(?:\.\d+)?[kK]?\s*(?:AED|USD|SAR))"
+    context = r"(?:salary|salaries|pay|compensation|base|total|range|/month|per month|monthly|/year|per year|yearly|annually)"
+    return bool(
+        re.search(rf"{context}.{{0,60}}{amount}|{amount}.{{0,60}}{context}", value, flags=re.IGNORECASE)
+    )
 
 
 def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> str:
     official_source = _best_company_source(str(job.get("company") or ""), research.sources)
-    company_salary = research.company_salary_sources[:2]
-    market_salary = research.salary_sources[:2]
-
-    if company_salary:
-        company_salary_lines = "\n".join(
-            f"• {'No range published; compensation note: ' if not _looks_like_salary_amount(str(item.get('snippet') or '')) else ''}{_esc(item.get('snippet'))} — {_esc(item.get('url'))}"
-            for item in company_salary
-        )
-    else:
-        company_salary_lines = "• No exact company salary range found."
-    checked = research.company_salary_checks[:6]
-    checked_line = ", ".join(_esc(item) for item in checked) if checked else "company-specific salary sources"
-    company_salary_lines = f"{company_salary_lines}\n• Checked: {checked_line}"
-
-    if market_salary:
-        market_lines = "\n".join(
-            f"• <b>{_esc(item.get('source'))}:</b> {_esc(item.get('snippet'))}"
-            for item in market_salary
-        )
-    else:
-        market_lines = "• No useful market benchmark found."
-
-    gaps: list[str] = []
     company_name = str(job.get("company") or "company")
-    if any("Published salary" in item for item in research.missing_signals):
-        gaps.append("Employer did not publish salary.")
-    if any("Recruiter" in item for item in research.missing_signals):
-        gaps.append("Recruiter/poster not identified.")
-    if any("company-specific salary" in item.lower() for item in research.missing_signals):
-        gaps.append(f"No {company_name}-specific salary range found.")
-    gap_lines = "\n".join(f"• {_esc(g)}" for g in dict.fromkeys(gaps)) if gaps else "• No major gaps."
+    published_salary = str(job.get("salary") or "").strip()
+    numeric_salary = [
+        item for item in research.company_salary_sources
+        if item.get("source") != "Company careers page"
+        and _looks_like_salary_amount(f"{item.get('title') or ''} {item.get('snippet') or ''}")
+    ][:2]
+    compensation_notes = [
+        item for item in research.company_salary_sources
+        if item.get("source") == "Company careers page"
+        and not _looks_like_salary_amount(f"{item.get('title') or ''} {item.get('snippet') or ''}")
+    ]
 
-    official_line = f"Official page found: {_esc(official_source)}" if official_source else "Official company page not confirmed."
-    target = target_salary_label()
-    verdict = (
-        f"Worth checking. {target} looks plausible from market benchmarks, but ask directly because company-specific salary is not published."
-        if market_salary else
-        "Worth checking only after salary is confirmed."
-    )
+    if published_salary:
+        pay_line = f"Published: {_esc(published_salary)}"
+    elif numeric_salary:
+        pay_line = " | ".join(
+            f"{_esc(item.get('source'))}: {_esc(str(item.get('snippet') or '')[:140])}"
+            for item in numeric_salary
+        )
+    else:
+        platforms = ", ".join(COMPANY_PAY_PLATFORMS[:-1]) + f" and {COMPANY_PAY_PLATFORMS[-1]}"
+        pay_line = f"No verified {_esc(company_name)}-specific range on {platforms}."
 
-    return f"""🔎 <b>Research brief</b>
+    benefits_line = ""
+    if compensation_notes:
+        benefits_line = "\nCompany mentions bonus/profit sharing/equity, but gives no figures."
+
+    company_line = "Official page found." if official_source else "Official page not confirmed."
+
+    return f"""🔎 <b>Research</b>
 
 <b>{_esc(job.get('title'))}</b>
 {_esc(job.get('company'))} — {_esc(job.get('location'))}
 
-<b>Verdict:</b> {_esc(verdict)}
-<b>Company:</b> {official_line}
-
-<b>Salary — company-specific:</b>
-{company_salary_lines}
-
-<b>Salary — market backup:</b>
-{market_lines}
-
-<b>Target:</b> {_esc(target)}
-
-<b>Gaps:</b>
-{gap_lines}
+<b>Company:</b> {company_line}
+<b>Pay:</b> {pay_line}{benefits_line}
+<b>Next:</b> Ask for the salary range.
 
 Choose next step:"""
 
@@ -771,3 +710,36 @@ def prepare_application_package(
             notes="Resume and cover letter generated; awaiting explicit Proceed to apply approval.",
         )
         return package
+
+
+def render_research_dry_run(job_id: str, *, db_path: Path | str = "data/jobs.db") -> str:
+    """Run live research without sending Telegram or mutating application state."""
+    resolved_db = Path(db_path).resolve()
+    conn = sqlite3.connect(f"file:{resolved_db.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise KeyError(f"Job not found: {job_id}")
+    job = dict(row)
+    return build_research_brief_message(job, research_job(job))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Preview Interested-stage research without sending Telegram.")
+    parser.add_argument("--job-id", required=True)
+    parser.add_argument("--db-path", default="data/jobs.db")
+    args = parser.parse_args(argv)
+
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+    try:
+        print(render_research_dry_run(args.job_id, db_path=args.db_path))
+    except KeyError as exc:
+        parser.error(str(exc))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
