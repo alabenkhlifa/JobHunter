@@ -276,6 +276,31 @@ def test_research_resolves_aggregator_employer_and_keeps_posting_company(monkeyp
     assert "no Revolut pay data" in message
 
 
+def test_research_skips_redundant_company_lookup_when_job_about_section_is_useful(monkeypatch):
+    monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "true")
+    monkeypatch.setattr(flow, "collect_company_salary_sources", lambda *args, **kwargs: [])
+
+    def unexpected_lookup(*args, **kwargs):
+        raise AssertionError("company lookup should use the available job-post fallback")
+
+    monkeypatch.setattr(flow, "fetch_verified_company_pages", unexpected_lookup)
+    monkeypatch.setattr(flow, "web_search_results", unexpected_lookup)
+    job = sample_job(
+        company="TALENTMATE",
+        company_website="",
+        description=(
+            "About Revolut Our products include spending, saving, investing, and exchanging "
+            "for 75+ million customers. We have 13,000+ people working around the world. "
+            "About The Role We build our core platform."
+        ),
+        credibility_notes="posted by agency/aggregator",
+    )
+
+    research = flow.research_job(job)
+
+    assert research.company_summary.startswith("Job post: Revolut is a global financial technology company")
+
+
 def test_legacy_salary_for_another_country_is_not_displayed():
     job = sample_job(
         company="Google",

@@ -555,6 +555,9 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     company = employer
     title = job.get("title") or ""
     location = job.get("location") or "Dubai"
+    has_job_post_company_summary = bool(
+        _company_summary_from_job_description(str(company), str(job.get("description") or ""))
+    )
     try:
         timeout = float(os.getenv("JOBHUNTER_WEB_RESEARCH_TIMEOUT", "12"))
         search_timeout = min(timeout, 6)
@@ -565,8 +568,10 @@ def research_job(job: dict[str, Any]) -> JobResearch:
             item for item in company_salary_sources
             if _is_official_company_result(str(company), str(item.get("url", "")))
         ]
-        verified_pages = fetch_verified_company_pages(
-            str(company), official_search_results, timeout=min(timeout, 8)
+        verified_pages = (
+            fetch_verified_company_pages(str(company), official_search_results, timeout=min(timeout, 8))
+            if official_search_results or not has_job_post_company_summary
+            else []
         )
         if not company_salary_sources:
             for page in verified_pages:
@@ -583,7 +588,7 @@ def research_job(job: dict[str, Any]) -> JobResearch:
                     })
                     break
         profile_results: list[dict[str, str]] = []
-        if not verified_pages:
+        if not verified_pages and not has_job_post_company_summary:
             profile_queries = company_profile_search_queries(str(company), str(title), str(location))
             with ThreadPoolExecutor(max_workers=len(profile_queries)) as executor:
                 profile_result_groups = list(
