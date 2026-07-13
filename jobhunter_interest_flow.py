@@ -510,7 +510,9 @@ def _compact_company_summary(company: str, location: str, results: list[dict[str
     financial_product_terms = sum(
         term in lowered for term in ("spending", "saving", "investing", "exchanging")
     )
-    if "fintech" in lowered or "financial technology" in lowered or financial_product_terms >= 3:
+    if "database platform" in lowered or "database technology" in lowered:
+        company_type = "database technology company"
+    elif "fintech" in lowered or "financial technology" in lowered or financial_product_terms >= 3:
         company_type = "financial technology company"
     elif any(term in lowered for term in ("technology consultancy", "technology consulting", "tech consultancy")):
         company_type = "technology consultancy"
@@ -558,6 +560,10 @@ def _compact_company_summary(company: str, location: str, results: list[dict[str
     customer_match = re.search(r"\b(\d+\+?\s+million)\s+customers\b", lowered)
     if customer_match:
         facts.append(f"{customer_match.group(1)} customers")
+    else:
+        customer_match = re.search(r"\b(\d{1,3}(?:,\d{3})*\+?)\s+customers\b", lowered)
+        if customer_match:
+            facts.append(f"{customer_match.group(1)} customers")
     if facts:
         base += f" ({'; '.join(facts[:2])})"
     return base + "."
@@ -567,9 +573,16 @@ def _company_summary_from_job_description(company: str, description: str) -> str
     """Use the employer's own About section as a labelled fallback."""
     value = " ".join(str(description or "").split())
     company_pattern = re.escape(str(company or "").strip())
-    if not company_pattern or not re.search(rf"\bAbout\s+{company_pattern}\b", value, flags=re.IGNORECASE):
+    about_match = re.search(rf"\bAbout\s+{company_pattern}\b", value, flags=re.IGNORECASE) if company_pattern else None
+    if not about_match:
         return ""
-    about_section = re.split(r"\bAbout\s+(?:The\s+)?Role\b", value, maxsplit=1, flags=re.IGNORECASE)[0]
+    about_tail = value[about_match.start():]
+    about_section = re.split(
+        r"\b(?:About\s+(?:The\s+)?Role|What\s+You(?:'|’)ll\s+Be\s+Doing|Responsibilities|Requirements)\b",
+        about_tail,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0][:2200]
     if len(about_section) < 80:
         return ""
     return _compact_company_summary(company, "", [{"snippet": about_section}])

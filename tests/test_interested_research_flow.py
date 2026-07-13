@@ -421,6 +421,25 @@ def test_compact_company_summary_does_not_use_role_location_as_headquarters():
     assert "Dubai-based" not in summary
 
 
+def test_company_summary_uses_only_late_about_section_not_role_requirements():
+    description = (
+        "The role modernizes legacy systems and owns software architecture and systems integration. "
+        "Requirements include cloud experience. "
+        "About MongoDB MongoDB provides a globally distributed database platform for the AI era. "
+        "Its cloud-native platform serves 60,000 customers worldwide."
+    )
+
+    summary = flow._company_summary_from_job_description("MongoDB", description)
+
+    assert summary == (
+        "MongoDB is a global database technology company focused on cloud platforms, AI "
+        "(60,000 customers)."
+    )
+    assert "legacy-system modernization" not in summary
+    assert "systems integration" not in summary
+    assert "software architecture" not in summary
+
+
 def test_research_resolves_aggregator_employer_and_keeps_posting_company(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "false")
     job = sample_job(
