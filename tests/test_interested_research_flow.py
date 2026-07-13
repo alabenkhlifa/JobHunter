@@ -219,6 +219,63 @@ def test_company_salary_search_rejects_snippet_only_false_positive(monkeypatch):
     assert all("my.fa.ru" not in source["url"] for source in sources)
 
 
+def test_company_aliases_and_role_family_are_generic():
+    assert flow.company_search_name("Amazon Web Services (AWS)") == "Amazon"
+    assert flow.company_search_name("Northstar Technology Services (NTS)") == "Northstar"
+    assert flow.company_search_name("S&P Global LLC") == "S&P Global"
+    assert flow.company_search_name("EY") == "EY"
+    assert "NTS" in flow.company_identity_aliases("Northstar Technology Services (NTS)")
+    assert flow._result_matches_company(
+        "EY",
+        {"title": "EY Salaries", "url": "https://www.glassdoor.com/Salary/EY-Salaries.htm"},
+    )
+    assert not flow._result_matches_company(
+        "EY",
+        {"title": "Sydney Salaries", "url": "https://example.com/sydney-salaries"},
+    )
+    assert flow.salary_role_title(
+        "Security Assurance Solutions Architect, AWS Security Assurance Services"
+    ) == "Solutions Architect"
+
+    queries = flow.company_salary_search_queries(
+        "Amazon Web Services (AWS)",
+        "Security Assurance Solutions Architect, AWS Security Assurance Services",
+        "Dubai, United Arab Emirates",
+    )
+
+    assert all('"Amazon"' in query for query in queries)
+    assert all('"Solutions Architect"' in query for query in queries[1:])
+
+
+def test_company_salary_search_accepts_alias_and_rejects_wrong_role(monkeypatch):
+    def fake_search(query, **kwargs):
+        if "levels.fyi" not in query:
+            return []
+        return [
+            {
+                "title": "Amazon Solution Architect Salary in Greater Dubai Area",
+                "url": "https://www.levels.fyi/companies/amazon/salaries/solution-architect/locations/greater-dubai-area",
+                "snippet": "Dubai total compensation ranges from AED 505K to AED 1.04M per year.",
+            },
+            {
+                "title": "Amazon Software Engineer Salary in Greater Dubai Area",
+                "url": "https://www.levels.fyi/companies/amazon/salaries/software-engineer/locations/greater-dubai-area",
+                "snippet": "Dubai total compensation is AED 700K per year.",
+            },
+        ]
+
+    monkeypatch.setattr(flow, "web_search_results", fake_search)
+
+    sources = flow.collect_company_salary_sources(
+        "Amazon Web Services (AWS)",
+        "Security Assurance Solutions Architect, AWS Security Assurance Services",
+        "Dubai, United Arab Emirates",
+    )
+
+    assert [source["source"] for source in sources] == ["Levels.fyi"]
+    assert "solution-architect" in sources[0]["url"]
+
+
 def test_compact_company_summary_keeps_useful_verified_details():
     summary = flow._compact_company_summary(
         "TrueForge",

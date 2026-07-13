@@ -193,19 +193,56 @@ def salary_search_queries(title: str, location: str) -> list[str]:
     ]
 
 
+ROLE_FAMILY_PATTERNS = (
+    ("Solutions Architect", r"\bsolutions?\s+architect\b"),
+    ("Technical Program Manager", r"\btechnical\s+program\s+manager\b"),
+    ("Machine Learning Engineer", r"\bmachine\s+learning\s+engineer\b"),
+    ("Engineering Manager", r"\bengineering\s+manager\b"),
+    ("Product Manager", r"\bproduct\s+manager\b"),
+    ("Program Manager", r"\bprogram\s+manager\b"),
+    ("Project Manager", r"\bproject\s+manager\b"),
+    ("Software Engineer", r"\bsoftware\s+engineer\b"),
+    ("Backend Engineer", r"\bback(?:end|-end)\s+engineer\b"),
+    ("Frontend Engineer", r"\bfront(?:end|-end)\s+engineer\b"),
+    ("Data Engineer", r"\bdata\s+engineer\b"),
+    ("DevOps Engineer", r"\bdevops\s+engineer\b"),
+    ("Security Engineer", r"\bsecurity\s+engineer\b"),
+    ("Cloud Architect", r"\bcloud\s+architect\b"),
+    ("Security Architect", r"\bsecurity\s+architect\b"),
+    ("Enterprise Architect", r"\benterprise\s+architect\b"),
+    ("Software Architect", r"\bsoftware\s+architect\b"),
+    ("Data Architect", r"\bdata\s+architect\b"),
+    ("Delivery Consultant", r"\bdelivery\s+consultant\b"),
+    ("Cloud Consultant", r"\bcloud\s+consultant\b"),
+    ("Business Analyst", r"\bbusiness\s+analyst\b"),
+    ("Data Analyst", r"\bdata\s+analyst\b"),
+    ("Security Analyst", r"\bsecurity\s+analyst\b"),
+)
+
+
+def salary_role_title(title: str) -> str:
+    """Reduce a verbose vacancy title to the role used by salary sites."""
+    value = " ".join(str(title or "").replace("/", " ").split())
+    for label, pattern in ROLE_FAMILY_PATTERNS:
+        if re.search(pattern, value, flags=re.IGNORECASE):
+            return label
+    fallback = re.split(r"\s*(?:,|\||\s[-–—]\s)\s*", value, maxsplit=1)[0]
+    return " ".join(fallback.split()[:6])
+
+
 def company_salary_search_queries(company: str, title: str, location: str) -> list[str]:
     city = str(location or "Dubai").split(",", 1)[0].strip() or "Dubai"
-    normalized_title = " ".join(str(title or "").replace("/", " ").split())
-    company = " ".join(str(company or "").split())
-    if not company:
+    role = salary_role_title(title)
+    search_company = company_search_name(company)
+    if not search_company:
         return []
     return [
-        f'"{company}" careers compensation salary benefits',
-        f'site:glassdoor.com/Salary "{company}" "{normalized_title}" {city}',
-        f'site:indeed.com/cmp "{company}" "{normalized_title}" {city} salaries',
-        f'site:payscale.com "{company}" "{normalized_title}" {city} salary',
-        f'site:gulftalent.com "{company}" "{normalized_title}" {city} salary',
-        f'site:levels.fyi/companies "{company}" "{normalized_title}" {city}',
+        f'"{search_company}" careers compensation salary benefits',
+        f'site:glassdoor.com/Salary "{search_company}" "{role}" {city}',
+        f'site:indeed.com/cmp "{search_company}" "{role}" {city} salaries',
+        f'site:payscale.com "{search_company}" "{role}" {city} salary',
+        f'site:gulftalent.com "{search_company}" "{role}" {city} salary',
+        f'site:levels.fyi/companies "{search_company}" "{role}" {city}',
     ]
 
 
@@ -231,35 +268,121 @@ def _salary_source_name(url: str, title: str) -> str:
         return "PayScale"
     if "indeed" in host:
         return "Indeed"
+    if "levels.fyi" in host:
+        return "Levels.fyi"
     if "salaryexpert" in host:
         return "SalaryExpert"
     return host or title.split(" - ")[0]
 
 
-def _company_identity_token(company: str) -> str:
-    words = re.findall(r"[a-z0-9]+", str(company or "").lower())
-    legal_suffixes = {"fz", "fze", "llc", "ltd", "limited", "inc", "corp", "company"}
-    while words and words[-1] in legal_suffixes:
-        words.pop()
-    return "".join(words)
+COMPANY_LEGAL_SUFFIXES = {"fz", "fze", "llc", "ltd", "limited", "inc", "corp", "company", "plc"}
+COMPANY_GENERIC_WORDS = {
+    "cloud", "digital", "global", "group", "holding", "international", "software",
+    "solutions", "systems", "technologies", "technology", "web", "services",
+}
+
+
+def company_identity_aliases(company: str) -> list[str]:
+    """Return conservative public-name variants without company-specific rules."""
+    raw = " ".join(str(company or "").split())
+    if not raw:
+        return []
+    parenthetical = re.findall(r"\(([^()]{2,30})\)", raw)
+    base = " ".join(re.sub(r"\([^()]*\)", " ", raw).split()).strip(" ,-–—")
+    legal_pattern = "|".join(re.escape(value) for value in sorted(COMPANY_LEGAL_SUFFIXES, key=len, reverse=True))
+    base = re.sub(rf"(?:[\s,.-]+(?:{legal_pattern}))+$", "", base, flags=re.IGNORECASE).strip(" ,-–—")
+    words = re.findall(r"[A-Za-z0-9]+", base)
+
+    aliases = [base]
+    distinctive = [word for word in words if word.lower() not in COMPANY_GENERIC_WORDS]
+    if len(distinctive) == 1 and len(distinctive[0]) >= 4:
+        aliases.append(distinctive[0])
+    elif words and len(words[0]) >= 4 and words[0].lower() not in COMPANY_GENERIC_WORDS:
+        aliases.append(words[0])
+    aliases.extend(value.strip() for value in parenthetical)
+    if len(words) >= 2:
+        aliases.append("".join(word[0] for word in words).upper())
+
+    deduped: list[str] = []
+    seen_tokens: set[str] = set()
+    for alias in aliases:
+        token = re.sub(r"[^a-z0-9]", "", alias.lower())
+        short_public_name = len(token) >= 2 and alias.upper() == alias
+        if (len(token) >= 3 or short_public_name) and token not in seen_tokens:
+            seen_tokens.add(token)
+            deduped.append(alias)
+    return deduped
+
+
+def company_search_name(company: str) -> str:
+    aliases = company_identity_aliases(company)
+    if not aliases:
+        return ""
+    single_brand = next(
+        (alias for alias in aliases[1:] if " " not in alias and len(alias) >= 4 and not alias.isupper()),
+        "",
+    )
+    explicit_parenthetical = {
+        re.sub(r"[^a-z0-9]", "", value.lower())
+        for value in re.findall(r"\(([^()]{2,30})\)", str(company or ""))
+    }
+    public_acronym = next(
+        (
+            alias for alias in aliases[1:]
+            if re.sub(r"[^a-z0-9]", "", alias.lower()) in explicit_parenthetical
+            and alias.isupper()
+        ),
+        "",
+    )
+    return single_brand or public_acronym or aliases[0]
 
 
 def _result_matches_company(company: str, result: dict[str, str]) -> bool:
     """Require the employer identity in the title or URL, never only the snippet."""
-    company_token = _company_identity_token(company)
-    if len(company_token) < 4:
-        return False
+    aliases = company_identity_aliases(company)
     title_token = re.sub(r"[^a-z0-9]", "", str(result.get("title") or "").lower())
     parsed = urlparse(str(result.get("url") or ""))
     url_token = re.sub(r"[^a-z0-9]", "", f"{parsed.netloc}{parsed.path}".lower())
-    return company_token in title_token or company_token in url_token
+    boundary_text = f"{result.get('title') or ''} {parsed.netloc} {parsed.path}".lower()
+    for alias in aliases:
+        alias_token = re.sub(r"[^a-z0-9]", "", alias.lower())
+        if len(alias_token) <= 3:
+            if re.search(rf"(?<![a-z0-9]){re.escape(alias.lower())}(?![a-z0-9])", boundary_text):
+                return True
+        elif alias_token in title_token or alias_token in url_token:
+            return True
+    return False
+
+
+def _result_matches_role(title: str, result: dict[str, str]) -> bool:
+    role = salary_role_title(title)
+    if not role:
+        return True
+    role_token = re.sub(r"[^a-z0-9]", "", role.lower()).replace("solutions", "solution")
+    result_token = re.sub(
+        r"[^a-z0-9]",
+        "",
+        f"{result.get('title') or ''} {result.get('url') or ''} {result.get('snippet') or ''}".lower(),
+    ).replace("solutions", "solution")
+    return role_token in result_token
 
 
 def _is_official_company_result(company: str, url: str) -> bool:
-    company_token = _company_identity_token(company)
-    host_token = re.sub(r"[^a-z0-9]", "", urlparse(str(url or "")).netloc.lower().removeprefix("www."))
+    host = urlparse(str(url or "")).netloc.lower().removeprefix("www.")
+    host_token = re.sub(r"[^a-z0-9]", "", host)
+    host_labels = {re.sub(r"[^a-z0-9]", "", label) for label in host.split(".")}
     blocked_hosts = ("glassdoor", "indeed", "payscale", "gulftalent", "levels", "linkedin")
-    return bool(company_token and company_token in host_token and not any(host in host_token for host in blocked_hosts))
+    alias_tokens = [
+        re.sub(r"[^a-z0-9]", "", alias.lower())
+        for alias in company_identity_aliases(company)
+    ]
+    return bool(
+        not any(blocked in host_token for blocked in blocked_hosts)
+        and any(
+            (len(token) >= 3 and token in host_token) or (len(token) == 2 and token in host_labels)
+            for token in alias_tokens
+        )
+    )
 
 
 def resolve_research_employer(job: dict[str, Any]) -> tuple[str, str]:
@@ -398,7 +521,7 @@ def fetch_verified_company_pages(
     probe a small set of likely employer-owned domains and accept only pages
     whose final host still contains the normalized company token.
     """
-    company_token = _company_identity_token(company)
+    company_token = re.sub(r"[^a-z0-9]", "", company_search_name(company).lower())
     official_url = next(
         (str(item.get("url") or "") for item in sources if _is_official_company_result(company, str(item.get("url") or ""))),
         "",
@@ -492,11 +615,14 @@ def collect_company_salary_sources(
             text = f"{result.get('title', '')} {url} {result.get('snippet', '')}".lower()
             if not url or url in seen_urls or not _result_matches_company(company, result):
                 continue
+            official_result = _is_official_company_result(company, url)
+            if not official_result and not _result_matches_role(title, result):
+                continue
             if not any(term in text for term in ("salary", "salaries", "aed", "pay", "compensation", "bonus", "equity", "profit sharing")):
                 continue
             seen_urls.add(url)
             sources.append({
-                "source": "Company careers page" if _is_official_company_result(company, url) else _salary_source_name(url, result.get("title", "")),
+                "source": "Company careers page" if official_result else _salary_source_name(url, result.get("title", "")),
                 "title": result.get("title", ""),
                 "url": url,
                 "snippet": result.get("snippet", ""),
