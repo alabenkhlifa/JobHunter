@@ -321,6 +321,8 @@ def fetch_levels_salary_source(
         ),
         "",
     )
+    if salary_line:
+        salary_line = re.split(r"(?<=[A-Za-z0-9])\.(?=\s+[A-Z])", salary_line, maxsplit=1)[0].rstrip(".") + "."
     evidence = {"title": " ".join(lines[:12]), "url": "", "snippet": salary_line}
     location_evidence = {"title": "", "url": salary_url, "snippet": f"{salary_line} {' '.join(lines[:20])}"}
     if (

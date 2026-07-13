@@ -291,7 +291,8 @@ def test_levels_salary_fallback_validates_company_role_and_location(monkeypatch)
                         "##### Amazon\n"
                         "Amazon Solution Architect Salaries in Greater Dubai Area\n"
                         "Solution Architect compensation in Greater Dubai Area at Amazon ranges from "
-                        "AED 505K per year for L5 to AED 1.04M per year for L7."
+                        "AED 505K per year for L5 to AED 1.04M per year for L7. "
+                        "The median yearly compensation package is AED 800K."
                     )
                 },
             }
