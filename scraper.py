@@ -1025,6 +1025,30 @@ AGENCY_OR_AGGREGATOR_TERMS = (
     "hr solutions",
     "consulting",
 )
+KNOWN_AGGREGATOR_COMPANIES = {"talentmate", "jobgether"}
+
+
+def extract_actual_employer(company, description, credibility_notes=""):
+    """Resolve a real employer only from strong patterns in known aggregator posts."""
+    posting_company = " ".join(str(company or "").split())
+    company_token = re.sub(r"[^a-z0-9]", "", posting_company.lower())
+    credibility = str(credibility_notes or "").lower()
+    if company_token not in KNOWN_AGGREGATOR_COMPANIES and "agency/aggregator" not in credibility:
+        return posting_company
+
+    patterns = [
+        r"\bAbout\s+([A-Z][A-Za-z0-9&.+’' -]{1,50}?)(?=\s+(?:People|We|Our|At|Since|Founded|is|are)\b)",
+        r"\b(?:Employer|Client)\s*:\s*([A-Z][A-Za-z0-9&.+’' -]{1,50})(?=[\n.;])",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, str(description or ""))
+        if not match:
+            continue
+        employer = " ".join(match.group(1).strip(" -–—:.").split())
+        employer_token = re.sub(r"[^a-z0-9]", "", employer.lower())
+        if len(employer) >= 3 and employer_token != company_token:
+            return employer
+    return posting_company
 
 
 def normalize_recruiter_metadata(raw):
@@ -1202,20 +1226,67 @@ def extract_min_experience(text):
     return min(years_found) if years_found else -1
 
 
-def extract_salary(text):
-    """Extract salary information from job description. Returns empty string if not found."""
+SALARY_LOCATION_GROUPS = {
+    "uae": ("united arab emirates", "uae", "dubai", "abu dhabi", "sharjah"),
+    "spain": ("spain", "madrid", "barcelona"),
+    "netherlands": ("netherlands", "amsterdam", "rotterdam"),
+    "saudi_arabia": ("saudi arabia", "ksa", "riyadh", "jeddah"),
+    "uk": ("united kingdom", "uk", "london"),
+    "us": ("united states", "usa", "new york", "san francisco"),
+    "germany": ("germany", "berlin", "munich"),
+    "france": ("france", "paris"),
+}
+
+
+def _salary_location_group(value):
+    lowered = str(value or "").lower()
+    for group, aliases in SALARY_LOCATION_GROUPS.items():
+        if any(re.search(rf"\b{re.escape(alias)}\b", lowered) for alias in aliases):
+            return group
+    return ""
+
+
+def _salary_location_label(text, match_start):
+    prefix = text[max(0, match_start - 120):match_start]
+    for aliases in SALARY_LOCATION_GROUPS.values():
+        for alias in aliases:
+            if re.search(rf"\b{re.escape(alias)}\s*:\s*$", prefix, flags=re.IGNORECASE):
+                return alias
+    match = re.search(r"(?:^|[.;\n])\s*([A-Za-z][A-Za-z ]{1,30}):\s*$", prefix)
+    if not match:
+        return ""
+    label = match.group(1).strip()
+    if label.lower() in {"salary", "pay", "base pay", "compensation", "package", "benefits"}:
+        return ""
+    return label
+
+
+def _salary_matches_job_location(label, job_location):
+    if not label or not job_location:
+        return True
+    label_group = _salary_location_group(label)
+    job_group = _salary_location_group(job_location)
+    if label_group and job_group:
+        return label_group == job_group
+    return label.lower() in str(job_location).lower()
+
+
+def extract_salary(text, job_location=""):
+    """Extract a salary only when its labelled location matches the job location."""
     patterns = [
         # Currency then amount: "AED 25,000 - 40,000" or "$90k - $120k" (min 4 digits or k suffix)
         r'(?:aed|usd|sar|us\$|\$|£|€)\s*(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:aed|usd|sar|us\$|\$|£|€)?\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK]))?\s*(?:per\s+(?:month|year|annum)|p\.?[am]\.?|monthly|annually|\/\s*(?:month|year|mo|yr))?',
         # Amount then currency: "25,000 - 40,000 AED"
         r'(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*)?(?:aed|usd|sar|us\$|\$|£|€)\s*(?:per\s+(?:month|year|annum)|monthly|annually)?',
         # "salary: AED 25,000" or "compensation: 25,000 - 40,000"
-        r'(?:salary|compensation|pay|package)\s*(?:range)?[\s:]+(?:aed|usd|sar|us\$|\$|£|€)?\s*(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:aed|usd|sar|us\$|\$|£|€)?\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK]))?',
+        r'(?:salary|compensation|pay|package)\s*(?:range)?[\s:]+(?:aed|usd|sar|us\$|\$|£|€)?\s*(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:aed|usd|sar|us\$|\$|£|€)?\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK]))?\s*(?:per\s+(?:month|year|annum)|p\.?[am]\.?|monthly|annually|\/\s*(?:month|year|mo|yr))?',
     ]
-    text_lower = text.lower()
+    matches = []
     for pattern in patterns:
-        match = re.search(pattern, text_lower)
-        if match:
+        matches.extend(re.finditer(pattern, text, flags=re.IGNORECASE))
+    for match in sorted(matches, key=lambda item: item.start()):
+        label = _salary_location_label(text, match.start())
+        if _salary_matches_job_location(label, job_location):
             return match.group(0).strip()
     return ""
 
@@ -1635,6 +1706,18 @@ def main():
         log.info(f"Fetching details: {job['title']}")
         desc = fetch_job_description(session, job)
         job["description"] = desc
+        posting_company = str(job.get("company") or "").strip()
+        actual_employer = extract_actual_employer(
+            posting_company,
+            desc,
+            job.get("credibility_notes", ""),
+        )
+        if actual_employer and actual_employer != posting_company:
+            job["company"] = actual_employer
+            job["recruiter_company"] = job.get("recruiter_company") or posting_company
+            existing_notes = str(job.get("credibility_notes") or "").strip()
+            resolution_note = f"posted via {posting_company} aggregator"
+            job["credibility_notes"] = "; ".join(value for value in (existing_notes, resolution_note) if value)
 
         if not CONFIG.get("skip_local_presence", False) and requires_local_presence(desc):
             log.info(f"Skipped (requires local presence): {job['title']} @ {job['company']}")
@@ -1650,7 +1733,7 @@ def main():
             log.info(f"Skipped ({job['min_experience']}+ yrs > {max_exp} max): {job['title']} @ {job['company']}")
             return None
 
-        job["salary"] = extract_salary(desc)
+        job["salary"] = extract_salary(desc, job.get("location", ""))
         job["work_model"] = detect_work_model(desc)
         score, breakdown = score_job(job)
         job["score"] = score

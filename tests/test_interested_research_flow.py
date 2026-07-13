@@ -141,7 +141,7 @@ def test_research_job_does_not_add_general_salary_results(monkeypatch):
     research = flow.research_job(sample_job())
 
     assert calls
-    assert research.company_summary == "AGAPI is a Dubai-based technology company."
+    assert research.company_summary == "AGAPI is a technology company."
     assert not research.company_salary_sources
     assert not research.salary_sources
     assert "No company-specific salary range found." in research.missing_signals
@@ -230,7 +230,7 @@ def test_compact_company_summary_keeps_useful_verified_details():
             },
             {
                 "title": "TrueForge | LinkedIn",
-                "snippet": "Dubai technology consultancy. 2-10 employees.",
+                "snippet": "TrueForge is a Dubai-based technology consultancy. 2-10 employees.",
             },
         ],
     )
@@ -239,6 +239,56 @@ def test_compact_company_summary_keeps_useful_verified_details():
         "TrueForge is a Dubai-based technology consultancy focused on legacy-system modernization, "
         "systems integration, software architecture (2–10 employees)."
     )
+
+
+def test_compact_company_summary_does_not_use_role_location_as_headquarters():
+    summary = flow._compact_company_summary(
+        "Google",
+        "Dubai, UAE",
+        [{"title": "About Google", "snippet": "Google is a global technology company working on cloud platforms and AI."}],
+    )
+
+    assert summary == "Google is a global technology company focused on cloud platforms, AI."
+    assert "Dubai-based" not in summary
+
+
+def test_research_resolves_aggregator_employer_and_keeps_posting_company(monkeypatch):
+    monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "false")
+    job = sample_job(
+        company="TALENTMATE",
+        description="Job Description About Revolut People deserve more from their money. We build financial products.",
+        credibility_notes="posted by agency/aggregator",
+    )
+
+    research = flow.research_job(job)
+    message = flow.build_research_brief_message(job, research)
+
+    assert research.employer_name == "Revolut"
+    assert research.posting_company == "TALENTMATE"
+    assert "Revolut — Dubai, United Arab Emirates (via TALENTMATE)" in message
+    assert "no Revolut pay data" in message
+
+
+def test_legacy_salary_for_another_country_is_not_displayed():
+    job = sample_job(
+        company="Google",
+        location="Dubai, United Arab Emirates",
+        salary="€88000 - €90500",
+        description=(
+            "Spain: €88000 - €90500 (EUR) + bonus + equity "
+            "Netherlands: €114000 - €117000 (EUR) + bonus + equity"
+        ),
+    )
+    research = flow.JobResearch(
+        company_summary="Google is a global technology company.",
+        legitimacy="No obvious warning.",
+        employer_name="Google",
+    )
+
+    message = flow.build_research_brief_message(job, research)
+
+    assert "€88000" not in message
+    assert "No published range; no Google pay data" in message
 
 
 def test_fetch_verified_company_pages_uses_only_discovered_official_domain():
@@ -331,7 +381,7 @@ def test_research_brief_shows_company_salary_when_found():
         company_salary_sources=[
             {
                 "source": "Glassdoor",
-                "snippet": "AGAPI Solutions Architect AED 35k–45k/month.",
+                "snippet": "AGAPI Solutions Architect in Dubai AED 35k–45k/month.",
                 "url": "https://glassdoor.example/agapi",
             }
         ],
@@ -339,8 +389,30 @@ def test_research_brief_shows_company_salary_when_found():
 
     message = flow.build_research_brief_message(sample_job(), research)
 
-    assert "Glassdoor: AGAPI Solutions Architect AED 35k–45k/month." in message
+    assert "Glassdoor: AGAPI Solutions Architect in Dubai AED 35k–45k/month." in message
     assert "No AGAPI pay data" not in message
+
+
+def test_company_salary_for_another_location_is_not_displayed():
+    research = flow.JobResearch(
+        company_summary="Google is a global technology company.",
+        legitimacy="No obvious warning.",
+        employer_name="Google",
+        company_salary_sources=[
+            {
+                "source": "Glassdoor",
+                "title": "Google Partner Solution Architect Salary in Spain",
+                "snippet": "Spain total pay €88,000–€90,500 per year.",
+                "url": "https://glassdoor.example/google-spain",
+            }
+        ],
+    )
+    job = sample_job(company="Google", location="Dubai, United Arab Emirates", salary="")
+
+    message = flow.build_research_brief_message(job, research)
+
+    assert "€88,000" not in message
+    assert "No published range; no Google pay data" in message
 
 
 def test_official_compensation_note_is_shown_as_benefits_not_salary():

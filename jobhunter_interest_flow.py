@@ -46,6 +46,8 @@ class JobResearch:
     salary_sources: list[dict[str, str]] = field(default_factory=list)
     company_salary_sources: list[dict[str, str]] = field(default_factory=list)
     company_salary_checks: list[str] = field(default_factory=list)
+    employer_name: str = ""
+    posting_company: str = ""
 
 
 @dataclass
@@ -192,16 +194,18 @@ def salary_search_queries(title: str, location: str) -> list[str]:
 
 
 def company_salary_search_queries(company: str, title: str, location: str) -> list[str]:
+    city = str(location or "Dubai").split(",", 1)[0].strip() or "Dubai"
+    normalized_title = " ".join(str(title or "").replace("/", " ").split())
     company = " ".join(str(company or "").split())
     if not company:
         return []
     return [
         f'"{company}" careers compensation salary benefits',
-        f'site:glassdoor.com/Salary "{company}"',
-        f'site:indeed.com/cmp "{company}" salaries',
-        f'site:payscale.com "{company}" salary',
-        f'site:gulftalent.com "{company}" salary',
-        f'site:levels.fyi/companies "{company}"',
+        f'site:glassdoor.com/Salary "{company}" "{normalized_title}" {city}',
+        f'site:indeed.com/cmp "{company}" "{normalized_title}" {city} salaries',
+        f'site:payscale.com "{company}" "{normalized_title}" {city} salary',
+        f'site:gulftalent.com "{company}" "{normalized_title}" {city} salary',
+        f'site:levels.fyi/companies "{company}" "{normalized_title}" {city}',
     ]
 
 
@@ -258,6 +262,30 @@ def _is_official_company_result(company: str, url: str) -> bool:
     return bool(company_token and company_token in host_token and not any(host in host_token for host in blocked_hosts))
 
 
+def resolve_research_employer(job: dict[str, Any]) -> tuple[str, str]:
+    """Return (real employer, posting company) when a strong aggregator pattern exists."""
+    posting_company = " ".join(str(job.get("company") or "").split())
+    employer = scraper.extract_actual_employer(
+        posting_company,
+        str(job.get("description") or ""),
+        str(job.get("credibility_notes") or ""),
+    )
+    return (employer, posting_company) if employer != posting_company else (posting_company, "")
+
+
+def validated_job_salary(job: dict[str, Any]) -> str:
+    """Revalidate legacy stored salary text against its labelled location."""
+    stored = str(job.get("salary") or "").strip()
+    if not stored:
+        return ""
+    description = str(job.get("description") or "")
+    normalized_stored = re.sub(r"[\s,]+", "", stored).lower()
+    normalized_description = re.sub(r"[\s,]+", "", description).lower()
+    if description and normalized_stored and normalized_stored in normalized_description:
+        return scraper.extract_salary(description, str(job.get("location") or ""))
+    return stored
+
+
 def company_profile_search_queries(company: str, title: str, location: str) -> list[str]:
     city = str(location or "Dubai").split(",", 1)[0].strip() or "Dubai"
     return [
@@ -287,10 +315,20 @@ def _compact_company_summary(company: str, location: str, results: list[dict[str
         focus.append("software architecture")
     if "cloud" in lowered:
         focus.append("cloud platforms")
-    if any(term in lowered for term in ("artificial intelligence", " ai ", "machine learning")):
+    if "artificial intelligence" in lowered or "machine learning" in lowered or re.search(r"\bai\b", lowered):
         focus.append("AI")
 
-    base = f"{company} is a {city + '-based ' if city else ''}{company_type}"
+    company_pattern = re.escape(str(company or "").lower())
+    city_pattern = re.escape(city.lower()) if city else ""
+    explicit_city = bool(
+        city_pattern
+        and re.search(
+            rf"\b{company_pattern}\b.{{0,120}}(?:is\s+(?:an?\s+)?{city_pattern}-based|headquartered\s+in\s+{city_pattern}|registered\s+in\s+{city_pattern})",
+            lowered,
+        )
+    )
+    scope = f"{city}-based " if explicit_city else ("global " if "global" in lowered else "")
+    base = f"{company} is a {scope}{company_type}"
     if focus:
         base += f" focused on {', '.join(dict.fromkeys(focus[:3]))}"
     size_match = re.search(r"\b(\d{1,4})\s*(?:-|–|to)\s*(\d{1,4})\s+employees\b", lowered)
@@ -463,10 +501,16 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     Web lookup is best-effort and warning-only. If search fails, the returned
     brief still contains stored metadata and salary guidance.
     """
-    research = build_default_research(job)
+    employer, posting_company = resolve_research_employer(job)
+    research_job_data = dict(job)
+    research_job_data["company"] = employer
+    research_job_data["salary"] = validated_job_salary(job)
+    research = build_default_research(research_job_data)
+    research.employer_name = employer
+    research.posting_company = posting_company
     if not web_research_enabled():
         return research
-    company = job.get("company") or ""
+    company = employer
     title = job.get("title") or ""
     location = job.get("location") or "Dubai"
     try:
@@ -656,6 +700,16 @@ def _looks_like_salary_amount(text: str) -> bool:
     )
 
 
+def _salary_source_matches_job_location(item: dict[str, str], job_location: str) -> bool:
+    text = f"{item.get('title') or ''} {item.get('snippet') or ''}".lower()
+    location_group = scraper._salary_location_group(job_location)
+    if location_group:
+        aliases = scraper.SALARY_LOCATION_GROUPS[location_group]
+        return any(re.search(rf"\b{re.escape(alias)}\b", text) for alias in aliases)
+    city = str(job_location or "").split(",", 1)[0].strip().lower()
+    return bool(city and re.search(rf"\b{re.escape(city)}\b", text))
+
+
 def _compact_benefits(sources: list[dict[str, str]]) -> str:
     text = " ".join(str(item.get("snippet") or "") for item in sources).lower()
     benefits: list[str] = []
@@ -673,12 +727,13 @@ def _compact_benefits(sources: list[dict[str, str]]) -> str:
 
 
 def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> str:
-    company_name = str(job.get("company") or "company")
-    published_salary = str(job.get("salary") or "").strip()
+    company_name = str(research.employer_name or job.get("company") or "company")
+    published_salary = validated_job_salary(job)
     numeric_salary = [
         item for item in research.company_salary_sources
         if item.get("source") != "Company careers page"
         and _looks_like_salary_amount(f"{item.get('title') or ''} {item.get('snippet') or ''}")
+        and _salary_source_matches_job_location(item, str(job.get("location") or ""))
     ][:2]
     compensation_notes = [
         item for item in research.company_salary_sources
@@ -704,7 +759,7 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
     return f"""🔎 <b>Research</b>
 
 <b>{_esc(job.get('title'))}</b>
-{_esc(job.get('company'))} — {_esc(job.get('location'))}
+{_esc(company_name)} — {_esc(job.get('location'))}{f" (via {_esc(research.posting_company)})" if research.posting_company else ""}
 
 <b>Company:</b> {_esc(company_line)}
 <b>Pay:</b> {pay_line}{benefits_block}
