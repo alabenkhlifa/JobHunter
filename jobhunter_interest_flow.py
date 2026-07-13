@@ -258,6 +258,47 @@ def _is_official_company_result(company: str, url: str) -> bool:
     return bool(company_token and company_token in host_token and not any(host in host_token for host in blocked_hosts))
 
 
+def company_profile_search_queries(company: str, title: str, location: str) -> list[str]:
+    city = str(location or "Dubai").split(",", 1)[0].strip() or "Dubai"
+    return [
+        f'"{company}" {city} company official about',
+        f'site:linkedin.com/company "{company}" {city}',
+        f'"{company}" {city} "{title}"',
+    ]
+
+
+def _compact_company_summary(company: str, location: str, results: list[dict[str, str]]) -> str:
+    city = str(location or "").split(",", 1)[0].strip()
+    text = " ".join(f"{item.get('title', '')} {item.get('snippet', '')}" for item in results)
+    lowered = text.lower()
+    if any(term in lowered for term in ("technology consultancy", "technology consulting", "tech consultancy")):
+        company_type = "technology consultancy"
+    elif any(term in lowered for term in ("software company", "software development")):
+        company_type = "software company"
+    else:
+        company_type = "technology company"
+
+    focus: list[str] = []
+    if "legacy" in lowered and any(term in lowered for term in ("modernisation", "modernization", "modernise", "modernize")):
+        focus.append("legacy-system modernization")
+    if any(term in lowered for term in ("systems integration", "system integration", "apis", "api architecture")):
+        focus.append("systems integration")
+    if any(term in lowered for term in ("software architecture", "solution architecture", "architecture design")):
+        focus.append("software architecture")
+    if "cloud" in lowered:
+        focus.append("cloud platforms")
+    if any(term in lowered for term in ("artificial intelligence", " ai ", "machine learning")):
+        focus.append("AI")
+
+    base = f"{company} is a {city + '-based ' if city else ''}{company_type}"
+    if focus:
+        base += f" focused on {', '.join(dict.fromkeys(focus[:3]))}"
+    size_match = re.search(r"\b(\d{1,4})\s*(?:-|–|to)\s*(\d{1,4})\s+employees\b", lowered)
+    if size_match:
+        base += f" ({size_match.group(1)}–{size_match.group(2)} employees)"
+    return base + "."
+
+
 def collect_company_salary_sources(
     company: str,
     title: str,
@@ -343,10 +384,12 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     location = job.get("location") or "Dubai"
     try:
         timeout = float(os.getenv("JOBHUNTER_WEB_RESEARCH_TIMEOUT", "12"))
-        city = str(location).split(",", 1)[0].strip() or str(location)
-        company_query = f"{company} {city} {title}"
-        raw_company_results = web_search_results(company_query, timeout=timeout)[:5]
-        company_lc = str(company).lower()
+        profile_queries = company_profile_search_queries(str(company), str(title), str(location))
+        with ThreadPoolExecutor(max_workers=len(profile_queries)) as executor:
+            profile_result_groups = list(
+                executor.map(lambda query: web_search_results(query, timeout=timeout)[:5], profile_queries)
+            )
+        raw_company_results = [result for group in profile_result_groups for result in group]
         preferred_company_results = [r for r in raw_company_results if _result_matches_company(str(company), r)]
         combined_company_results: list[dict[str, str]] = []
         seen_company_urls: set[str] = set()
@@ -361,13 +404,12 @@ def research_job(job: dict[str, Any]) -> JobResearch:
         research.warnings.append(f"Web research unavailable: {exc.__class__.__name__}.")
         return research
     if company_results:
-        top = company_results[0]
-        research.company_summary = f"Top web result: {top['title']} — {top['snippet'][:180]}"
+        research.company_summary = _compact_company_summary(str(company), str(location), company_results)
         research.confidence = "Medium"
-        research.verified_signals.append(f"Web result found: {top['title']}.")
+        research.verified_signals.append(f"Web result found: {company_results[0]['title']}.")
         official_results = [
             r for r in company_results
-            if company_lc and company_lc in str(r.get("url", "")).lower()
+            if _is_official_company_result(str(company), str(r.get("url", "")))
         ]
         if official_results:
             official = official_results[0]
@@ -490,17 +532,6 @@ def _esc(value: Any) -> str:
     return html.escape(str(value or "").strip())
 
 
-def _best_company_source(company: str, sources: list[str]) -> str | None:
-    company_token = re.sub(r"[^a-z0-9]", "", company.lower())
-    blocked_hosts = ("linkedin.", "indeed.", "glassdoor.", "gulftalent.", "payscale.", "trabajo.", "jooble.")
-    for source in sources:
-        host = urlparse(str(source)).netloc.lower().removeprefix("www.")
-        host_token = re.sub(r"[^a-z0-9]", "", host.split(":", 1)[0])
-        if company_token and company_token in host_token and not any(blocked in host for blocked in blocked_hosts):
-            return source
-    return None
-
-
 def _looks_like_salary_amount(text: str) -> bool:
     value = text or ""
     amount = r"(?:(?:AED|USD|SAR)\s*\d[\d,]*(?:\.\d+)?[kK]?|[$£€]\s*\d[\d,]*(?:\.\d+)?[kK]?|\d[\d,]*(?:\.\d+)?[kK]?\s*(?:AED|USD|SAR))"
@@ -511,7 +542,6 @@ def _looks_like_salary_amount(text: str) -> bool:
 
 
 def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> str:
-    official_source = _best_company_source(str(job.get("company") or ""), research.sources)
     company_name = str(job.get("company") or "company")
     published_salary = str(job.get("salary") or "").strip()
     numeric_salary = [
@@ -533,23 +563,24 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
             for item in numeric_salary
         )
     else:
-        platforms = ", ".join(COMPANY_PAY_PLATFORMS[:-1]) + f" and {COMPANY_PAY_PLATFORMS[-1]}"
-        pay_line = f"No verified {_esc(company_name)}-specific range on {platforms}."
+        platforms = ", ".join(COMPANY_PAY_PLATFORMS[:-1]) + f" or {COMPANY_PAY_PLATFORMS[-1]}"
+        pay_line = f"No published range; no {_esc(company_name)} pay data on {platforms}."
 
-    benefits_line = ""
+    benefits_line = None
     if compensation_notes:
-        benefits_line = "\nCompany mentions bonus/profit sharing/equity, but gives no figures."
+        benefits_line = "Bonus, profit sharing and senior-role equity mentioned; no figures."
 
-    company_line = "Official page found." if official_source else "Official page not confirmed."
+    company_line = " ".join(str(research.company_summary or "Company details not verified.").split())[:180]
+    benefits_block = f"\n<b>Benefits:</b> {_esc(benefits_line)}" if benefits_line else ""
 
     return f"""🔎 <b>Research</b>
 
 <b>{_esc(job.get('title'))}</b>
 {_esc(job.get('company'))} — {_esc(job.get('location'))}
 
-<b>Company:</b> {company_line}
-<b>Pay:</b> {pay_line}{benefits_line}
-<b>Next:</b> Ask for the salary range.
+<b>Company:</b> {_esc(company_line)}
+<b>Pay:</b> {pay_line}{benefits_block}
+<b>Ask:</b> Fixed monthly salary and bonus/equity terms.
 
 Choose next step:"""
 

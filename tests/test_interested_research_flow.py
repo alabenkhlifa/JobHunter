@@ -140,7 +140,7 @@ def test_research_job_does_not_add_general_salary_results(monkeypatch):
     research = flow.research_job(sample_job())
 
     assert calls
-    assert "Top web result" in research.company_summary
+    assert research.company_summary == "AGAPI is a Dubai-based technology company."
     assert not research.company_salary_sources
     assert not research.salary_sources
     assert "No company-specific salary range found." in research.missing_signals
@@ -218,6 +218,28 @@ def test_company_salary_search_rejects_snippet_only_false_positive(monkeypatch):
     assert all("my.fa.ru" not in source["url"] for source in sources)
 
 
+def test_compact_company_summary_keeps_useful_verified_details():
+    summary = flow._compact_company_summary(
+        "TrueForge",
+        "Dubai, UAE",
+        [
+            {
+                "title": "TrueForge FZ-LLC",
+                "snippet": "Independent technology consulting company focused on legacy modernization, systems integration and software architecture design.",
+            },
+            {
+                "title": "TrueForge | LinkedIn",
+                "snippet": "Dubai technology consultancy. 2-10 employees.",
+            },
+        ],
+    )
+
+    assert summary == (
+        "TrueForge is a Dubai-based technology consultancy focused on legacy-system modernization, "
+        "systems integration, software architecture (2–10 employees)."
+    )
+
+
 def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_TARGET_SALARY_AED_MONTHLY", "30000")
     research = flow.JobResearch(
@@ -235,12 +257,13 @@ def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
     message = flow.build_research_brief_message(sample_job(), research)
 
     assert "Research" in message
+    assert "AGAPI appears to be a Dubai software/data/security consultancy." in message
     assert "Pay:" in message
-    assert "No verified AGAPI-specific range" in message
-    assert "Glassdoor, Indeed, PayScale, GulfTalent and Levels.fyi" in message
+    assert "No published range; no AGAPI pay data" in message
+    assert "Glassdoor, Indeed, PayScale, GulfTalent or Levels.fyi" in message
     assert "market" not in message.lower()
     assert "AED 25k" not in message
-    assert "Ask for the salary range" in message
+    assert "Fixed monthly salary and bonus/equity terms" in message
     assert len(message) < 600
 
 
@@ -261,7 +284,7 @@ def test_research_brief_shows_company_salary_when_found():
     message = flow.build_research_brief_message(sample_job(), research)
 
     assert "Glassdoor: AGAPI Solutions Architect AED 35k–45k/month." in message
-    assert "No verified AGAPI-specific range" not in message
+    assert "No AGAPI pay data" not in message
 
 
 def test_low_confidence_research_is_actionable_not_generic(monkeypatch):
@@ -280,9 +303,9 @@ def test_low_confidence_research_is_actionable_not_generic(monkeypatch):
 
     assert research.confidence == "Low"
     assert "quick public web/company-page check" not in message
-    assert "Official page not confirmed" in message
-    assert "No verified TrueForge-specific range" in message
-    assert "Ask for the salary range" in message
+    assert "No independent company evidence" in message
+    assert "No published range; no TrueForge pay data" in message
+    assert "Fixed monthly salary and bonus/equity terms" in message
 
 
 def test_research_brief_keyboard_has_apply_ignore_and_details():
@@ -378,7 +401,7 @@ def test_research_dry_run_reads_job_without_creating_state_tables(tmp_path, monk
 
     message = flow.render_research_dry_run("li-1", db_path=db)
 
-    assert "No verified TrueForge-specific range" in message
+    assert "No published range; no TrueForge pay data" in message
     conn = sqlite3.connect(db)
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
