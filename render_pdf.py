@@ -62,6 +62,7 @@ class ResumePDF(SanitizedPDF):
         self.cell(0, 5, f"Page {self.page_no()}/{{nb}}", align="C")
 
     def section_header(self, title):
+        self.ensure_space(16)
         self.set_font("Helvetica", "B", 11)
         self.set_text_color(*DARK)
         self.cell(0, 7, title.upper(), new_x="LMARGIN", new_y="NEXT")
@@ -70,12 +71,23 @@ class ResumePDF(SanitizedPDF):
         self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
         self.ln(3)
 
+    def ensure_space(self, height):
+        if self.get_y() + height > self.h - self.b_margin:
+            self.add_page()
+
     def bullet(self, text):
         self.set_font("Helvetica", "", 9)
         self.set_text_color(*TEXT)
         x = self.get_x()
         self.cell(5, 4.5, "-", new_x="END")
-        self.multi_cell(self.w - self.r_margin - x - 6, 4.5, f" {text}", new_x="LMARGIN", new_y="NEXT")
+        self.multi_cell(
+            self.w - self.r_margin - x - 6,
+            4.5,
+            f" {text}",
+            new_x="LMARGIN",
+            new_y="NEXT",
+            align="L",
+        )
 
     def render(self):
         p = self.profile
@@ -113,7 +125,7 @@ class ResumePDF(SanitizedPDF):
             self.section_header("Professional Summary")
             self.set_font("Helvetica", "", 9)
             self.set_text_color(*TEXT)
-            self.multi_cell(0, 4.5, p["summary"], new_x="LMARGIN", new_y="NEXT")
+            self.multi_cell(0, 4.5, p["summary"], new_x="LMARGIN", new_y="NEXT", align="L")
             self.ln(3)
 
         # ── Skills ──
@@ -128,7 +140,14 @@ class ResumePDF(SanitizedPDF):
                 self.cell(cat_width, 4.5, f"{category}: ", new_x="END")
                 self.set_font("Helvetica", "", 9)
                 self.set_text_color(*TEXT)
-                self.multi_cell(self.w - self.r_margin - self.get_x(), 4.5, skill_text, new_x="LMARGIN", new_y="NEXT")
+                self.multi_cell(
+                    self.w - self.r_margin - self.get_x(),
+                    4.5,
+                    skill_text,
+                    new_x="LMARGIN",
+                    new_y="NEXT",
+                    align="L",
+                )
             self.ln(2)
 
         # ── Certifications ──
@@ -136,13 +155,21 @@ class ResumePDF(SanitizedPDF):
             self.section_header("Certifications")
             self.set_font("Helvetica", "", 9)
             self.set_text_color(*TEXT)
-            self.multi_cell(0, 4.5, "  |  ".join(p["certifications"]), new_x="LMARGIN", new_y="NEXT")
+            self.multi_cell(
+                0,
+                4.5,
+                "  |  ".join(p["certifications"]),
+                new_x="LMARGIN",
+                new_y="NEXT",
+                align="L",
+            )
             self.ln(3)
 
         # ── Experience ──
         if p.get("experience"):
             self.section_header("Professional Experience")
             for i, exp in enumerate(p["experience"]):
+                self.ensure_space(min(66, 30 + (len(exp.get("bullets", [])) * 8)))
                 # Title + Company on same line
                 self.set_font("Helvetica", "B", 10)
                 self.set_text_color(*DARK)
@@ -176,7 +203,14 @@ class ResumePDF(SanitizedPDF):
                 if exp.get("tech"):
                     self.set_font("Helvetica", "I", 8)
                     self.set_text_color(*ACCENT)
-                    self.multi_cell(0, 4, f"Tech: {exp['tech']}", new_x="LMARGIN", new_y="NEXT")
+                    self.multi_cell(
+                        0,
+                        4,
+                        f"Tech: {exp['tech']}",
+                        new_x="LMARGIN",
+                        new_y="NEXT",
+                        align="L",
+                    )
 
                 if i < len(p["experience"]) - 1:
                     self.ln(3)
@@ -212,21 +246,21 @@ class ResumePDF(SanitizedPDF):
                 self.cell(self.get_string_width("Teaching: ") + 2, 4.5, "Teaching: ", new_x="END")
                 self.set_font("Helvetica", "", 9)
                 self.set_text_color(*TEXT)
-                self.multi_cell(0, 4.5, add["teaching"], new_x="LMARGIN", new_y="NEXT")
+                self.multi_cell(0, 4.5, add["teaching"], new_x="LMARGIN", new_y="NEXT", align="L")
             if add.get("languages"):
                 self.set_font("Helvetica", "B", 9)
                 self.set_text_color(*MEDIUM)
                 self.cell(self.get_string_width("Languages: ") + 2, 4.5, "Languages: ", new_x="END")
                 self.set_font("Helvetica", "", 9)
                 self.set_text_color(*TEXT)
-                self.multi_cell(0, 4.5, add["languages"], new_x="LMARGIN", new_y="NEXT")
+                self.multi_cell(0, 4.5, add["languages"], new_x="LMARGIN", new_y="NEXT", align="L")
             if add.get("interests"):
                 self.set_font("Helvetica", "B", 9)
                 self.set_text_color(*MEDIUM)
                 self.cell(self.get_string_width("Interests: ") + 2, 4.5, "Interests: ", new_x="END")
                 self.set_font("Helvetica", "", 9)
                 self.set_text_color(*TEXT)
-                self.multi_cell(0, 4.5, add["interests"], new_x="LMARGIN", new_y="NEXT")
+                self.multi_cell(0, 4.5, add["interests"], new_x="LMARGIN", new_y="NEXT", align="L")
 
 
 # ── Cover Letter PDF ──────────────────────────────────────────────────────────
@@ -278,12 +312,67 @@ class CoverLetterPDF(SanitizedPDF):
         self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
         self.ln(5)
 
-        # ── Body paragraphs ──
+        # ── Body ──
         self.set_font("Helvetica", "", 10)
         self.set_text_color(*TEXT)
-        for para in d.get("paragraphs", []):
-            self.multi_cell(0, 5.5, para, new_x="LMARGIN", new_y="NEXT")
+        if d.get("salutation"):
+            self.multi_cell(0, 5.5, d["salutation"], new_x="LMARGIN", new_y="NEXT", align="L")
             self.ln(3)
+
+        if d.get("opening"):
+            self.multi_cell(0, 5.5, d["opening"], new_x="LMARGIN", new_y="NEXT", align="L")
+            self.ln(4)
+
+        if d.get("highlights"):
+            self.set_font("Helvetica", "B", 10)
+            self.multi_cell(0, 5.5, d.get("highlights_heading", "Relevant experience:"), new_x="LMARGIN", new_y="NEXT", align="L")
+            self.ln(1)
+            for highlight in d["highlights"]:
+                self.set_font("Helvetica", "", 9.5)
+                x = self.get_x()
+                self.cell(5, 5, "-", new_x="END")
+                self.multi_cell(
+                    self.w - self.r_margin - x - 6,
+                    5,
+                    f" {highlight.get('text', '')}",
+                    new_x="LMARGIN",
+                    new_y="NEXT",
+                    align="L",
+                )
+                if highlight.get("context"):
+                    self.set_x(self.l_margin + 5)
+                    self.set_font("Helvetica", "I", 8)
+                    self.set_text_color(*MEDIUM)
+                    self.multi_cell(
+                        0,
+                        4,
+                        highlight["context"],
+                        new_x="LMARGIN",
+                        new_y="NEXT",
+                        align="L",
+                    )
+                    self.set_text_color(*TEXT)
+                self.ln(1.5)
+            self.ln(2)
+
+        for field in ("motivation", "closing"):
+            if d.get(field):
+                self.set_font("Helvetica", "", 10)
+                self.set_text_color(*TEXT)
+                self.multi_cell(0, 5.5, d[field], new_x="LMARGIN", new_y="NEXT", align="L")
+                self.ln(4)
+
+        if d.get("signoff"):
+            self.set_font("Helvetica", "", 10)
+            self.multi_cell(0, 5.5, d["signoff"], new_x="LMARGIN", new_y="NEXT", align="L")
+            self.set_font("Helvetica", "B", 10)
+            self.multi_cell(0, 5.5, d.get("signature", d.get("name", "")), new_x="LMARGIN", new_y="NEXT", align="L")
+
+        if not d.get("opening"):
+            for para in d.get("paragraphs", []):
+                self.set_font("Helvetica", "", 10)
+                self.multi_cell(0, 5.5, para, new_x="LMARGIN", new_y="NEXT", align="L")
+                self.ln(3)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

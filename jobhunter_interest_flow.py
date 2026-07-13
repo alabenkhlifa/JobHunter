@@ -34,6 +34,43 @@ DEFAULT_DB_PATH = PROJECT_DIR / "data" / "jobs.db"
 DEFAULT_PROFILE_PATH = PROJECT_DIR / "data" / "master-profile.json"
 DEFAULT_OUTPUT_DIR = PROJECT_DIR / "data" / "output"
 
+_RELEVANCE_GROUPS = (
+    ("backend", "server-side", "microservice", "spring boot", "rest api", "api"),
+    ("distributed", "event-driven", "message queue", "rabbitmq", "mqtt"),
+    ("cloud", "aws", "azure", "kubernetes", "docker", "terraform"),
+    ("database", "mysql", "postgresql", "mongodb", "nosql", "redis", "cache"),
+    ("performance", "scalable", "scalability", "load testing", "reliability", "monitoring"),
+    ("java", "kotlin", "jvm", "spring"),
+    ("golang", "pprof"),
+    ("ai", "machine learning", "ml", "rag", "llm"),
+    ("lead", "leadership", "mentoring", "architecture", "system design"),
+)
+
+_KEYWORD_STOPWORDS = {
+    "about", "after", "also", "being", "build", "company", "could", "from", "have",
+    "development", "engineering", "experience", "including", "into", "management", "other",
+    "platform", "product", "production", "responsible", "role", "service", "services", "software",
+    "strong", "system", "systems", "team", "technical", "technology", "their", "these", "through",
+    "using", "with", "work", "years", "your",
+}
+
+_SKILL_SIGNALS = (
+    ("java", ("java", "jvm"), ("java",), 10),
+    ("java_backend", ("java", "jvm"), ("spring boot",), 6),
+    ("backend", ("backend", "server-side"), ("spring boot", "microservices", "rest api"), 5),
+    (
+        "distributed",
+        ("distributed", "message queue", "distributed storage"),
+        ("event-driven", "rabbitmq", "mqtt", "microservices"),
+        8,
+    ),
+    ("database", ("mysql", "nosql", "database", "cache"), ("postgresql", "mongodb", "redis"), 7),
+    ("cache", ("cache",), ("redis",), 5),
+    ("nosql", ("nosql",), ("mongodb",), 5),
+    ("cloud", ("cloud", "kubernetes", "container"), ("aws", "azure", "kubernetes", "docker"), 5),
+    ("ai", ("ai / ml", "ai/ml", "machine learning"), ("ai", "rag", "llm"), 4),
+)
+
 
 @dataclass
 class JobResearch:
@@ -1143,15 +1180,123 @@ def _slug(text: str) -> str:
 def _load_profile(profile_path: Path | str) -> dict[str, Any]:
     path = Path(profile_path)
     if not path.exists():
-        return {
-            "name": "Ala Ben Khalifa",
-            "headline": "Software Architect / Backend Lead",
-            "summary": "7+ years building backend, cloud, and software architecture systems.",
-            "skills": {"Backend": ["Java", "Spring Boot", "Go", "Microservices"], "Cloud": ["AWS", "Azure", "Docker", "Kubernetes"]},
-            "experience": [],
-            "education": [],
-        }
-    return json.loads(path.read_text(encoding="utf-8"))
+        raise FileNotFoundError(f"Candidate profile not found: {path}")
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    if not profile.get("name"):
+        raise ValueError("Candidate profile is missing the required name field")
+    return profile
+
+
+def _normalized_relevance_text(text: Any) -> str:
+    return " ".join(re.sub(r"[^a-z0-9+#./-]+", " ", str(text or "").lower()).split())
+
+
+def _contains_relevance_term(text: str, term: str) -> bool:
+    return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
+
+
+def _relevance_score(text: Any, job_text: str) -> int:
+    candidate = _normalized_relevance_text(text)
+    if not candidate:
+        return 0
+    candidate_words = {
+        word for word in re.findall(r"[a-z0-9+#.]+", candidate)
+        if len(word) > 2 and word not in _KEYWORD_STOPWORDS
+    }
+    job_words = {
+        word for word in re.findall(r"[a-z0-9+#.]+", job_text)
+        if len(word) > 2 and word not in _KEYWORD_STOPWORDS
+    }
+    score = len(candidate_words & job_words) * 2
+    for group in _RELEVANCE_GROUPS:
+        if any(_contains_relevance_term(job_text, term) for term in group) and any(
+            _contains_relevance_term(candidate, term) for term in group
+        ):
+            score += 4
+    return score
+
+
+def _job_relevance_text(job: dict[str, Any]) -> str:
+    return _normalized_relevance_text(
+        " ".join(
+            str(job.get(field) or "")
+            for field in ("title", "description", "tech_required", "tech_nice_to_have")
+        )
+    )
+
+
+def _ranked_values(values: list[Any], job_text: str) -> list[Any]:
+    return [
+        value
+        for _, value in sorted(
+            enumerate(values),
+            key=lambda item: (-_relevance_score(item[1], job_text), item[0]),
+        )
+    ]
+
+
+def _skill_families(skill: Any, job_text: str) -> set[str]:
+    candidate = _normalized_relevance_text(skill)
+    return {
+        family
+        for family, job_terms, candidate_terms, _ in _SKILL_SIGNALS
+        if any(_contains_relevance_term(job_text, term) for term in job_terms)
+        and any(_contains_relevance_term(candidate, term) for term in candidate_terms)
+    }
+
+
+def _skill_relevance_score(skill: Any, job_text: str) -> int:
+    candidate = _normalized_relevance_text(skill)
+    score = _relevance_score(skill, job_text)
+    if candidate and _contains_relevance_term(job_text, candidate):
+        score += 10
+    for _, job_terms, candidate_terms, bonus in _SKILL_SIGNALS:
+        if any(_contains_relevance_term(job_text, term) for term in job_terms) and any(
+            _contains_relevance_term(candidate, term) for term in candidate_terms
+        ):
+            score += bonus
+    return score
+
+
+def _ranked_skills(values: list[Any], job_text: str) -> list[Any]:
+    return [
+        value
+        for _, value in sorted(
+            enumerate(values),
+            key=lambda item: (-_skill_relevance_score(item[1], job_text), item[0]),
+        )
+    ]
+
+
+def _skill_category_score(category: str, values: Any, job_text: str) -> int:
+    value_scores = (
+        [_skill_relevance_score(value, job_text) for value in values]
+        if isinstance(values, list)
+        else [_relevance_score(values, job_text)]
+    )
+    return max(value_scores or [0]) + (_relevance_score(category, job_text) * 2)
+
+
+def _focused_summary(summary: str, job_text: str, *, limit: int = 3) -> str:
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", summary.strip()) if part.strip()]
+    if len(sentences) <= limit:
+        return summary
+    ranked_indexes = sorted(
+        range(len(sentences)),
+        key=lambda index: (-_relevance_score(sentences[index], job_text), index),
+    )[:limit]
+    return " ".join(sentences[index] for index in sorted(ranked_indexes))
+
+
+def _tailored_experience(profile: dict[str, Any], job_text: str) -> list[dict[str, Any]]:
+    tailored_experience: list[dict[str, Any]] = []
+    for index, source in enumerate(profile.get("experience") or []):
+        experience = json.loads(json.dumps(source))
+        bullets = list(experience.get("bullets") or [])
+        limit = 3 if index == 0 else 4 if index < 3 else 2
+        experience["bullets"] = _ranked_values(bullets, job_text)[:limit]
+        tailored_experience.append(experience)
+    return tailored_experience
 
 
 def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
@@ -1162,27 +1307,145 @@ def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, An
     generated, or built for a specific job/company in the resume content.
     """
     tailored = json.loads(json.dumps(profile))
-    tailored["headline"] = profile.get("headline") or "Software Architect / Backend Lead"
-    tailored["summary"] = profile.get("summary") or (
-        "7+ years of backend/cloud engineering experience across software architecture, "
-        "microservices, distributed systems, and cloud delivery."
-    )
+    job_text = _job_relevance_text(job)
+    if profile.get("summary"):
+        tailored["summary"] = _focused_summary(str(profile["summary"]), job_text)
+    skills = profile.get("skills") or {}
+    tailored["skills"] = {
+        category: _ranked_skills(list(values), job_text) if isinstance(values, list) else values
+        for _, (category, values) in sorted(
+            enumerate(skills.items()),
+            key=lambda item: (-_skill_category_score(item[1][0], item[1][1], job_text), item[0]),
+        )
+    }
+    tailored["experience"] = _tailored_experience(profile, job_text)
     return tailored
 
 
+def _ranked_evidence(
+    profile: dict[str, Any],
+    job_text: str,
+    job_title: str = "",
+    *,
+    limit: int = 3,
+) -> list[dict[str, str]]:
+    evidence: list[tuple[int, int, int, dict[str, str]]] = []
+    title_words = set(re.findall(r"[a-z]+", job_title.lower())) - {"backend", "office", "intelligence"}
+    for experience_index, experience in enumerate(profile.get("experience") or []):
+        experience_title = str(experience.get("title") or "")
+        experience_title_words = set(re.findall(r"[a-z]+", experience_title.lower()))
+        title_score = len(title_words & experience_title_words) * 4
+        recency_score = max(0, 4 - experience_index)
+        context = " - ".join(
+            value for value in (experience_title, str(experience.get("company") or "")) if value
+        )
+        for bullet_index, bullet in enumerate(experience.get("bullets") or []):
+            evidence.append(
+                (
+                    _relevance_score(bullet, job_text) + title_score + recency_score,
+                    experience_index,
+                    bullet_index,
+                    {"text": str(bullet).strip(), "context": context},
+                )
+            )
+    evidence.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [item[3] for item in evidence[:limit]]
+
+
+def _matched_skills(profile: dict[str, Any], job_text: str, *, limit: int = 5) -> list[str]:
+    values = [
+        str(skill)
+        for skills in (profile.get("skills") or {}).values()
+        for skill in (skills if isinstance(skills, list) else [skills])
+    ]
+    ranked = [value for value in _ranked_skills(values, job_text) if _skill_relevance_score(value, job_text) > 0]
+    selected: list[str] = []
+    covered_families: set[str] = set()
+    for value in ranked:
+        families = _skill_families(value, job_text)
+        if selected and families and families <= covered_families:
+            continue
+        selected.append(value)
+        covered_families.update(families)
+        if len(selected) >= limit:
+            return selected
+    for value in ranked:
+        if value not in selected:
+            selected.append(value)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _role_focus(job_text: str, *, limit: int = 3) -> list[str]:
+    signals = (
+        (("server-side", "backend"), "scalable backend services"),
+        (("distributed system", "message queue", "distributed storage"), "distributed systems"),
+        (("backend infrastructure", "infrastructure"), "backend infrastructure"),
+        (("high-performance", "performance", "scalable"), "performance and reliability"),
+        (("mysql", "nosql", "database"), "data-intensive systems"),
+        (("ai / ml", "ai/ml", "machine learning"), "applied AI"),
+    )
+    return [
+        label for terms, label in signals
+        if any(_contains_relevance_term(job_text, term) for term in terms)
+    ][:limit]
+
+
+def _natural_join(values: list[str]) -> str:
+    if len(values) < 2:
+        return values[0] if values else ""
+    if len(values) == 2:
+        return " and ".join(values)
+    return f"{', '.join(values[:-1])}, and {values[-1]}"
+
+
 def _cover_letter(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
-    name = profile.get("name") or "Ala Ben Khalifa"
+    name = str(profile["name"])
     contact_parts = [profile.get("email"), profile.get("phone"), profile.get("linkedin")]
+    company = str(job.get("company") or "the company")
+    title = str(job.get("title") or "Software Engineer")
+    job_text = _job_relevance_text(job)
+    skills = _matched_skills(profile, job_text)
+    focus = _role_focus(job_text)
+    years_match = re.search(r"\b\d+\+?\s+years\b", str(profile.get("summary") or ""), re.IGNORECASE)
+    opening_sentences = [f"I am applying for the {title} role at {company}."]
+    if skills:
+        if years_match:
+            opening_sentences.append(
+                f"With {years_match.group(0)} of experience, my background includes {_natural_join(skills)}."
+            )
+        else:
+            opening_sentences.append(f"My background includes {_natural_join(skills)}.")
+    if focus:
+        opening_sentences.append(
+            f"This background is relevant to the role's focus on {_natural_join(focus)}."
+        )
+    team_name = title.split(",", 1)[1].strip() if "," in title else title
+    now = datetime.now(timezone.utc)
     return {
         "name": name,
         "contact": " | ".join(str(p) for p in contact_parts if p),
-        "date": datetime.now(timezone.utc).date().isoformat(),
-        "recipient": job.get("company") or "Hiring Team",
-        "subject": f"Application for {job.get('title') or 'Software Role'}",
+        "date": f"{now.strftime('%B')} {now.day}, {now.year}",
+        "recipient": f"{company} Hiring Team",
+        "subject": f"Application for {title}",
+        "salutation": "Dear Hiring Team,",
+        "opening": " ".join(opening_sentences),
+        "highlights_heading": "Relevant examples from my experience include:",
+        "highlights": _ranked_evidence(profile, job_text, title),
+        "motivation": (
+            f"I am particularly interested in contributing to the {team_name} team, where the role combines "
+            "system design, production delivery, and continuous technical improvement."
+        ),
+        "closing": (
+            f"I would welcome the opportunity to discuss how my backend architecture and delivery experience "
+            f"could contribute to {company}. Thank you for your consideration."
+        ),
+        "signoff": "Sincerely,",
+        "signature": name,
         "paragraphs": [
-            f"Dear Hiring Team, I am interested in the {job.get('title')} role at {job.get('company')}. My background includes 7+ years building scalable backend and cloud systems for production platforms.",
-            f"The role's focus on {job.get('tech_required') or 'backend engineering and modern delivery practices'} is a strong match for my experience across architecture, APIs, cloud platforms, and reliable delivery.",
-            "I would welcome the chance to discuss how I can contribute to the team and confirm compensation expectations early in the process.",
+            # Kept for compatibility with any downstream consumer of the JSON payload.
+            f"I am applying for the {title} role at {company}.",
         ],
     }
 

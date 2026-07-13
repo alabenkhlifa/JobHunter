@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import jobhunter_interest_flow as flow
+import render_pdf as pdf_renderer
 
 
 def sample_job(**overrides):
@@ -859,6 +860,142 @@ def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_
     assert row[0] == "package_generated"
     assert str(package.package_dir) == row[1]
     assert "Resume and cover letter generated" in row[2]
+
+
+def test_load_profile_refuses_to_fabricate_missing_candidate_data(tmp_path):
+    with pytest.raises(FileNotFoundError, match="Candidate profile not found"):
+        flow._load_profile(tmp_path / "missing-profile.json")
+
+    incomplete = tmp_path / "incomplete-profile.json"
+    incomplete.write_text('{"headline":"Backend Engineer"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="required name"):
+        flow._load_profile(incomplete)
+
+
+def test_resume_tailoring_only_selects_and_reorders_profile_evidence():
+    profile = {
+        "name": "Candidate",
+        "headline": "Software Architect | Backend",
+        "summary": (
+            "Backend engineer with 8 years of experience. "
+            "Built consumer mobile applications. "
+            "Led Java microservices and distributed-system delivery. "
+            "Teach Spring Framework."
+        ),
+        "skills": {
+            "Cloud": ["Azure", "AWS"],
+            "Backend": ["Spring Security", "Java", "Spring Boot", "RabbitMQ", "Microservices"],
+            "Data": ["PostgreSQL", "Redis"],
+        },
+        "experience": [
+            {
+                "title": "Senior Software Engineer",
+                "company": "Example",
+                "bullets": [
+                    "Built a marketing landing page.",
+                    "Owned Java microservices using RabbitMQ and Redis.",
+                    "Improved distributed backend reliability.",
+                    "Mentored engineers.",
+                    "Maintained office documentation.",
+                ],
+                "tech": "Java - Spring Boot - RabbitMQ - Redis",
+            }
+        ],
+    }
+    job = {
+        "title": "Backend Software Engineer",
+        "company": "TargetCo",
+        "description": "Build Java server-side services using distributed systems, message queues, and cache.",
+    }
+
+    resume = flow._tailor_resume(profile, job)
+
+    assert resume["headline"] == profile["headline"]
+    assert "TargetCo" not in json.dumps(resume)
+    assert resume["skills"]["Backend"][:3] == ["Java", "Spring Boot", "Microservices"]
+    original_bullets = set(profile["experience"][0]["bullets"])
+    selected_bullets = resume["experience"][0]["bullets"]
+    assert set(selected_bullets) <= original_bullets
+    assert len(selected_bullets) == 3
+    assert "Java microservices" in selected_bullets[0]
+    assert resume["experience"][0]["tech"] == profile["experience"][0]["tech"]
+
+
+def test_cover_letter_is_specific_complete_and_evidence_based():
+    profile = {
+        "name": "Candidate",
+        "email": "candidate@example.com",
+        "headline": "Backend Engineer",
+        "summary": "Backend engineer with 8+ years of experience.",
+        "skills": {
+            "Backend": ["Java", "Spring Boot", "Microservices", "RabbitMQ"],
+            "Data": ["PostgreSQL", "Redis"],
+        },
+        "experience": [
+            {
+                "title": "Senior Software Engineer",
+                "company": "Example",
+                "bullets": [
+                    "Owned Java microservices using RabbitMQ and Redis.",
+                    "Improved distributed backend reliability.",
+                    "Led production delivery and monitoring.",
+                ],
+            }
+        ],
+    }
+    job = {
+        "title": "Backend Software Engineer, Office Systems",
+        "company": "TargetCo",
+        "description": "Build scalable server-side products, distributed systems, and backend infrastructure using Java.",
+    }
+
+    letter = flow._cover_letter(profile, job)
+    letter_text = json.dumps(letter, ensure_ascii=False).lower()
+
+    assert "targetco" in letter_text
+    assert "backend software engineer, office systems" in letter_text
+    assert letter["salutation"] == "Dear Hiring Team,"
+    assert letter["signoff"] == "Sincerely,"
+    assert letter["signature"] == "Candidate"
+    assert {highlight["text"] for highlight in letter["highlights"]} == set(profile["experience"][0]["bullets"])
+    assert "compensation" not in letter_text
+    assert "tailored" not in letter_text
+    assert "generated" not in letter_text
+
+
+def test_pdf_renderers_keep_cover_to_one_page_and_prevent_orphaned_blocks(tmp_path):
+    cover = pdf_renderer.CoverLetterPDF(
+        {
+            "name": "Candidate",
+            "contact": "candidate@example.com",
+            "date": "July 13, 2026",
+            "recipient": "TargetCo Hiring Team",
+            "subject": "Application for Backend Engineer",
+            "salutation": "Dear Hiring Team,",
+            "opening": "I am applying for the Backend Engineer role at TargetCo.",
+            "highlights_heading": "Relevant examples from my experience include:",
+            "highlights": [
+                {"text": "Owned Java microservices using RabbitMQ and Redis.", "context": "Senior Engineer - Example"},
+                {"text": "Improved distributed backend reliability.", "context": "Senior Engineer - Example"},
+            ],
+            "motivation": "I am interested in the team's backend infrastructure work.",
+            "closing": "Thank you for your consideration.",
+            "signoff": "Sincerely,",
+            "signature": "Candidate",
+        }
+    )
+    cover.render()
+    cover_path = tmp_path / "cover.pdf"
+    cover.output(cover_path)
+
+    assert len(cover.pages) == 1
+    assert cover_path.stat().st_size > 1000
+
+    resume = pdf_renderer.ResumePDF({"name": "Candidate"})
+    resume.add_page()
+    resume.set_y(resume.h - resume.b_margin - 5)
+    resume.ensure_space(20)
+    assert resume.page_no() == 2
 
 
 def test_application_package_defaults_are_project_anchored():
