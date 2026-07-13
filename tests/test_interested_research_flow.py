@@ -320,6 +320,37 @@ def test_levels_salary_fallback_validates_company_role_and_location(monkeypatch)
     assert calls[0][0] == "http://127.0.0.1:58427/v1/scrape"
 
 
+def test_validated_levels_source_is_added_even_when_search_found_glassdoor(monkeypatch):
+    monkeypatch.setattr(
+        flow,
+        "web_search_results",
+        lambda *args, **kwargs: [{
+            "title": "ByteDance Software Engineer Salary in Dubai",
+            "url": "https://www.glassdoor.com/Salary/ByteDance-Software-Engineer-Dubai.htm",
+            "snippet": "Dubai average salary is $192,501 per year.",
+        }],
+    )
+    monkeypatch.setattr(
+        flow,
+        "fetch_levels_salary_source",
+        lambda *args, **kwargs: {
+            "source": "Levels.fyi",
+            "title": "ByteDance Software Engineer salary in Dubai",
+            "url": "https://www.levels.fyi/companies/bytedance/salaries/software-engineer/locations/greater-dubai-area",
+            "snippet": "Dubai total compensation ranges from AED 409K to AED 481K per year.",
+        },
+    )
+
+    sources = flow.collect_company_salary_sources(
+        "ByteDance",
+        "Backend Software Engineer, Office Intelligence",
+        "Dubai, United Arab Emirates",
+    )
+
+    assert sources[0]["source"] == "Levels.fyi"
+    assert any(source["source"] == "Glassdoor" for source in sources)
+
+
 def test_compact_company_summary_keeps_useful_verified_details():
     summary = flow._compact_company_summary(
         "TrueForge",
@@ -550,6 +581,38 @@ def test_research_brief_shows_company_salary_when_found():
 
     assert "Glassdoor: AGAPI Solutions Architect in Dubai AED 35k–45k/month." in message
     assert "No AGAPI pay data" not in message
+
+
+def test_research_brief_prefers_one_validated_salary_source():
+    research = flow.JobResearch(
+        company_summary="ByteDance is a global technology company.",
+        legitimacy="No obvious warning.",
+        employer_name="ByteDance",
+        company_salary_sources=[
+            {
+                "source": "Glassdoor",
+                "title": "ByteDance Software Engineer Salary in Dubai",
+                "snippet": "Dubai average salary is $192,501 per year.",
+                "url": "https://glassdoor.example/bytedance",
+            },
+            {
+                "source": "Levels.fyi",
+                "title": "ByteDance Software Engineer salary in Dubai",
+                "snippet": "Dubai total compensation ranges from AED 409K to AED 481K per year.",
+                "url": "https://levels.example/bytedance",
+            },
+        ],
+    )
+    job = sample_job(
+        company="ByteDance",
+        title="Backend Software Engineer, Office Intelligence",
+        salary="",
+    )
+
+    message = flow.build_research_brief_message(job, research)
+
+    assert "Levels.fyi: Dubai total compensation ranges from AED 409K to AED 481K per year." in message
+    assert "$192,501" not in message
 
 
 def test_company_salary_for_another_location_is_not_displayed():

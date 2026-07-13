@@ -709,19 +709,12 @@ def collect_company_salary_sources(
                 "url": url,
                 "snippet": result.get("snippet", ""),
             })
-    has_numeric_third_party = any(
-        source.get("source") != "Company careers page"
-        and _looks_like_salary_amount(f"{source.get('title') or ''} {source.get('snippet') or ''}")
-        for source in sources
-    )
     if (
-        len(sources) < max_sources
-        and not has_numeric_third_party
-        and not any(source.get("source") == "Levels.fyi" for source in sources)
+        not any(source.get("source") == "Levels.fyi" for source in sources)
     ):
         levels_source = fetch_levels_salary_source(company, title, location, timeout=timeout)
         if levels_source:
-            sources.append(levels_source)
+            sources.insert(0, levels_source)
     return sources[:max_sources]
 
 
@@ -1004,12 +997,13 @@ def _compact_benefits(sources: list[dict[str, str]]) -> str:
 def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> str:
     company_name = str(research.employer_name or job.get("company") or "company")
     published_salary = validated_job_salary(job)
-    numeric_salary = [
+    salary_source_priority = {"Levels.fyi": 0, "Glassdoor": 1, "Indeed": 2, "PayScale": 3, "GulfTalent": 4}
+    numeric_salary = sorted([
         item for item in research.company_salary_sources
         if item.get("source") != "Company careers page"
         and _looks_like_salary_amount(f"{item.get('title') or ''} {item.get('snippet') or ''}")
         and _salary_source_matches_job_location(item, str(job.get("location") or ""))
-    ][:2]
+    ], key=lambda item: salary_source_priority.get(str(item.get("source") or ""), 99))[:1]
     compensation_notes = [
         item for item in research.company_salary_sources
         if item.get("source") == "Company careers page"
