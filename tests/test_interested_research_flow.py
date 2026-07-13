@@ -313,6 +313,27 @@ def test_research_brief_shows_company_salary_when_found():
     assert "No AGAPI pay data" not in message
 
 
+def test_official_compensation_note_is_shown_as_benefits_not_salary():
+    research = flow.JobResearch(
+        company_summary="TrueForge is a Dubai-based technology consultancy.",
+        legitimacy="No obvious warning.",
+        company_salary_sources=[
+            {
+                "source": "Company careers page",
+                "title": "Careers | TrueForge",
+                "snippet": "Compensation includes bonuses and equity. A client saved AED 340k/year.",
+                "url": "https://trueforge.ae/career/",
+            }
+        ],
+    )
+
+    message = flow.build_research_brief_message(sample_job(company="TrueForge"), research)
+
+    assert "No published range; no TrueForge pay data" in message
+    assert "Benefits:</b> bonus, equity mentioned; no figures." in message
+    assert "AED 340k" not in message
+
+
 def test_low_confidence_research_is_actionable_not_generic(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_TARGET_SALARY_AED_MONTHLY", "30000")
     job = sample_job(

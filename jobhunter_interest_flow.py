@@ -601,6 +601,22 @@ def _looks_like_salary_amount(text: str) -> bool:
     )
 
 
+def _compact_benefits(sources: list[dict[str, str]]) -> str:
+    text = " ".join(str(item.get("snippet") or "") for item in sources).lower()
+    benefits: list[str] = []
+    if "bonus" in text:
+        benefits.append("bonus")
+    if "profit sharing" in text:
+        benefits.append("profit sharing")
+    if "equity" in text:
+        benefits.append("equity")
+    if "insurance" in text:
+        benefits.append("insurance")
+    if not benefits:
+        return "Company discusses compensation, but gives no figures."
+    return f"{', '.join(benefits)} mentioned; no figures."
+
+
 def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> str:
     company_name = str(job.get("company") or "company")
     published_salary = str(job.get("salary") or "").strip()
@@ -612,7 +628,6 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
     compensation_notes = [
         item for item in research.company_salary_sources
         if item.get("source") == "Company careers page"
-        and not _looks_like_salary_amount(f"{item.get('title') or ''} {item.get('snippet') or ''}")
     ]
 
     if published_salary:
@@ -626,9 +641,7 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
         platforms = ", ".join(COMPANY_PAY_PLATFORMS[:-1]) + f" or {COMPANY_PAY_PLATFORMS[-1]}"
         pay_line = f"No published range; no {_esc(company_name)} pay data on {platforms}."
 
-    benefits_line = None
-    if compensation_notes:
-        benefits_line = "Bonus, profit sharing and senior-role equity mentioned; no figures."
+    benefits_line = _compact_benefits(compensation_notes) if compensation_notes else None
 
     company_line = " ".join(str(research.company_summary or "Company details not verified.").split())[:180]
     benefits_block = f"\n<b>Benefits:</b> {_esc(benefits_line)}" if benefits_line else ""
