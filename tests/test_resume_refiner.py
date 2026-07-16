@@ -8,8 +8,10 @@ import jobhunter_interest_flow as flow
 import resume_refiner as refiner
 from resume_refiner import (
     ProfileValidationError,
+    apply_resume_variant,
     atomic_update_profile,
     project_public_resume,
+    select_resume_variant,
     usable_evidence,
     validate_profile,
 )
@@ -63,6 +65,17 @@ def _backend_job():
     }
 
 
+def _variant(variant_id="variant-java", **overrides):
+    variant = {
+        "id": variant_id,
+        "confirmation": "candidate-confirmed",
+        "match_terms": ["java"],
+        "resume": {"headline": "Java Backend Engineer"},
+    }
+    variant.update(overrides)
+    return variant
+
+
 def test_legacy_profile_keeps_existing_tailoring_behavior():
     profile = {
         "name": "Candidate",
@@ -84,6 +97,8 @@ def test_legacy_profile_keeps_existing_tailoring_behavior():
     validate_profile(profile)
     resume = flow._tailor_resume(profile, _backend_job())
 
+    assert select_resume_variant(profile, "Java backend") is None
+    assert project_public_resume(profile) == profile
     assert resume["headline"] == profile["headline"]
     assert resume["experience"][0]["tech"] == profile["experience"][0]["tech"]
     assert set(resume["experience"][0]["bullets"]) == set(profile["experience"][0]["bullets"])
@@ -176,6 +191,219 @@ def test_public_projection_excludes_refiner_defaults_and_unknown_private_metadat
         assert "manager_name" not in serialized
         assert "private_verification" not in serialized
     assert resume["experience"][0]["tech"] == "Kotlin - Java - Spring Boot"
+
+
+def test_resume_variant_selection_is_confirmed_whole_term_and_deterministic():
+    variants = [
+        _variant("variant-two-low", match_terms=["java", "spring boot"], priority=1),
+        _variant("variant-two-high-first", match_terms=["java", "spring boot"], priority=5),
+        _variant("variant-two-high-second", match_terms=["java", "spring boot"], priority=5),
+        _variant("variant-one", match_terms=["java"], priority=100),
+        _variant(
+            "variant-draft",
+            confirmation="draft",
+            match_terms=["java", "spring boot", "apis"],
+            priority=1000,
+        ),
+        _variant(
+            "variant-unconfirmed",
+            confirmation="unconfirmed",
+            match_terms=["java", "spring boot", "apis"],
+            priority=1000,
+        ),
+    ]
+    profile = _v2_profile(resume_variants=variants)
+
+    selected = select_resume_variant(
+        profile,
+        "A JavaScript runtime plus Java APIs built with SPRING-BOOT.",
+    )
+
+    assert selected["id"] == "variant-two-high-first"
+    selected["resume"]["headline"] = "Changed copy"
+    assert profile["resume_variants"][1]["resume"]["headline"] == "Java Backend Engineer"
+
+    java_only = _v2_profile(resume_variants=[_variant(match_terms=["java"])])
+    assert select_resume_variant(java_only, "JavaScript and TypeScript") is None
+
+
+def test_draft_and_unconfirmed_resume_variants_are_never_selected_or_applied():
+    profile = _v2_profile(
+        resume_variants=[
+            _variant("variant-draft", confirmation="draft"),
+            _variant("variant-unconfirmed", confirmation="unconfirmed"),
+        ]
+    )
+
+    assert select_resume_variant(profile, "Java backend") is None
+    with pytest.raises(ProfileValidationError, match="candidate-confirmed"):
+        apply_resume_variant(profile, profile["resume_variants"][0])
+
+
+def test_nonmatching_confirmed_variant_keeps_legacy_tailoring_fallback():
+    profile = _v2_profile(
+        resume_variants=[_variant(match_terms=["java"])],
+    )
+    job = {
+        "title": "Cloud Engineer",
+        "company": "TargetCo",
+        "description": "Build Azure and Terraform infrastructure.",
+    }
+
+    resume, variant = flow._resume_for_job(profile, job)
+
+    assert variant is None
+    assert resume["headline"] == profile["headline"]
+    assert resume["experience"][0]["company"] == profile["experience"][0]["company"]
+
+
+def test_apply_resume_variant_preserves_exact_content_order_and_omits_metadata():
+    exact_experience = [
+        {
+            "title": "Lead Engineer",
+            "company": "Company B",
+            "dates": "2022 - Present",
+            "bullets": ["Second fact stays first.", "First fact stays second."],
+            "tech": "Java - Kotlin",
+        },
+        {
+            "title": "Engineer",
+            "company": "Company A",
+            "dates": "2020 - 2022",
+            "bullets": ["Earlier experience remains second."],
+        },
+    ]
+    variant = _variant(
+        match_terms=["backend"],
+        priority=7,
+        max_pages=2,
+        omit_sections=["summary", "skills", "additional"],
+        resume={
+            "headline": "Confirmed Backend Headline",
+            "summary": "This section is intentionally omitted.",
+            "certifications": ["Certification B", "Certification A"],
+            "skills": {"Backend": ["Kotlin", "Java"]},
+            "experience": exact_experience,
+            "education": [
+                {"degree": "Degree B", "school": "School B", "dates": "2014 - 2016"},
+                {"degree": "Degree A", "school": "School A", "dates": "2010 - 2014"},
+            ],
+            "additional": {"languages": "English"},
+        },
+    )
+    profile = _v2_profile(
+        email="candidate@example.com",
+        phone="+1 555 0100",
+        resume_variants=[variant],
+        private_notes="must not leak",
+    )
+
+    selected = select_resume_variant(profile, "Backend services")
+    result = apply_resume_variant(profile, selected)
+
+    assert "resume_variants" not in project_public_resume(profile)
+    assert result["name"] == "Candidate"
+    assert result["email"] == "candidate@example.com"
+    assert result["phone"] == "+1 555 0100"
+    assert result["headline"] == "Confirmed Backend Headline"
+    assert result["certifications"] == ["Certification B", "Certification A"]
+    assert result["experience"] == exact_experience
+    assert [item["degree"] for item in result["education"]] == ["Degree B", "Degree A"]
+    assert "summary" not in result
+    assert "skills" not in result
+    assert "additional" not in result
+    for metadata in (
+        "resume_variants",
+        "id",
+        "confirmation",
+        "match_terms",
+        "priority",
+        "max_pages",
+        "omit_sections",
+        "private_notes",
+    ):
+        assert metadata not in result
+
+    result["experience"][0]["bullets"][0] = "Changed output"
+    assert variant["resume"]["experience"][0]["bullets"][0] == "Second fact stays first."
+
+
+def test_resume_variant_does_not_inherit_unspecified_master_sections():
+    variant = _variant(resume={"headline": "Confirmed Java Backend Engineer"})
+    profile = _v2_profile(
+        resume_variants=[variant],
+        certifications=["Master-only certification"],
+        additional={"interests": "Master-only interests"},
+    )
+
+    result = apply_resume_variant(profile, select_resume_variant(profile, "Java services"))
+
+    assert result == {
+        "name": "Candidate",
+        "headline": "Confirmed Java Backend Engineer",
+    }
+
+
+@pytest.mark.parametrize("identity_field", ["name", "email", "phone", "linkedin", "location"])
+def test_resume_variant_rejects_identity_and_contact_overrides(identity_field):
+    profile = _v2_profile(
+        resume_variants=[_variant(resume={identity_field: "untrusted override"})]
+    )
+
+    with pytest.raises(ProfileValidationError, match="identity"):
+        validate_profile(profile)
+
+
+@pytest.mark.parametrize(
+    "mutate,error",
+    [
+        (lambda p: p.update(resume_variants={}), "resume_variants must be a list"),
+        (lambda p: p["resume_variants"][0].update(id="bad id"), "id is missing or malformed"),
+        (
+            lambda p: p["resume_variants"].append(copy.deepcopy(p["resume_variants"][0])),
+            "id is duplicated",
+        ),
+        (lambda p: p["resume_variants"][0].update(confirmation="assumed"), "confirmation"),
+        (lambda p: p["resume_variants"][0].update(match_terms=[]), "non-empty list"),
+        (lambda p: p["resume_variants"][0].update(match_terms=["Java", " java "]), "unique"),
+        (lambda p: p["resume_variants"][0].update(priority=True), "priority must be an integer"),
+        (lambda p: p["resume_variants"][0].update(max_pages=0), "max_pages must be a positive"),
+        (lambda p: p["resume_variants"][0].update(omit_sections=["contact"]), "unsupported section"),
+        (
+            lambda p: p["resume_variants"][0].update(omit_sections=["skills", "skills"]),
+            "contains duplicates",
+        ),
+        (lambda p: p["resume_variants"][0].update(resume=[]), "resume must be an object"),
+        (
+            lambda p: p["resume_variants"][0]["resume"].update(private_notes="private"),
+            "unsupported, identity, or private",
+        ),
+        (
+            lambda p: p["resume_variants"][0]["resume"].update(
+                experience=[{"title": "Engineer", "private_notes": "private"}]
+            ),
+            "unsupported or private",
+        ),
+        (
+            lambda p: p["resume_variants"][0]["resume"].update(
+                education=[{"degree": "Degree", "private_notes": "private"}]
+            ),
+            "unsupported or private",
+        ),
+        (
+            lambda p: p["resume_variants"][0]["resume"].update(
+                additional={"languages": ["English"]}
+            ),
+            "fields must be strings",
+        ),
+    ],
+)
+def test_invalid_resume_variants_are_rejected(mutate, error):
+    profile = _v2_profile(resume_variants=[_variant()])
+    mutate(profile)
+
+    with pytest.raises(ProfileValidationError, match=error):
+        validate_profile(profile)
 
 
 def test_atomic_update_upgrades_legacy_profile_preserves_unknown_fields_and_backs_up(tmp_path):
@@ -283,6 +511,12 @@ def test_atomic_update_cannot_change_public_facts_without_confirmation(tmp_path)
             {"evidence_bank": [{"id": "ev-public", "public_text": "Unconfirmed replacement."}]},
             candidate_confirmed=False,
         )
+    with pytest.raises(ProfileValidationError, match="Usable public evidence"):
+        atomic_update_profile(
+            path,
+            {"evidence_bank": [{"id": "ev-public", "confirmation": "draft"}]},
+            candidate_confirmed=False,
+        )
 
     assert json.loads(path.read_text(encoding="utf-8")) == profile
     assert not list(tmp_path.glob("*.backup-*"))
@@ -335,6 +569,91 @@ def test_atomic_update_preserves_evidence_list_metadata_while_replacing_confirme
     assert evidence["public_text"] == "Candidate-confirmed replacement text."
     assert evidence["role_tags"] == ["backend", "reliability"]
     assert evidence["visibility"] == ["resume", "cover-letter"]
+
+
+def test_atomic_update_replaces_resume_variants_by_id_without_duplicates(tmp_path):
+    path = tmp_path / "master-profile.json"
+    existing = _variant(
+        match_terms=["java"],
+        resume={"headline": "Java Backend Engineer"},
+    )
+    profile = _v2_profile(
+        resume_variants=[existing],
+        unknown_private={"keep": True},
+    )
+    path.write_text(json.dumps(profile), encoding="utf-8")
+
+    replacement = _variant(
+        "variant-java",
+        match_terms=["spring boot"],
+        resume={"summary": "Confirmed Java and Spring background."},
+    )
+    atomic_update_profile(
+        path,
+        {
+            "resume_variants": [
+                replacement,
+                _variant(
+                    "variant-cloud",
+                    confirmation="draft",
+                    match_terms=["cloud"],
+                    resume={"headline": "Cloud Engineer"},
+                ),
+            ]
+        },
+        candidate_confirmed=True,
+    )
+    updated = json.loads(path.read_text(encoding="utf-8"))
+
+    assert [variant["id"] for variant in updated["resume_variants"]] == [
+        "variant-java",
+        "variant-cloud",
+    ]
+    merged = updated["resume_variants"][0]
+    assert merged == replacement
+    assert updated["unknown_private"] == {"keep": True}
+
+
+def test_atomic_update_cannot_create_or_replace_confirmed_variant_without_confirmation(tmp_path):
+    path = tmp_path / "master-profile.json"
+    profile = _v2_profile(resume_variants=[_variant()])
+    path.write_text(json.dumps(profile), encoding="utf-8")
+
+    with pytest.raises(ProfileValidationError, match="cannot be candidate-confirmed"):
+        atomic_update_profile(
+            path,
+            {"resume_variants": [_variant("variant-new")]},
+            candidate_confirmed=False,
+        )
+    with pytest.raises(ProfileValidationError, match="Usable resume variants"):
+        atomic_update_profile(
+            path,
+            {
+                "resume_variants": [
+                    _variant(
+                        "variant-java",
+                        confirmation="draft",
+                    )
+                ]
+            },
+            candidate_confirmed=False,
+        )
+    with pytest.raises(ProfileValidationError, match="cannot be candidate-confirmed"):
+        atomic_update_profile(
+            path,
+            {
+                "resume_variants": [
+                    _variant(
+                        "variant-java",
+                        resume={"summary": "Unconfirmed summary."},
+                    )
+                ]
+            },
+            candidate_confirmed=False,
+        )
+
+    assert json.loads(path.read_text(encoding="utf-8")) == profile
+    assert not list(tmp_path.glob("*.backup-*"))
 
 
 def test_atomic_update_promotes_interview_only_evidence_without_conflicting_visibility(tmp_path):

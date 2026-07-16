@@ -100,6 +100,8 @@ python resume_refiner.py validate data/master-profile.json
 
 Only evidence marked `candidate-confirmed`, `public`, and visible to `resume` or `cover-letter` is eligible for generated documents. Private, draft, rejected, or interview-only notes are excluded from the public application package.
 
+For a role family that needs a deliberately curated resume structure, Resume Refiner may add a `resume_variants` entry after the user confirms the complete public output. Each variant has a stable ID, `match_terms`, optional priority and `max_pages`, optional omitted sections, and a complete renderer-compatible public resume snapshot. Identity and contact data always come from the master profile; unspecified master-profile resume sections are not inherited. JobHunter selects only `candidate-confirmed` variants, preserves their wording and order exactly, and falls back to legacy evidence ranking when none matches. The renderer must report a page count within `max_pages` before the application can reach `package_generated`.
+
 ## 5. Dedicated application mailbox and dual-account model
 
 Use a dedicated jobs/agent mailbox for ATS registration, verification links, recruiter replies, and approved outbound emails.
@@ -214,7 +216,7 @@ Typical flow:
 5. User taps **Interested** or **Skip**.
 6. **Interested** records feedback/application state and sends a concise research brief: company context, recruiter/poster if known, warning-only legitimacy notes, and salary guidance vs `JOBHUNTER_TARGET_SALARY_AED_MONTHLY`.
 7. The research brief offers **Apply**, **Ignore**, and **Details** CTAs.
-8. **Apply** generates a truthful resume + cover-letter package from `data/master-profile.json`, records `package_generated`, and sends a final **Proceed to apply** / **Pause** CTA.
+8. **Apply** selects a matching candidate-confirmed resume variant when available, otherwise uses legacy evidence ranking. It generates a truthful resume + cover-letter package from `data/master-profile.json`, enforces any confirmed page limit, records `package_generated`, and sends a final **Proceed to apply** / **Pause** CTA.
 9. **Proceed to apply** starts application preparation only. Final submit, CAPTCHA, legal/visa/salary questions, and sensitive confirmations remain approval-gated.
 
 Useful commands:

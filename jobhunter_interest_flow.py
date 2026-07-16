@@ -26,7 +26,13 @@ from pathlib import Path
 from typing import Any
 
 import scraper
-from resume_refiner import project_public_resume, usable_evidence, validate_profile
+from resume_refiner import (
+    apply_resume_variant,
+    project_public_resume,
+    select_resume_variant,
+    usable_evidence,
+    validate_profile,
+)
 
 DEFAULT_TARGET_SALARY_AED_MONTHLY = 30000
 COMPANY_PAY_PLATFORMS = ("Glassdoor", "Indeed", "PayScale", "GulfTalent", "Levels.fyi")
@@ -1306,7 +1312,10 @@ def _tailored_experience(profile: dict[str, Any], job_text: str) -> list[dict[st
     return tailored_experience
 
 
-def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+def _resume_for_job(
+    profile: dict[str, Any],
+    job: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Return a credible resume payload without exposing tailoring/generation metadata.
 
     The resume may be selected/ordered for a job internally, but the document itself
@@ -1314,8 +1323,12 @@ def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, An
     generated, or built for a specific job/company in the resume content.
     """
     validate_profile(profile)
-    tailored = project_public_resume(profile)
     job_text = _job_relevance_text(job)
+    variant = select_resume_variant(profile, job_text)
+    if variant is not None:
+        return apply_resume_variant(profile, variant), variant
+
+    tailored = project_public_resume(profile)
     if profile.get("summary"):
         tailored["summary"] = _focused_summary(str(profile["summary"]), job_text)
     skills = profile.get("skills") or {}
@@ -1327,7 +1340,12 @@ def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, An
         )
     }
     tailored["experience"] = _tailored_experience(profile, job_text)
-    return tailored
+    return tailored, None
+
+
+def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    """Return only the renderer-safe resume payload for compatibility."""
+    return _resume_for_job(profile, job)[0]
 
 
 def _ranked_evidence(
@@ -1477,8 +1495,8 @@ def _cover_letter(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any
             "system design, production delivery, and continuous technical improvement."
         ),
         "closing": (
-            f"I would welcome the opportunity to discuss how my backend architecture and delivery experience "
-            f"could contribute to {company}. Thank you for your consideration."
+            f"I would welcome the opportunity to discuss how my experience could contribute to {company}. "
+            f"Thank you for your consideration."
         ),
         "signoff": "Sincerely,",
         "signature": name,
@@ -1497,7 +1515,7 @@ def _project_python() -> str:
     return sys.executable
 
 
-def _render_pdf(mode: str, input_path: Path, output_path: Path) -> None:
+def _render_pdf(mode: str, input_path: Path, output_path: Path) -> int:
     proc = subprocess.run(
         [_project_python(), "render_pdf.py", mode, str(input_path), str(output_path)],
         cwd=Path(__file__).resolve().parent,
@@ -1509,6 +1527,30 @@ def _render_pdf(mode: str, input_path: Path, output_path: Path) -> None:
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "PDF render failed").strip().splitlines()[-1]
         raise RuntimeError(f"PDF render failed for {mode}: {detail}")
+    for line in reversed(proc.stdout.splitlines()):
+        try:
+            metadata = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(metadata, dict)
+            and metadata.get("jobhunter_pdf_render") == 1
+            and metadata.get("mode") == mode
+            and isinstance(metadata.get("pages"), int)
+            and not isinstance(metadata["pages"], bool)
+            and metadata["pages"] > 0
+        ):
+            return metadata["pages"]
+    raise RuntimeError(f"PDF renderer did not report a valid page count for {mode}")
+
+
+def _enforce_resume_page_limit(page_count: int, max_pages: Any) -> None:
+    if max_pages is None:
+        return
+    if page_count > max_pages:
+        raise RuntimeError(
+            f"Generated resume is {page_count} pages; the confirmed variant allows at most {max_pages}"
+        )
 
 
 def prepare_application_package(
@@ -1528,10 +1570,19 @@ def prepare_application_package(
         cover_json = package_dir / "cover_letter.json"
         resume_pdf = package_dir / "Resume.pdf"
         cover_pdf = package_dir / "CoverLetter.pdf"
-        resume_json.write_text(json.dumps(_tailor_resume(profile, job), indent=2, ensure_ascii=False), encoding="utf-8")
-        cover_json.write_text(json.dumps(_cover_letter(profile, job), indent=2, ensure_ascii=False), encoding="utf-8")
+        resume_payload, selected_variant = _resume_for_job(profile, job)
+        cover_source = resume_payload if selected_variant is not None else profile
+        variant_max_pages = selected_variant.get("max_pages") if selected_variant is not None else None
+        if not render_pdfs and variant_max_pages is not None:
+            raise RuntimeError("A page-limited confirmed resume variant requires PDF rendering")
+        resume_json.write_text(json.dumps(resume_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        cover_json.write_text(json.dumps(_cover_letter(cover_source, job), indent=2, ensure_ascii=False), encoding="utf-8")
         if render_pdfs:
-            _render_pdf("resume", resume_json, resume_pdf)
+            resume_page_count = _render_pdf("resume", resume_json, resume_pdf)
+            _enforce_resume_page_limit(
+                resume_page_count,
+                variant_max_pages,
+            )
             _render_pdf("cover", cover_json, cover_pdf)
         else:
             resume_pdf.write_text("PDF rendering skipped in test mode", encoding="utf-8")

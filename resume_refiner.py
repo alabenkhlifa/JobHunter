@@ -43,6 +43,19 @@ _EXPERIENCE_FIELDS = ("title", "company", "subtitle", "location", "dates", "bull
 _EDUCATION_FIELDS = ("degree", "school", "location", "dates")
 _ADDITIONAL_FIELDS = ("teaching", "languages", "interests")
 _V2_REQUIRED_EXPERIENCE_FIELDS = ("title", "company", "dates", "bullets")
+_VARIANT_RESUME_FIELDS = (
+    "headline",
+    "summary",
+    "certifications",
+    "skills",
+    "experience",
+    "education",
+    "additional",
+)
+_VARIANT_IDENTITY_FIELDS = ("name", "email", "phone", "linkedin", "location")
+_OMITTABLE_SECTIONS = frozenset(
+    {"summary", "skills", "certifications", "experience", "education", "additional"}
+)
 
 
 class ProfileValidationError(ValueError):
@@ -71,6 +84,147 @@ def _visibility_values(value: Any, *, index: int) -> tuple[str, ...]:
     return values
 
 
+def _normalized_match_text(value: str) -> str:
+    """Normalize words and phrases while retaining common language markers."""
+    return " ".join(re.sub(r"[^a-z0-9+#]+", " ", value.lower()).split())
+
+
+def _validate_string_list(value: Any, path: str, *, non_empty: bool = False) -> None:
+    if not isinstance(value, list) or (non_empty and not value):
+        requirement = "a non-empty list" if non_empty else "a list"
+        raise ProfileValidationError(f"{path} must be {requirement} of non-empty strings")
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ProfileValidationError(f"{path} must contain only non-empty strings")
+
+
+def _validate_variant_resume(resume: Any, *, index: int) -> None:
+    path = f"resume_variants[{index}].resume"
+    if not isinstance(resume, dict):
+        raise ProfileValidationError(f"{path} must be an object")
+    if set(resume) - set(_VARIANT_RESUME_FIELDS):
+        raise ProfileValidationError(f"{path} contains unsupported, identity, or private fields")
+
+    for field in ("headline", "summary"):
+        if field in resume and not isinstance(resume[field], str):
+            raise ProfileValidationError(f"{path}.{field} must be a string")
+    if "certifications" in resume:
+        _validate_string_list(resume["certifications"], f"{path}.certifications")
+    if "skills" in resume:
+        skills = resume["skills"]
+        if not isinstance(skills, dict):
+            raise ProfileValidationError(f"{path}.skills must be an object")
+        for category, values in skills.items():
+            if not isinstance(category, str) or not category.strip():
+                raise ProfileValidationError(f"{path}.skills contains an invalid category")
+            if isinstance(values, str):
+                if not values.strip():
+                    raise ProfileValidationError(f"{path}.skills contains an empty value")
+            else:
+                _validate_string_list(values, f"{path}.skills category")
+
+    if "experience" in resume:
+        experiences = resume["experience"]
+        if not isinstance(experiences, list):
+            raise ProfileValidationError(f"{path}.experience must be a list")
+        for experience_index, experience in enumerate(experiences):
+            item_path = f"{path}.experience[{experience_index}]"
+            if not isinstance(experience, dict):
+                raise ProfileValidationError(f"{item_path} must be an object")
+            if set(experience) - set(_EXPERIENCE_FIELDS):
+                raise ProfileValidationError(f"{item_path} contains unsupported or private fields")
+            if not isinstance(experience.get("title"), str) or not experience["title"].strip():
+                raise ProfileValidationError(f"{item_path}.title is required")
+            for field in ("company", "subtitle", "location", "dates", "tech"):
+                if field in experience and not isinstance(experience[field], str):
+                    raise ProfileValidationError(f"{item_path}.{field} must be a string")
+            if "bullets" in experience:
+                _validate_string_list(experience["bullets"], f"{item_path}.bullets")
+
+    if "education" in resume:
+        education = resume["education"]
+        if not isinstance(education, list):
+            raise ProfileValidationError(f"{path}.education must be a list")
+        for education_index, item in enumerate(education):
+            item_path = f"{path}.education[{education_index}]"
+            if not isinstance(item, dict):
+                raise ProfileValidationError(f"{item_path} must be an object")
+            if set(item) - set(_EDUCATION_FIELDS):
+                raise ProfileValidationError(f"{item_path} contains unsupported or private fields")
+            if any(not isinstance(value, str) for value in item.values()):
+                raise ProfileValidationError(f"{item_path} fields must be strings")
+
+    if "additional" in resume:
+        additional = resume["additional"]
+        if not isinstance(additional, dict):
+            raise ProfileValidationError(f"{path}.additional must be an object")
+        if set(additional) - set(_ADDITIONAL_FIELDS):
+            raise ProfileValidationError(f"{path}.additional contains unsupported or private fields")
+        if any(not isinstance(value, str) for value in additional.values()):
+            raise ProfileValidationError(f"{path}.additional fields must be strings")
+
+
+def _validate_resume_variant(variant: Any, *, index: int) -> None:
+    path = f"resume_variants[{index}]"
+    if not isinstance(variant, dict):
+        raise ProfileValidationError(f"{path} must be an object")
+    allowed_fields = {
+        "id",
+        "confirmation",
+        "match_terms",
+        "priority",
+        "max_pages",
+        "omit_sections",
+        "resume",
+    }
+    if set(variant) - allowed_fields:
+        raise ProfileValidationError(f"{path} contains unsupported or private metadata")
+    if not _valid_id(variant.get("id")):
+        raise ProfileValidationError(f"{path}.id is missing or malformed")
+    if variant.get("confirmation") not in CONFIRMATION_VALUES:
+        raise ProfileValidationError(f"{path}.confirmation contains an unsupported value")
+
+    match_terms = variant.get("match_terms")
+    _validate_string_list(match_terms, f"{path}.match_terms", non_empty=True)
+    normalized_terms = [_normalized_match_text(term) for term in match_terms]
+    if any(not term for term in normalized_terms) or len(set(normalized_terms)) != len(normalized_terms):
+        raise ProfileValidationError(f"{path}.match_terms must contain unique matchable terms")
+
+    if "priority" in variant and (
+        isinstance(variant["priority"], bool) or not isinstance(variant["priority"], int)
+    ):
+        raise ProfileValidationError(f"{path}.priority must be an integer")
+    if "max_pages" in variant and (
+        isinstance(variant["max_pages"], bool)
+        or not isinstance(variant["max_pages"], int)
+        or variant["max_pages"] <= 0
+    ):
+        raise ProfileValidationError(f"{path}.max_pages must be a positive integer")
+    if "omit_sections" in variant:
+        omit_sections = variant["omit_sections"]
+        if not isinstance(omit_sections, list):
+            raise ProfileValidationError(f"{path}.omit_sections must be a list")
+        if any(not isinstance(section, str) or section not in _OMITTABLE_SECTIONS for section in omit_sections):
+            raise ProfileValidationError(f"{path}.omit_sections contains an unsupported section")
+        if len(set(omit_sections)) != len(omit_sections):
+            raise ProfileValidationError(f"{path}.omit_sections contains duplicates")
+    _validate_variant_resume(variant.get("resume"), index=index)
+
+
+def _validate_resume_variants(profile: dict[str, Any]) -> None:
+    if "resume_variants" not in profile:
+        return
+    variants = profile["resume_variants"]
+    if not isinstance(variants, list):
+        raise ProfileValidationError("resume_variants must be a list")
+    seen_ids: set[str] = set()
+    for index, variant in enumerate(variants):
+        _validate_resume_variant(variant, index=index)
+        variant_id = variant["id"]
+        if variant_id in seen_ids:
+            raise ProfileValidationError(f"resume_variants[{index}].id is duplicated")
+        seen_ids.add(variant_id)
+
+
 def validate_profile(profile: Any) -> None:
     """Validate legacy profiles plus the additive Resume Refiner v2 contract.
 
@@ -90,6 +244,8 @@ def validate_profile(profile: Any) -> None:
     for index, experience in enumerate(experiences):
         if not isinstance(experience, dict):
             raise ProfileValidationError(f"experience[{index}] must be an object")
+
+    _validate_resume_variants(profile)
 
     if "evidence_bank" not in profile:
         return
@@ -186,6 +342,72 @@ def project_public_resume(profile: dict[str, Any]) -> dict[str, Any]:
     return projection
 
 
+def _sanitized_variant_resume(resume: dict[str, Any]) -> dict[str, Any]:
+    """Copy only renderer-safe variant fields after structural validation."""
+    sanitized = _copy_selected(resume, _VARIANT_RESUME_FIELDS)
+    if "experience" in sanitized:
+        sanitized["experience"] = [
+            _copy_selected(item, _EXPERIENCE_FIELDS) for item in resume["experience"]
+        ]
+    if "education" in sanitized:
+        sanitized["education"] = [
+            _copy_selected(item, _EDUCATION_FIELDS) for item in resume["education"]
+        ]
+    if "additional" in sanitized:
+        sanitized["additional"] = _copy_selected(resume["additional"], _ADDITIONAL_FIELDS)
+    return sanitized
+
+
+def select_resume_variant(profile: dict[str, Any], job_text: str) -> dict[str, Any] | None:
+    """Select a confirmed variant for normalized whole-term/phrase matches.
+
+    Eligible variants are ranked by descending matched-term count, then
+    descending ``priority`` (default zero), then their stable source order.
+    The selected stored variant is returned as a deep copy; no profile-level
+    metadata is included.
+    """
+    validate_profile(profile)
+    normalized_job = _normalized_match_text(str(job_text or ""))
+    padded_job = f" {normalized_job} "
+    best_variant: dict[str, Any] | None = None
+    best_score: tuple[int, int, int] | None = None
+    for index, variant in enumerate(profile.get("resume_variants") or []):
+        if variant["confirmation"] != "candidate-confirmed":
+            continue
+        matched_count = sum(
+            1
+            for term in variant["match_terms"]
+            if f" {_normalized_match_text(term)} " in padded_job
+        )
+        if not matched_count:
+            continue
+        score = (matched_count, variant.get("priority", 0), -index)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_variant = variant
+    return copy.deepcopy(best_variant) if best_variant is not None else None
+
+
+def apply_resume_variant(profile: dict[str, Any], variant: dict[str, Any]) -> dict[str, Any]:
+    """Build an approved snapshot plus current identity, without master-section inheritance."""
+    validate_profile(profile)
+    _validate_resume_variant(variant, index=0)
+    if variant["confirmation"] != "candidate-confirmed":
+        raise ProfileValidationError("Only a candidate-confirmed resume variant can be applied")
+    stored_variant = next(
+        (item for item in profile.get("resume_variants") or [] if item.get("id") == variant["id"]),
+        None,
+    )
+    if stored_variant != variant:
+        raise ProfileValidationError("Resume variant must match the confirmed variant stored in the profile")
+
+    result = _copy_selected(profile, _VARIANT_IDENTITY_FIELDS)
+    result.update(_sanitized_variant_resume(variant["resume"]))
+    for section in variant.get("omit_sections") or []:
+        result.pop(section, None)
+    return result
+
+
 def _merge_dict(current: dict[str, Any], updates: dict[str, Any], *, path: tuple[str, ...] = ()) -> dict[str, Any]:
     merged = copy.deepcopy(current)
     for key, value in updates.items():
@@ -201,7 +423,7 @@ def _merge_dict(current: dict[str, Any], updates: dict[str, Any], *, path: tuple
             else:
                 merged[key] = _merge_unique_values(current_visibility, updated_visibility)
         elif isinstance(existing, list) and isinstance(value, list):
-            if key in {"experience", "evidence_bank"}:
+            if key in {"experience", "evidence_bank", "resume_variants"}:
                 merged[key] = _merge_records(existing, value, path=next_path)
             else:
                 merged[key] = _merge_unique_values(existing, value)
@@ -232,7 +454,13 @@ def _merge_records(current: list[Any], updates: list[Any], *, path: tuple[str, .
             merged.append(copy.deepcopy(item))
             continue
         item_id = item.get("id")
-        if _valid_id(item_id) and item_id in indexes and isinstance(merged[indexes[item_id]], dict):
+        if (
+            path[-1] == "resume_variants"
+            and _valid_id(item_id)
+            and item_id in indexes
+        ):
+            merged[indexes[item_id]] = copy.deepcopy(item)
+        elif _valid_id(item_id) and item_id in indexes and isinstance(merged[indexes[item_id]], dict):
             record_index = indexes[item_id]
             merged[record_index] = _merge_dict(merged[record_index], item, path=(*path, str(record_index)))
         elif (
@@ -289,6 +517,16 @@ def atomic_update_profile(
             raise ProfileValidationError(
                 f"evidence_bank[{index}] cannot be candidate-confirmed without explicit candidate confirmation"
             )
+    for index, item in enumerate(updates.get("resume_variants") or []):
+        _validate_resume_variant(item, index=index)
+        if (
+            isinstance(item, dict)
+            and item.get("confirmation") == "candidate-confirmed"
+            and not candidate_confirmed
+        ):
+            raise ProfileValidationError(
+                f"resume_variants[{index}] cannot be candidate-confirmed without explicit candidate confirmation"
+            )
 
     merged = _merge_dict(current, updates)
     validate_profile(merged)
@@ -313,8 +551,20 @@ def atomic_update_profile(
             for visibility in ("resume", "cover-letter")
             for index, item in enumerate(usable_evidence(merged, visibility))
         }
-        if not merged_usable <= current_usable:
+        if merged_usable != current_usable:
             raise ProfileValidationError("Usable public evidence requires explicit candidate confirmation")
+        current_variants = {
+            json.dumps(variant, ensure_ascii=False, sort_keys=True)
+            for variant in current.get("resume_variants") or []
+            if variant["confirmation"] == "candidate-confirmed"
+        }
+        merged_variants = {
+            json.dumps(variant, ensure_ascii=False, sort_keys=True)
+            for variant in merged.get("resume_variants") or []
+            if variant["confirmation"] == "candidate-confirmed"
+        }
+        if merged_variants != current_variants:
+            raise ProfileValidationError("Usable resume variants require explicit candidate confirmation")
 
     timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = path.with_name(f"{path.name}.backup-{timestamp}")

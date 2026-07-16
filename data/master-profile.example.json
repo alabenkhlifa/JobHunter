@@ -65,6 +65,58 @@
       "source": "resume-refiner-interview"
     }
   ],
+  "resume_variants": [
+    {
+      "id": "jvm-backend",
+      "confirmation": "candidate-confirmed",
+      "match_terms": [
+        "java",
+        "kotlin",
+        "spring boot"
+      ],
+      "priority": 100,
+      "max_pages": 1,
+      "omit_sections": [
+        "additional"
+      ],
+      "resume": {
+        "headline": "Senior Backend Engineer | Java, Kotlin & Spring Boot",
+        "summary": "Backend engineer focused on JVM services and distributed systems.",
+        "skills": {
+          "Backend": [
+            "Java",
+            "Kotlin",
+            "Spring Boot",
+            "Microservices"
+          ]
+        },
+        "certifications": [
+          "Example Certification"
+        ],
+        "experience": [
+          {
+            "title": "Senior Software Engineer",
+            "company": "Example Company",
+            "subtitle": "Full-time",
+            "location": "City, Country",
+            "dates": "01/2021 – Present",
+            "bullets": [
+              "Designed and maintained backend services for a production system serving real users.",
+              "Improved reliability, observability, or performance with measurable outcomes."
+            ]
+          }
+        ],
+        "education": [
+          {
+            "degree": "Example Degree",
+            "school": "Example University",
+            "location": "City, Country",
+            "dates": "09/2012 – 06/2016"
+          }
+        ]
+      }
+    }
+  ],
   "education": [
     {
       "degree": "Example Degree",

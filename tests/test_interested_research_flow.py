@@ -816,6 +816,41 @@ def test_render_pdf_uses_project_python_and_reports_errors(monkeypatch, tmp_path
     assert calls[0][0][1] == "render_pdf.py"
 
 
+def test_render_pdf_returns_structured_renderer_page_count(monkeypatch, tmp_path):
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = 'renderer log\n{"jobhunter_pdf_render": 1, "mode": "resume", "pages": 1}\n'
+
+    monkeypatch.setattr(flow.subprocess, "run", lambda *args, **kwargs: Result())
+
+    page_count = flow._render_pdf("resume", tmp_path / "resume.json", tmp_path / "resume.pdf")
+
+    assert page_count == 1
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "Resume PDF written without structured metadata",
+        '{"jobhunter_pdf_render": 1, "mode": "cover", "pages": 1}',
+        '{"jobhunter_pdf_render": 1, "mode": "resume", "pages": 0}',
+        '{"jobhunter_pdf_render": 1, "mode": "resume", "pages": true}',
+        "{malformed-json",
+    ],
+)
+def test_render_pdf_rejects_invalid_page_metadata(monkeypatch, tmp_path, metadata):
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = metadata
+
+    monkeypatch.setattr(flow.subprocess, "run", lambda *args, **kwargs: Result())
+
+    with pytest.raises(RuntimeError, match="did not report a valid page count"):
+        flow._render_pdf("resume", tmp_path / "resume.json", tmp_path / "resume.pdf")
+
+
 def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_path, monkeypatch):
     db = tmp_path / "jobs.db"
     output_dir = tmp_path / "output"
@@ -860,6 +895,192 @@ def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_
     assert row[0] == "package_generated"
     assert str(package.package_dir) == row[1]
     assert "Resume and cover letter generated" in row[2]
+
+
+def test_confirmed_variant_is_preserved_and_drives_cover_letter(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    output_dir = tmp_path / "output"
+    profile_path = tmp_path / "master-profile.json"
+    curated_bullets = [
+        "Maintained ten Kotlin and Spring Boot services for a production platform.",
+        "Migrated two Java services to Kotlin after the candidate confirmed the wording.",
+        "Moved notification delivery to asynchronous batches of 500.",
+    ]
+    profile = {
+        "name": "Candidate",
+        "email": "candidate@example.com",
+        "headline": "General Software Architect",
+        "summary": "General architecture profile.",
+        "skills": {"General": ["Azure", "Terraform"]},
+        "experience": [
+            {
+                "title": "Part-time CTO",
+                "company": "Excluded Example",
+                "dates": "2025 - Present",
+                "bullets": ["This role must not leak into the selected application package."],
+            }
+        ],
+        "education": [],
+        "additional": {"interests": "Excluded from this one-page variant."},
+        "resume_variants": [
+            {
+                "id": "jvm-backend",
+                "confirmation": "candidate-confirmed",
+                "match_terms": ["java", "kotlin", "spring boot"],
+                "priority": 100,
+                "max_pages": 1,
+                "omit_sections": ["additional"],
+                "resume": {
+                    "headline": "Senior Backend Engineer | Java, Kotlin & Spring Boot",
+                    "summary": "Backend engineer focused on JVM services.",
+                    "skills": {"Backend": ["Java", "Kotlin", "Spring Boot"]},
+                    "experience": [
+                        {
+                            "title": "Senior Backend Engineer",
+                            "company": "Curated Example",
+                            "dates": "2020 - Present",
+                            "bullets": curated_bullets,
+                            "tech": "Kotlin - Java - Spring Boot",
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT, "
+        "url TEXT, source TEXT, description TEXT, tech_required TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "li-jvm",
+            "Software Engineer (Java)",
+            "TargetCo",
+            "Dubai",
+            "https://example.com/job",
+            "LinkedIn",
+            "Build Java and Spring Boot backend services.",
+            "java, spring boot",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    def fake_render(mode, input_path, output_path):
+        output_path.write_bytes(b"%PDF-1.4\n%%EOF")
+        return 1
+
+    monkeypatch.setattr(flow, "_render_pdf", fake_render)
+
+    package = flow.prepare_application_package(
+        "li-jvm",
+        db_path=db,
+        profile_path=profile_path,
+        output_dir=output_dir,
+        render_pdfs=True,
+    )
+
+    resume = json.loads(package.resume_json.read_text(encoding="utf-8"))
+    cover = json.loads(package.cover_json.read_text(encoding="utf-8"))
+    serialized_resume = json.dumps(resume)
+    serialized_cover = json.dumps(cover)
+    assert resume["name"] == "Candidate"
+    assert resume["headline"] == "Senior Backend Engineer | Java, Kotlin & Spring Boot"
+    assert resume["experience"][0]["bullets"] == curated_bullets
+    assert len(resume["experience"]) == 1
+    assert "additional" not in resume
+    assert "resume_variants" not in serialized_resume
+    assert "Excluded Example" not in serialized_resume
+    assert "Excluded Example" not in serialized_cover
+    assert "Curated Example" in serialized_cover
+    assert any(item["text"] == curated_bullets[0] for item in cover["highlights"])
+
+
+def test_resume_page_limit_blocks_package_stage_before_cover_render(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    output_dir = tmp_path / "output"
+    profile_path = tmp_path / "master-profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "name": "Candidate",
+                "experience": [],
+                "education": [],
+                "resume_variants": [
+                    {
+                        "id": "jvm-backend",
+                        "confirmation": "candidate-confirmed",
+                        "match_terms": ["java"],
+                        "max_pages": 1,
+                        "resume": {
+                            "headline": "Backend Engineer",
+                            "experience": [],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT, "
+        "url TEXT, source TEXT, description TEXT, tech_required TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "li-jvm",
+            "Java Engineer",
+            "TargetCo",
+            "Dubai",
+            "https://example.com/job",
+            "LinkedIn",
+            "Build Java services.",
+            "java",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    rendered_modes = []
+
+    def fake_render(mode, input_path, output_path):
+        rendered_modes.append(mode)
+        output_path.write_bytes(b"%PDF-1.4\n%%EOF")
+        return 2
+
+    monkeypatch.setattr(flow, "_render_pdf", fake_render)
+
+    with pytest.raises(RuntimeError, match="2 pages.*at most 1"):
+        flow.prepare_application_package(
+            "li-jvm",
+            db_path=db,
+            profile_path=profile_path,
+            output_dir=output_dir,
+            render_pdfs=True,
+        )
+
+    assert rendered_modes == ["resume"]
+    conn = sqlite3.connect(db)
+    stage_count = conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
+    conn.close()
+    assert stage_count == 0
+
+    with pytest.raises(RuntimeError, match="requires PDF rendering"):
+        flow.prepare_application_package(
+            "li-jvm",
+            db_path=db,
+            profile_path=profile_path,
+            output_dir=output_dir,
+            render_pdfs=False,
+        )
+    conn = sqlite3.connect(db)
+    stage_count = conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
+    conn.close()
+    assert stage_count == 0
 
 
 def test_load_profile_refuses_to_fabricate_missing_candidate_data(tmp_path):

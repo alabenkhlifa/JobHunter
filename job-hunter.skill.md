@@ -78,7 +78,8 @@ Run this phase for a new user before job matching or application-package generat
    python resume_refiner.py validate data/master-profile.json
    ```
 8. Save coverage and the next unanswered topic in the ignored refiner session so the interview can pause and resume.
-9. Finish only when every experience has been reviewed and unresolved gaps are listed, or when the user explicitly chooses to stop. Summarize what was added and what remains unknown without printing personal profile contents.
+9. When the user approves a deliberately curated resume for a role family, store it as a candidate-confirmed `resume_variants` entry. Confirm the exact headline, summary, skills, experience inclusion or consolidation, bullet order, omitted sections, matching terms, and optional page limit. Draft and unconfirmed variants must never be selected.
+10. Finish only when every experience has been reviewed and unresolved gaps are listed, or when the user explicitly chooses to stop. Summarize what was added and what remains unknown without printing personal profile contents.
 
 ### Evidence contract
 
@@ -99,6 +100,10 @@ Each refined experience has a stable `id`. Each `evidence_bank` item references 
 ```
 
 Do not change confirmation or visibility flags to make a fact eligible. Ask the user instead.
+
+### Confirmed resume variant contract
+
+A confirmed role-family variant is a complete candidate-approved presentation, not newly inferred evidence. It may deliberately consolidate or omit master-profile experiences and sections. Identity and contact fields always come from the master profile; every other intended public section must be present in the renderer-compatible variant snapshot because unspecified master sections are not inherited. Selection requires at least one matching `match_terms` phrase, and `max_pages` must pass before `package_generated` is recorded. Preserve selected variant wording and order exactly and never expose its matching or confirmation metadata in generated documents.
 
 ## Scraping Strategy
 The scraper uses **breadth-first round-robin** across 2 buckets:
@@ -177,7 +182,9 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
 
 4. **AI tailoring** (this is the intelligent part openclaw does):
 
-   **CRITICAL: The master-profile.json contains REAL data. Every company name, job title, date range, education entry, and certification is factual and must be preserved EXACTLY. You are tailoring, NOT rewriting.**
+   First select a matching `candidate-confirmed` role-family variant, if one exists. Preserve every public field, experience choice, bullet, and ordering in that variant exactly, use its selected public resume as the cover-letter evidence source, and enforce its optional `max_pages` value before recording `package_generated`. If no confirmed variant matches, use the legacy rules below.
+
+   **CRITICAL: The master-profile.json contains REAL data. In legacy tailoring, every company name, job title, date range, education entry, and certification is factual and must be preserved EXACTLY. You are tailoring, NOT rewriting.**
 
    What you MUST keep unchanged (copy verbatim from master profile):
    - All `company` names exactly as written
@@ -186,7 +193,7 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
    - All `education` entries exactly as written
    - All `certifications` exactly as written
    - The `name`, `email`, `phone`, `linkedin` fields exactly as written
-   - The number of experience entries (keep ALL of them, never drop any)
+   - The number of experience entries (legacy tailoring keeps all of them; a confirmed variant keeps exactly the approved selection)
 
    What you CAN adjust (minor refinements only):
    - **Skills ordering**: reorder the skill categories so the most relevant one for this job appears first
@@ -198,7 +205,7 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
    - Do NOT invent new companies, roles, or experiences
    - Do NOT change dates, titles, company names, or locations
    - Do NOT add skills or certifications not in the master profile or its candidate-confirmed evidence
-   - Do NOT remove any experience entries or education
+   - Do NOT remove any experience entries or education during legacy tailoring; a confirmed variant may omit only what the candidate approved
    - Do NOT change the person's name, contact info, or education history
 
 5. Write tailored resume JSON to a temp file using only renderer-compatible public fields. Start from the validated public projection, preserve its immutable values, and make only the adjustments above. Do not copy evidence metadata, refiner state, private notes, or application defaults into the output.
@@ -317,7 +324,7 @@ cp .env.example .env  # Edit with real values
 These rules are NON-NEGOTIABLE. Violating them produces a fraudulent resume.
 - **NEVER fabricate** companies, job titles, dates, education, certifications, or skills
 - **NEVER change** company names, job titles, date ranges, locations, or education entries — copy them verbatim from master-profile.json
-- **NEVER drop** experience entries — all entries from the master profile must appear in the tailored version
+- **NEVER drop** experience entries during legacy tailoring. A candidate-confirmed role-family variant may deliberately consolidate or omit entries exactly as approved by the candidate.
 - **ONLY adjust**: summary paragraph wording, skills category ordering, experience bullet emphasis/rewording, experience entry ordering
 - **Bullet rewording** means highlighting relevant keywords that are already truthful — NOT inventing new accomplishments
 - **Refined evidence** may be used only when it is candidate-confirmed, public, and visible to that document type

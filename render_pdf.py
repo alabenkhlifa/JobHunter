@@ -399,12 +399,12 @@ def main():
         pdf = ResumePDF(data)
         pdf.render()
         pdf.output(str(output_path))
-        print(f"Resume PDF written to {output_path}")
+        print(json.dumps({"jobhunter_pdf_render": 1, "mode": mode, "pages": pdf.page_no()}))
     elif mode == "cover":
         pdf = CoverLetterPDF(data)
         pdf.render()
         pdf.output(str(output_path))
-        print(f"Cover letter PDF written to {output_path}")
+        print(json.dumps({"jobhunter_pdf_render": 1, "mode": mode, "pages": pdf.page_no()}))
     else:
         print(f"Unknown mode: {mode}. Use 'resume' or 'cover'.", file=sys.stderr)
         sys.exit(1)

@@ -33,6 +33,7 @@ This repository is intended to be operated by Hermes Agent or another coding age
 - Never infer metrics, dates, technologies, ownership, causality, or business impact. Keep unknown values unknown.
 - Preserve all existing profile fields and create a backup before each accepted update.
 - Keep draft answers and interview notes in an ignored local refiner-session file. Only confirmed, public evidence may be used in resumes or cover letters.
+- Store a role-family resume variant only after the candidate confirms the complete public wording, included experiences, omitted sections, and matching terms. A confirmed variant may consolidate or omit master-profile entries by design; unconfirmed variants are never selectable.
 - Let the user pause and resume. Do not mark refinement complete while experiences or important evidence gaps remain unresolved unless the user chooses to stop.
 
 ## Auto-apply workflow
@@ -40,7 +41,8 @@ This repository is intended to be operated by Hermes Agent or another coding age
 Use `jobhunter_auto_apply` conservatively:
 
 - Telegram **Interested** should first show the brief research card from `jobhunter_interest_flow`: best-effort web company/recruiter/salary lookup, stored company context, recruiter/poster if known, warning-only legitimacy notes, and salary guidance vs `JOBHUNTER_TARGET_SALARY_AED_MONTHLY`.
-- Research-card **Apply** generates the resume + cover-letter package and records `package_generated`; it does not submit anything.
+- Research-card **Apply** selects a matching candidate-confirmed resume variant when available, otherwise uses legacy evidence ranking. It generates the resume + cover-letter package and records `package_generated`; it does not submit anything.
+- A variant with `max_pages` must pass the renderer-reported page limit before `package_generated` is recorded.
 - Research-card **Ignore/Pause** records skip/paused feedback without affecting other profiles or listeners.
 - Final application prep starts only after the **Proceed to apply** CTA, and final submission remains separately approval-gated.
 - `python -m jobhunter_auto_apply.cli inspect --job-id <job_id>` to inspect current ATS/browser page.
