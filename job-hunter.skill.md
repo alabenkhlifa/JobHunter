@@ -22,12 +22,83 @@ cron job reviews them with an LLM before suggesting offers.
 ## Architecture
 - **Scraper**: `scraper.py` — scraping + CLI utilities (get-job, send-doc, send-msg, mark-interested)
 - **Renderer**: `render_pdf.py` — dumb PDF renderer for resume and cover letter
+- **Resume Refiner**: `resume_refiner.py` plus the onboarding workflow below — builds a detailed, candidate-confirmed evidence bank before tailoring
 - **Auto-apply engine**: `jobhunter_auto_apply/` — approval-gated browser/ATS inspection, upload/submit wrappers, and encrypted ATS credential vault
 - **Profile**: `data/master-profile.json` — local ignored master resume data (never fabricated); `data/master-profile.example.json` documents the schema
 - **Sources**: LinkedIn (guest HTML API), Foundit Gulf (JSON middleware API)
 - **Storage**: SQLite for deduplication, job state, application state, and confirmed answer cache
 - **Notifications**: Telegram Bot API (HTML parse mode)
 - **Designed for**: local/Hermes operation with optional cron and Chromium CDP for browser apply flows
+
+## Resume Refiner onboarding
+
+Run this phase for a new user before job matching or application-package generation. Trigger it when the user provides a resume under an ignored `data/` path, when `data/master-profile.json` does not exist, or when the user asks to refine an incomplete profile.
+
+### Non-negotiable truth boundary
+
+- The uploaded resume is source material, not permission to extrapolate.
+- Never invent or infer a metric, date, technology, responsibility, ownership level, result, certification, or business impact.
+- Keep unknown values unknown and ask about them.
+- Preserve imported company names, titles, dates, locations, education, and certifications unless the user explicitly corrects a specific value.
+- Treat the user's raw answer and proposed resume wording as separate things.
+- Store usable evidence only after showing the exact proposed statement and receiving explicit confirmation.
+- A usable item must retain the exact confirmed `public_text` and be marked `candidate-confirmed`, `public`, and visible to the intended document type.
+- Store drafts, rejected wording, uncertainty, and private interview notes only in an ignored local refiner-session file. Never place them in a generated application package.
+
+### Interview workflow
+
+1. Copy the uploaded resume facts into a draft profile without changing their meaning. Add stable `id` values to experience entries.
+2. Show a privacy-safe structural summary and ask the user to confirm that the imported companies, titles, dates, education, and certifications are complete and correct.
+3. Work through one experience at a time, starting with the most recent. Ask one focused question at a time.
+4. Cover every relevant dimension before moving on:
+   - role progression, responsibilities, time allocation, and ongoing support;
+   - product purpose, user groups, scale, and production context;
+   - technical stack, language proportions, architecture, protocols, data, and integrations;
+   - major features, migrations, design decisions, alternatives, and reasons;
+   - difficult incidents or constraints, root cause, the user's action, and verified outcome;
+   - performance, reliability, security, observability, and measurable results;
+   - unit, integration, and end-to-end testing, plus real versus mocked dependencies;
+   - CI/CD, image/build ownership, deployment boundaries, and production operations;
+   - architecture, coordination, mentoring, stakeholders, and team size;
+   - confidentiality constraints and explicit do-not-claim boundaries.
+5. Follow each meaningful project, challenge, or result until the facts are specific enough to be useful. Do not ask for a number if the user does not know one.
+6. After each topic, propose one or more concise evidence statements using only the user's facts. Ask the user to confirm, revise, keep as interview-only, or discard each statement.
+7. After confirmation, merge the accepted evidence through the safe update API. Pass `candidate_confirmed=True` only after the user has approved the exact facts and wording; the helper preserves existing data, creates a timestamped backup, and atomically replaces the profile:
+   ```python
+   from resume_refiner import atomic_update_profile
+
+   backup_path = atomic_update_profile(
+       "data/master-profile.json",
+       confirmed_updates,
+       candidate_confirmed=True,
+   )
+   ```
+   Then validate the result:
+   ```bash
+   python resume_refiner.py validate data/master-profile.json
+   ```
+8. Save coverage and the next unanswered topic in the ignored refiner session so the interview can pause and resume.
+9. Finish only when every experience has been reviewed and unresolved gaps are listed, or when the user explicitly chooses to stop. Summarize what was added and what remains unknown without printing personal profile contents.
+
+### Evidence contract
+
+Each refined experience has a stable `id`. Each `evidence_bank` item references one experience and contains exact candidate-approved wording:
+
+```json
+{
+  "id": "evidence-stable-id",
+  "experience_id": "experience-stable-id",
+  "public_text": "Exact statement confirmed by the candidate.",
+  "skills": ["Technology already confirmed by the candidate"],
+  "role_tags": ["backend"],
+  "confirmation": "candidate-confirmed",
+  "confidentiality": "public",
+  "visibility": ["resume", "cover-letter"],
+  "source": "resume-refiner-interview"
+}
+```
+
+Do not change confirmation or visibility flags to make a fact eligible. Ask the user instead.
 
 ## Scraping Strategy
 The scraper uses **breadth-first round-robin** across 2 buckets:
@@ -102,7 +173,7 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
    ⏳ Analyzing job requirements..."
    ```
 
-3. Read `data/master-profile.json` to get the full master profile
+3. Read and validate `data/master-profile.json`. If the profile is missing, or the local refiner session records unresolved required facts, pause package generation and offer to resume refinement rather than filling gaps yourself.
 
 4. **AI tailoring** (this is the intelligent part openclaw does):
 
@@ -120,17 +191,17 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
    What you CAN adjust (minor refinements only):
    - **Skills ordering**: reorder the skill categories so the most relevant one for this job appears first
    - **Summary paragraph**: rewrite to emphasize aspects relevant to this job, but keep it grounded in the real experience from the master profile
-   - **Experience bullets**: reword existing bullets to emphasize relevant keywords, but the core facts (what was built, what tech was used, what results were achieved) must stay truthful
+   - **Experience bullets**: select or minimally reword existing bullets and candidate-confirmed public evidence to emphasize relevant keywords; every core fact must remain unchanged
    - **Experience order**: optionally reorder experience entries to lead with the most relevant one
 
    What you MUST NOT do:
    - Do NOT invent new companies, roles, or experiences
    - Do NOT change dates, titles, company names, or locations
-   - Do NOT add skills or certifications not in the master profile
+   - Do NOT add skills or certifications not in the master profile or its candidate-confirmed evidence
    - Do NOT remove any experience entries or education
    - Do NOT change the person's name, contact info, or education history
 
-5. Write tailored resume JSON to a temp file (same structure as master-profile.json, but with reordered/adjusted content). **Start by copying the master profile JSON, then make only the adjustments above.**
+5. Write tailored resume JSON to a temp file using only renderer-compatible public fields. Start from the validated public projection, preserve its immutable values, and make only the adjustments above. Do not copy evidence metadata, refiner state, private notes, or application defaults into the output.
 
 6. Render resume PDF:
    ```bash
@@ -221,6 +292,7 @@ python3 -m jobhunter_auto_apply.cli submit --job-id <job_id> --selector 'button[
 ## File Locations
 - Scraper: `scraper.py`
 - PDF renderer: `render_pdf.py`
+- Resume Refiner validation and safe updates: `resume_refiner.py`
 - Master profile: `data/master-profile.json` (local, ignored)
 - Profile schema example: `data/master-profile.example.json`
 - Database: `data/jobs.db` (local, ignored)
@@ -248,5 +320,7 @@ These rules are NON-NEGOTIABLE. Violating them produces a fraudulent resume.
 - **NEVER drop** experience entries — all entries from the master profile must appear in the tailored version
 - **ONLY adjust**: summary paragraph wording, skills category ordering, experience bullet emphasis/rewording, experience entry ordering
 - **Bullet rewording** means highlighting relevant keywords that are already truthful — NOT inventing new accomplishments
-- The tailored JSON must have the exact same structure as master-profile.json
+- **Refined evidence** may be used only when it is candidate-confirmed, public, and visible to that document type
+- **NEVER expose** the evidence bank, refiner session, application defaults, or private/interview-only notes in generated application JSON or PDFs
+- The tailored JSON must use the renderer-compatible public profile structure, not the private/refinement fields from master-profile.json
 - When in doubt, keep the original text unchanged

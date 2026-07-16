@@ -9,6 +9,7 @@ It can:
 - send at most the best 5 Telegram CTA job cards per day for review;
 - learn from Interested/Skip feedback to demote repeatedly declined patterns and boost similar strong matches;
 - run a brief Interested-stage company/recruiter/salary research check before generating an application package;
+- run a resumable Resume Refiner interview that turns an uploaded resume and confirmed follow-up answers into a detailed evidence bank;
 - generate truthful tailored resume / cover-letter packages from a local candidate profile;
 - inspect LinkedIn / external ATS application pages through Chromium CDP;
 - upload or submit only after explicit user approval;
@@ -38,6 +39,8 @@ Edit:
 - `.env` — Telegram bot token/chat ID if you want Telegram cards/buttons.
 - `data/master-profile.json` — your truthful candidate profile. This file is ignored by git.
 
+Before enabling application-package generation, place your existing resume in an ignored path under `data/` and ask Hermes to run **Resume Refiner**. Hermes reviews the imported facts with you, interviews you experience by experience, and stores only facts and resume wording you explicitly confirm. The interview can be paused and resumed.
+
 For the full setup guide, see [`setup.md`](setup.md).
 
 ## Hermes Agent setup
@@ -53,6 +56,12 @@ Hermes will read [`AGENTS.md`](AGENTS.md) automatically as project instructions.
 
 ```text
 Set up JobHunter for me using setup.md. Keep all credentials and personal data local, run the tests, and tell me what is missing.
+```
+
+For a new profile, use:
+
+```text
+Run Resume Refiner on the resume I placed under data/. Ask me one focused question at a time, keep every claim truthful, and update the local master profile only after I confirm each proposed fact.
 ```
 
 Recommended Hermes toolsets for full operation:
@@ -148,6 +157,7 @@ python -m jobhunter_auto_apply.cli submit \
 | `scraper.py` | Job collection, scoring, DB utilities, Telegram helpers |
 | `callback_handler.py` | Telegram button handler |
 | `render_pdf.py` | Resume and cover-letter PDF renderer |
+| `resume_refiner.py` | Refined-profile validation, confirmed-evidence handling, and safe atomic profile updates |
 | `jobhunter_auto_apply/` | Approval-gated browser apply helpers |
 | `jobhunter_integrations/google_tracker.py` | Open-source-safe Google Sheets/Drive tracker sync CLI |
 | `jobhunter_integrations/gmail_watcher.py` | Open-source-safe Gmail watcher CLI for recruiter/ATS replies |
@@ -217,6 +227,7 @@ JobHunter should never:
 JobHunter should always:
 
 - keep profile data, databases, generated documents, browser profiles, and credentials local;
+- use only candidate-confirmed public evidence from Resume Refiner in generated application documents;
 - record application state in SQLite;
 - save evidence screenshots for blockers/draft-ready states when useful;
 - ask the user with clear CTA options at approval gates.

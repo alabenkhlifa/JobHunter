@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 import scraper
+from resume_refiner import project_public_resume, usable_evidence, validate_profile
 
 DEFAULT_TARGET_SALARY_AED_MONTHLY = 30000
 COMPANY_PAY_PLATFORMS = ("Glassdoor", "Indeed", "PayScale", "GulfTalent", "Levels.fyi")
@@ -1182,8 +1183,7 @@ def _load_profile(profile_path: Path | str) -> dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Candidate profile not found: {path}")
     profile = json.loads(path.read_text(encoding="utf-8"))
-    if not profile.get("name"):
-        raise ValueError("Candidate profile is missing the required name field")
+    validate_profile(profile)
     return profile
 
 
@@ -1289,10 +1289,17 @@ def _focused_summary(summary: str, job_text: str, *, limit: int = 3) -> str:
 
 
 def _tailored_experience(profile: dict[str, Any], job_text: str) -> list[dict[str, Any]]:
+    projected = project_public_resume(profile).get("experience") or []
+    resume_evidence: dict[str, list[str]] = {}
+    for item in usable_evidence(profile, "resume"):
+        resume_evidence.setdefault(item["experience_id"], []).append(item["public_text"])
+
     tailored_experience: list[dict[str, Any]] = []
     for index, source in enumerate(profile.get("experience") or []):
-        experience = json.loads(json.dumps(source))
+        experience = json.loads(json.dumps(projected[index]))
         bullets = list(experience.get("bullets") or [])
+        bullets.extend(resume_evidence.get(source.get("id"), []))
+        bullets = list(dict.fromkeys(bullets))
         limit = 3 if index == 0 else 4 if index < 3 else 2
         experience["bullets"] = _ranked_values(bullets, job_text)[:limit]
         tailored_experience.append(experience)
@@ -1306,7 +1313,8 @@ def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, An
     must read like a normal candidate resume. Never mention that it is tailored,
     generated, or built for a specific job/company in the resume content.
     """
-    tailored = json.loads(json.dumps(profile))
+    validate_profile(profile)
+    tailored = project_public_resume(profile)
     job_text = _job_relevance_text(job)
     if profile.get("summary"):
         tailored["summary"] = _focused_summary(str(profile["summary"]), job_text)
@@ -1330,7 +1338,10 @@ def _ranked_evidence(
     limit: int = 3,
 ) -> list[dict[str, str]]:
     evidence: list[tuple[int, int, int, dict[str, str]]] = []
+    seen_text: set[str] = set()
     title_words = set(re.findall(r"[a-z]+", job_title.lower())) - {"backend", "office", "intelligence"}
+    experience_indexes: dict[str, int] = {}
+    experience_contexts: dict[str, str] = {}
     for experience_index, experience in enumerate(profile.get("experience") or []):
         experience_title = str(experience.get("title") or "")
         experience_title_words = set(re.findall(r"[a-z]+", experience_title.lower()))
@@ -1339,15 +1350,43 @@ def _ranked_evidence(
         context = " - ".join(
             value for value in (experience_title, str(experience.get("company") or "")) if value
         )
+        experience_id = experience.get("id")
+        if isinstance(experience_id, str):
+            experience_indexes[experience_id] = experience_index
+            experience_contexts[experience_id] = context
         for bullet_index, bullet in enumerate(experience.get("bullets") or []):
+            text = str(bullet).strip()
+            if text in seen_text:
+                continue
+            seen_text.add(text)
             evidence.append(
                 (
                     _relevance_score(bullet, job_text) + title_score + recency_score,
                     experience_index,
                     bullet_index,
-                    {"text": str(bullet).strip(), "context": context},
+                    {"text": text, "context": context},
                 )
             )
+    for evidence_index, item in enumerate(usable_evidence(profile, "cover-letter")):
+        text = item["public_text"]
+        if text in seen_text:
+            continue
+        seen_text.add(text)
+        experience_id = item["experience_id"]
+        experience_index = experience_indexes[experience_id]
+        experience = profile["experience"][experience_index]
+        experience_title = str(experience.get("title") or "")
+        experience_title_words = set(re.findall(r"[a-z]+", experience_title.lower()))
+        title_score = len(title_words & experience_title_words) * 4
+        recency_score = max(0, 4 - experience_index)
+        evidence.append(
+            (
+                _relevance_score(text, job_text) + title_score + recency_score,
+                experience_index,
+                len(experience.get("bullets") or []) + evidence_index,
+                {"text": text, "context": experience_contexts[experience_id]},
+            )
+        )
     evidence.sort(key=lambda item: (-item[0], item[1], item[2]))
     return [item[3] for item in evidence[:limit]]
 

@@ -64,13 +64,41 @@ Do not commit `.env`.
 
 ## 4. Local personal profile data
 
-The open-source repo does not include a real candidate profile. Copy the example schema and fill it locally:
+The open-source repo does not include a real candidate profile. Copy the example schema and keep the working profile local:
 
 ```bash
 cp data/master-profile.example.json data/master-profile.json
 ```
 
 `data/master-profile.json` is ignored by git. It should contain only truthful resume/profile data. The tailoring flow may reorder or emphasize existing facts, but should not invent companies, dates, degrees, skills, or eligibility answers.
+
+### Resume Refiner onboarding
+
+Place an existing resume in an ignored path under `data/`, then ask Hermes to run **Resume Refiner** before enabling application-package generation. Do not place personal documents in a tracked directory.
+
+Resume Refiner uses the uploaded resume as a baseline and then interviews the user one experience at a time. It covers:
+
+- role progression, dates, responsibilities, and current support status;
+- product purpose, users, scale, and the user's actual contribution;
+- languages, frameworks, architecture, data stores, protocols, and integrations;
+- migrations, major deliveries, technical decisions, and the reasons behind them;
+- production incidents, constraints, diagnosis, solution, and verified result;
+- testing levels, CI/CD, deployment ownership, monitoring, and operations;
+- collaboration, coordination, mentoring, and architecture responsibility;
+- metrics, certifications, side projects, and relevant skills missing from the source resume;
+- confidentiality limits and claims the user does not want made.
+
+Hermes must ask one focused question at a time, follow useful threads, and distinguish the user's answer from proposed resume wording. It may store a statement in the usable evidence bank only after the user explicitly confirms that statement. It must not infer missing metrics, dates, technologies, ownership, or impact.
+
+Draft answers and progress belong in an ignored local refiner-session file. Accepted updates must be applied with `atomic_update_profile(..., candidate_confirmed=True)` only after the user confirms the exact facts and wording. The helper preserves existing profile data, makes a timestamped backup, and atomically replaces the profile. The user may pause and resume the interview.
+
+Validate the result before tailoring:
+
+```bash
+python resume_refiner.py validate data/master-profile.json
+```
+
+Only evidence marked `candidate-confirmed`, `public`, and visible to `resume` or `cover-letter` is eligible for generated documents. Private, draft, rejected, or interview-only notes are excluded from the public application package.
 
 ## 5. Dedicated application mailbox and dual-account model
 

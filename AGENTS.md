@@ -17,9 +17,23 @@ This repository is intended to be operated by Hermes Agent or another coding age
 1. Read `setup.md` and this file.
 2. Create a virtual environment and install `requirements.txt`.
 3. Copy `.env.example` to `.env` and ask the user to provide Telegram values if needed.
-4. Copy `data/master-profile.example.json` to `data/master-profile.json` and ask the user to fill truthful profile details.
-5. Run `python -m pytest -q tests`.
-6. If using browser apply, launch Chromium with CDP on `127.0.0.1:9222` and a dedicated profile under `browser-profiles/`.
+4. Ask the user to place their existing resume in an ignored path under `data/`, then run the Resume Refiner onboarding described in `job-hunter.skill.md`.
+5. Build `data/master-profile.json` from imported facts plus facts the user explicitly confirms during refinement. Never infer missing facts.
+6. Validate the refined profile before enabling tailoring.
+7. Run `python -m pytest -q tests`.
+8. If using browser apply, launch Chromium with CDP on `127.0.0.1:9222` and a dedicated profile under `browser-profiles/`.
+
+## Resume Refiner
+
+- When a new user provides a resume under an ignored `data/` path, start Resume Refiner before job matching or package generation.
+- Treat an uploaded resume as a starting source, not permission to invent or extrapolate.
+- Interview the user one experience at a time and one focused question at a time. Cover role progression, product and users, technical scope, architecture, integrations, scale, delivery, migrations, incidents, results, testing, CI/CD, operations, leadership, and ongoing support.
+- Ask follow-up questions when an answer reveals a useful project, decision, challenge, result, or measurable outcome.
+- Separate what the user said from proposed resume wording. Show the proposed fact or bullet and obtain explicit confirmation before storing it as candidate-confirmed evidence.
+- Never infer metrics, dates, technologies, ownership, causality, or business impact. Keep unknown values unknown.
+- Preserve all existing profile fields and create a backup before each accepted update.
+- Keep draft answers and interview notes in an ignored local refiner-session file. Only confirmed, public evidence may be used in resumes or cover letters.
+- Let the user pause and resume. Do not mark refinement complete while experiences or important evidence gaps remain unresolved unless the user chooses to stop.
 
 ## Auto-apply workflow
 
