@@ -1560,6 +1560,47 @@ def test_cover_letter_is_specific_complete_and_evidence_based():
     assert "generated" not in letter_text
 
 
+def test_confirmed_variant_cover_letter_preserves_approved_experience_order():
+    approved_architect_bullets = [
+        "Designed the approved architecture.",
+        "Deployed the approved cloud environments.",
+        "Implemented the approved audit trail.",
+    ]
+    profile = {
+        "name": "Candidate",
+        "headline": "Software Architect",
+        "summary": "Approved architect summary.",
+        "skills": {"Architecture": ["AWS", "Terraform"]},
+        "experience": [
+            {
+                "title": "Software Architect - Client Project",
+                "company": "Consultancy",
+                "dates": "2026",
+                "bullets": approved_architect_bullets,
+            },
+            {
+                "title": "Chief Technology Officer",
+                "company": "Venture",
+                "dates": "2025 - Present",
+                "bullets": [
+                    "Owned architecture, infrastructure, reliability, security, and platform delivery."
+                ],
+            },
+        ],
+        "education": [],
+    }
+    job = {
+        "title": "Software Architect",
+        "company": "TargetCo",
+        "description": "Own cloud architecture, security, and platform reliability.",
+    }
+
+    letter = flow._cover_letter(profile, job, preserve_experience_order=True)
+
+    assert [item["text"] for item in letter["highlights"]] == approved_architect_bullets
+    assert all("Software Architect" in item["context"] for item in letter["highlights"])
+
+
 def test_pdf_renderers_keep_cover_to_one_page_and_prevent_orphaned_blocks(tmp_path):
     cover = pdf_renderer.CoverLetterPDF(
         {

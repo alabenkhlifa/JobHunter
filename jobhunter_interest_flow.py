@@ -1578,6 +1578,7 @@ def _ranked_evidence(
     job_title: str = "",
     *,
     limit: int = 3,
+    preserve_experience_order: bool = False,
 ) -> list[dict[str, str]]:
     evidence: list[tuple[int, int, int, dict[str, str]]] = []
     seen_text: set[str] = set()
@@ -1629,7 +1630,10 @@ def _ranked_evidence(
                 {"text": text, "context": experience_contexts[experience_id]},
             )
         )
-    evidence.sort(key=lambda item: (-item[0], item[1], item[2]))
+    if preserve_experience_order:
+        evidence.sort(key=lambda item: (item[1], item[2]))
+    else:
+        evidence.sort(key=lambda item: (-item[0], item[1], item[2]))
     return [item[3] for item in evidence[:limit]]
 
 
@@ -1681,7 +1685,12 @@ def _natural_join(values: list[str]) -> str:
     return f"{', '.join(values[:-1])}, and {values[-1]}"
 
 
-def _cover_letter(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+def _cover_letter(
+    profile: dict[str, Any],
+    job: dict[str, Any],
+    *,
+    preserve_experience_order: bool = False,
+) -> dict[str, Any]:
     name = str(profile["name"])
     contact_parts = [profile.get("email"), profile.get("phone"), profile.get("linkedin")]
     company = str(job.get("company") or "the company")
@@ -1713,7 +1722,12 @@ def _cover_letter(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any
         "salutation": "Dear Hiring Team,",
         "opening": " ".join(opening_sentences),
         "highlights_heading": "Relevant examples from my experience include:",
-        "highlights": _ranked_evidence(profile, job_text, title),
+        "highlights": _ranked_evidence(
+            profile,
+            job_text,
+            title,
+            preserve_experience_order=preserve_experience_order,
+        ),
         "motivation": (
             f"I am particularly interested in contributing to the {team_name} team, where the role combines "
             "system design, production delivery, and continuous technical improvement."
@@ -1890,7 +1904,14 @@ def prepare_application_package(
         staged_cover_pdf = staging_dir / "CoverLetter.pdf"
 
         _write_private_json(staged_resume_json, resume_payload)
-        _write_private_json(staged_cover_json, _cover_letter(cover_source, job))
+        _write_private_json(
+            staged_cover_json,
+            _cover_letter(
+                cover_source,
+                job,
+                preserve_experience_order=selected_variant is not None,
+            ),
+        )
         resume_page_count: int | None = None
         if render_pdfs:
             resume_page_count = _render_pdf("resume", staged_resume_json, staged_resume_pdf)
