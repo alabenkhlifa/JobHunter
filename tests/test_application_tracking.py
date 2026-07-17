@@ -118,6 +118,42 @@ def test_record_application_stage_inserts_then_updates_latest_state():
     )
 
 
+def test_record_application_stage_can_defer_commit_and_tracker_sync(tmp_path, monkeypatch):
+    db_path = tmp_path / "jobs.db"
+    conn = sqlite3.connect(db_path)
+    sync_calls = []
+    monkeypatch.setattr(
+        scraper,
+        "sync_application_tracker_if_enabled",
+        lambda: sync_calls.append("sync"),
+    )
+
+    scraper.record_application_stage(
+        conn,
+        "li-transactional",
+        "package_generated",
+        commit=False,
+        sync=False,
+    )
+
+    observer = sqlite3.connect(db_path)
+    assert observer.execute(
+        "SELECT COUNT(*) FROM applications WHERE job_id = ?",
+        ("li-transactional",),
+    ).fetchone()[0] == 0
+    observer.close()
+    assert sync_calls == []
+
+    conn.commit()
+    observer = sqlite3.connect(db_path)
+    assert observer.execute(
+        "SELECT stage FROM applications WHERE job_id = ?",
+        ("li-transactional",),
+    ).fetchone()[0] == "package_generated"
+    observer.close()
+    conn.close()
+
+
 def test_mark_interested_records_application_stage():
     conn = make_conn_with_jobs()
 

@@ -210,12 +210,21 @@ def handle_apply(job_id, callback_query_id):
         answer_callback(callback_query_id, "Job not found")
         return
 
-    package = interest_flow.prepare_application_package(
-        job_id,
-        db_path=DB_PATH,
-        profile_path=PROFILE_PATH,
-        output_dir=OUTPUT_DIR,
-    )
+    try:
+        package = interest_flow.prepare_application_package(
+            job_id,
+            db_path=DB_PATH,
+            profile_path=PROFILE_PATH,
+            output_dir=OUTPUT_DIR,
+        )
+    except interest_flow.TailoringReadinessError as exc:
+        answer_callback(callback_query_id, "Resume refinement needed")
+        send_message(
+            interest_flow.build_tailoring_blocked_message(job, str(exc)),
+            reply_markup=interest_flow.tailoring_blocked_keyboard(job_id, job.get("url")),
+        )
+        log.info(f"Application package paused for resume refinement: {job['title']} @ {job['company']}")
+        return
     answer_callback(callback_query_id, "✓ Package generated")
     send_message(
         interest_flow.build_package_ready_message(job, package),
@@ -227,6 +236,25 @@ def handle_apply(job_id, callback_query_id):
 def handle_ignore(job_id, callback_query_id):
     mark_skipped(job_id, reason="ignored after research brief")
     answer_callback(callback_query_id, "✓ Ignored")
+
+
+def handle_resume_refine(job_id, callback_query_id):
+    job = get_job(job_id)
+    if not job:
+        answer_callback(callback_query_id, "Job not found")
+        return
+    record_feedback(job_id, "resume_refine", reason="resume refinement requested after tailoring gate")
+    answer_callback(callback_query_id, "Resume refinement instructions ready")
+    send_message(interest_flow.build_resume_refinement_message(job))
+
+
+def handle_pause(job_id, callback_query_id):
+    job = get_job(job_id)
+    if not job:
+        answer_callback(callback_query_id, "Job not found")
+        return
+    record_feedback(job_id, "paused", reason="user paused application workflow")
+    answer_callback(callback_query_id, "✓ Paused")
 
 
 def handle_proceed_apply(job_id, callback_query_id):
@@ -309,6 +337,10 @@ def poll_updates(offset=0):
                     handle_interested(payload, callback_id)
                 elif action == "apply":
                     handle_apply(payload, callback_id)
+                elif action == "resume_refine":
+                    handle_resume_refine(payload, callback_id)
+                elif action == "pause":
+                    handle_pause(payload, callback_id)
                 elif action == "ignore":
                     handle_ignore(payload, callback_id)
                 elif action == "proceed_apply":

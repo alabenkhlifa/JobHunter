@@ -8,13 +8,17 @@ network calls so Telegram callbacks remain reliable.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, unquote, urlparse
@@ -45,18 +49,30 @@ _RELEVANCE_GROUPS = (
     ("backend", "server-side", "microservice", "spring boot", "rest api", "api"),
     ("distributed", "event-driven", "message queue", "rabbitmq", "mqtt"),
     ("cloud", "aws", "azure", "kubernetes", "docker", "terraform"),
+    (
+        "architecture",
+        "system design",
+        "solution design",
+        "cloud-native",
+        "saas",
+        "multi-tenant",
+        "service mesh",
+    ),
+    ("security", "zero-trust", "privacy by design", "data residency", "compliance"),
+    ("gitops", "argocd", "fluxcd", "progressive deployment", "blue-green"),
+    ("observability", "monitoring", "logging", "reliability", "sre"),
     ("database", "mysql", "postgresql", "mongodb", "nosql", "redis", "cache"),
-    ("performance", "scalable", "scalability", "load testing", "reliability", "monitoring"),
+    ("performance", "scalable", "scalability", "load testing"),
     ("java", "kotlin", "jvm", "spring"),
     ("golang", "pprof"),
-    ("ai", "machine learning", "ml", "rag", "llm"),
-    ("lead", "leadership", "mentoring", "architecture", "system design"),
+    ("ai", "machine learning", "ml", "rag", "llm", "mlops", "llmops"),
+    ("lead", "leadership", "mentoring", "stakeholder", "cross-functional"),
 )
 
 _KEYWORD_STOPWORDS = {
     "about", "after", "also", "being", "build", "company", "could", "from", "have",
     "development", "engineering", "experience", "including", "into", "management", "other",
-    "platform", "product", "production", "responsible", "role", "service", "services", "software",
+    "product", "production", "responsible", "role", "service", "services", "software",
     "strong", "system", "systems", "team", "technical", "technology", "their", "these", "through",
     "using", "with", "work", "years", "your",
 }
@@ -106,6 +122,11 @@ class ApplicationPackage:
     cover_json: Path
     resume_pdf: Path
     cover_pdf: Path
+    manifest_json: Path | None = None
+
+
+class TailoringReadinessError(RuntimeError):
+    """Raised when a safe, role-appropriate application package cannot be generated."""
 
 
 def target_salary_aed_monthly() -> int:
@@ -1146,10 +1167,40 @@ def package_ready_keyboard(job_id: str) -> dict[str, object]:
         "inline_keyboard": [
             [
                 {"text": "🚀 Proceed to apply", "callback_data": f"proceed_apply:{job_id}"},
-                {"text": "⏸ Pause", "callback_data": f"ignore:{job_id}"},
+                {"text": "⏸ Pause", "callback_data": f"pause:{job_id}"},
             ]
         ]
     }
+
+
+def tailoring_blocked_keyboard(job_id: str, url: str | None = None) -> dict[str, object]:
+    first_row = [
+        {"text": "📋 Review required changes", "callback_data": f"resume_refine:{job_id}"},
+        {"text": "⏸ Pause", "callback_data": f"pause:{job_id}"},
+    ]
+    rows: list[list[dict[str, str]]] = [first_row]
+    if url:
+        rows.append([{"text": "📄 Job details", "url": url}])
+    return {"inline_keyboard": rows}
+
+
+def build_tailoring_blocked_message(job: dict[str, Any], reason: str) -> str:
+    return f"""🛑 <b>Resume package paused</b>
+
+<b>{_esc(job.get('title'))}</b>
+{_esc(job.get('company'))} — {_esc(job.get('location'))}
+
+{_esc(reason)}
+
+No resume was generated and no application stage was advanced."""
+
+
+def build_resume_refinement_message(job: dict[str, Any]) -> str:
+    return f"""📝 <b>Resume refinement required</b>
+
+<b>{_esc(job.get('title'))}</b> at {_esc(job.get('company'))}
+
+Open JobHunter with the job ID <code>{_esc(job.get('id'))}</code> and complete the Resume Refiner review. Confirm corrected role dates and the complete role-family resume wording before generating another package."""
 
 
 def build_package_ready_message(job: dict[str, Any], package: ApplicationPackage) -> str:
@@ -1294,19 +1345,70 @@ def _focused_summary(summary: str, job_text: str, *, limit: int = 3) -> str:
     return " ".join(sentences[index] for index in sorted(ranked_indexes))
 
 
-def _tailored_experience(profile: dict[str, Any], job_text: str) -> list[dict[str, Any]]:
+def _experience_role_text(experience: dict[str, Any]) -> str:
+    # Use only renderer-allowlisted fields here. Nested engagements may contain
+    # draft/private interview material and must not influence public ordering.
+    values = (experience.get("title"), experience.get("subtitle"), experience.get("tech"))
+    return " ".join(str(value) for value in values if value)
+
+
+def _experience_relevance_score(
+    experience: dict[str, Any],
+    job_text: str,
+    job_title: str,
+) -> int:
+    role_text = _experience_role_text(experience)
+    evidence_text = " ".join(
+        (
+            role_text,
+            " ".join(str(bullet) for bullet in experience.get("bullets") or []),
+        )
+    )
+    score = _relevance_score(evidence_text, job_text)
+    normalized_title = _normalized_relevance_text(job_title)
+    normalized_roles = _normalized_relevance_text(role_text)
+    title_terms = {
+        term
+        for term in re.findall(r"[a-z0-9+#.]+", normalized_title)
+        if len(term) > 2 and term not in _KEYWORD_STOPWORDS
+    }
+    role_terms = {
+        term
+        for term in re.findall(r"[a-z0-9+#.]+", normalized_roles)
+        if len(term) > 2 and term not in _KEYWORD_STOPWORDS
+    }
+    score += len(title_terms & role_terms) * 12
+    if _contains_relevance_term(normalized_title, "architect") and _contains_relevance_term(
+        normalized_roles, "architect"
+    ):
+        score += 30
+    return score
+
+
+def _tailored_experience(
+    profile: dict[str, Any],
+    job_text: str,
+    job_title: str = "",
+) -> list[dict[str, Any]]:
     projected = project_public_resume(profile).get("experience") or []
     resume_evidence: dict[str, list[str]] = {}
     for item in usable_evidence(profile, "resume"):
         resume_evidence.setdefault(item["experience_id"], []).append(item["public_text"])
 
+    ranked_sources = sorted(
+        enumerate(profile.get("experience") or []),
+        key=lambda item: (
+            -_experience_relevance_score(item[1], job_text, job_title),
+            item[0],
+        ),
+    )
     tailored_experience: list[dict[str, Any]] = []
-    for index, source in enumerate(profile.get("experience") or []):
-        experience = json.loads(json.dumps(projected[index]))
+    for ranked_index, (source_index, source) in enumerate(ranked_sources):
+        experience = json.loads(json.dumps(projected[source_index]))
         bullets = list(experience.get("bullets") or [])
         bullets.extend(resume_evidence.get(source.get("id"), []))
         bullets = list(dict.fromkeys(bullets))
-        limit = 3 if index == 0 else 4 if index < 3 else 2
+        limit = 4 if ranked_index < 3 else 2
         experience["bullets"] = _ranked_values(bullets, job_text)[:limit]
         tailored_experience.append(experience)
     return tailored_experience
@@ -1324,7 +1426,8 @@ def _resume_for_job(
     """
     validate_profile(profile)
     job_text = _job_relevance_text(job)
-    variant = select_resume_variant(profile, job_text)
+    job_title = str(job.get("title") or "")
+    variant = select_resume_variant(profile, job_text, job_title=job_title)
     if variant is not None:
         return apply_resume_variant(profile, variant), variant
 
@@ -1339,13 +1442,134 @@ def _resume_for_job(
             key=lambda item: (-_skill_category_score(item[1][0], item[1][1], job_text), item[0]),
         )
     }
-    tailored["experience"] = _tailored_experience(profile, job_text)
+    tailored["experience"] = _tailored_experience(profile, job_text, job_title)
     return tailored, None
 
 
 def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     """Return only the renderer-safe resume payload for compatibility."""
     return _resume_for_job(profile, job)[0]
+
+
+_MONTH_NAMES = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+_MONTH_NUMBERS = {
+    alias: index
+    for index, name in enumerate(_MONTH_NAMES, start=1)
+    for alias in (name.lower(), name[:3].lower())
+}
+_MONTH_NUMBERS["sept"] = 9
+_MONTH_YEAR_PATTERN = re.compile(
+    rf"\b({'|'.join(sorted(_MONTH_NUMBERS, key=len, reverse=True))})\.?\s+(\d{{4}})\b",
+    re.IGNORECASE,
+)
+_YEAR_PATTERN = re.compile(r"\b((?:19|20)\d{2})\b")
+_CURRENT_DATE_PATTERN = re.compile(r"\b(?:present|current)\b", re.IGNORECASE)
+_ARCHITECT_ROLE_PATTERN = re.compile(r"\barchitect(?:ure)?\b", re.IGNORECASE)
+
+
+def _start_month(value: Any) -> tuple[int, int] | None:
+    text = str(value or "")
+    month_match = _MONTH_YEAR_PATTERN.search(text)
+    if month_match:
+        return int(month_match.group(2)), _MONTH_NUMBERS[month_match.group(1).lower()]
+    year_match = _YEAR_PATTERN.search(text)
+    if year_match:
+        return int(year_match.group(1)), 1
+    return None
+
+
+def _title_seniority(title: Any) -> int:
+    normalized = _normalized_relevance_text(title)
+    if any(
+        _contains_relevance_term(normalized, term)
+        for term in ("chief technology officer", "cto", "founder")
+    ):
+        return 5
+    if any(
+        _contains_relevance_term(normalized, term)
+        for term in ("lead", "principal", "architect")
+    ):
+        return 4
+    if _contains_relevance_term(normalized, "senior"):
+        return 3
+    return 1
+
+
+def _profile_timeline_issues(profile: dict[str, Any]) -> list[str]:
+    """Return privacy-safe issue codes for obvious same-employer progression conflicts."""
+    by_company: dict[str, list[dict[str, Any]]] = {}
+    for experience in profile.get("experience") or []:
+        company = _normalized_relevance_text(experience.get("company"))
+        if company:
+            by_company.setdefault(company, []).append(experience)
+
+    issues: list[str] = []
+    for experiences in by_company.values():
+        for current in experiences:
+            if not _CURRENT_DATE_PATTERN.search(str(current.get("dates") or "")):
+                continue
+            if current.get("allow_parallel") is True:
+                continue
+            current_start = _start_month(current.get("dates"))
+            if current_start is None:
+                continue
+            for later in experiences:
+                if later is current or later.get("allow_parallel") is True:
+                    continue
+                if _CURRENT_DATE_PATTERN.search(str(later.get("dates") or "")):
+                    continue
+                later_start = _start_month(later.get("dates"))
+                if (
+                    later_start is not None
+                    and later_start > current_start
+                    and _title_seniority(later.get("title")) > _title_seniority(current.get("title"))
+                ):
+                    issues.append("same_employer_progression_still_present")
+                    break
+    return sorted(set(issues))
+
+
+def _requires_confirmed_role_variant(job: dict[str, Any]) -> bool:
+    return bool(_ARCHITECT_ROLE_PATTERN.search(str(job.get("title") or "")))
+
+
+def _role_variant_requirement_satisfied(
+    job: dict[str, Any],
+    selected_variant: dict[str, Any] | None,
+) -> bool:
+    if not _requires_confirmed_role_variant(job):
+        return True
+    return bool(selected_variant and selected_variant.get("role_terms"))
+
+
+def _assert_tailoring_ready(
+    profile: dict[str, Any],
+    job: dict[str, Any],
+    selected_variant: dict[str, Any] | None,
+) -> None:
+    if _profile_timeline_issues(profile):
+        raise TailoringReadinessError(
+            "The candidate profile has an inconsistent same-employer role progression. "
+            "Confirm the exact role end date before generating another package."
+        )
+    if not _role_variant_requirement_satisfied(job, selected_variant):
+        raise TailoringReadinessError(
+            "No candidate-confirmed resume variant matches this architecture role. "
+            "Complete the Software Architect resume variant before generating the package."
+        )
 
 
 def _ranked_evidence(
@@ -1553,6 +1777,70 @@ def _enforce_resume_page_limit(page_count: int, max_pages: Any) -> None:
         )
 
 
+def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _make_private(path: Path) -> None:
+    if path.exists():
+        path.chmod(0o600)
+
+
+def _profile_digest(profile: dict[str, Any]) -> str:
+    canonical = json.dumps(profile, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _remove_generated_path(path: Path | None) -> None:
+    if path is None or (not path.exists() and not path.is_symlink()):
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _assert_direct_output_child(path: Path, output_root: Path) -> None:
+    if path.parent.resolve() != output_root.resolve():
+        raise ValueError("Package paths must remain direct children of the configured output directory")
+
+
+def _promote_package_directory(
+    staging_dir: Path,
+    package_dir: Path,
+    output_root: Path,
+) -> Path | None:
+    """Atomically promote a complete staged package, retaining the old one for rollback."""
+    _assert_direct_output_child(staging_dir, output_root)
+    _assert_direct_output_child(package_dir, output_root)
+    backup_dir: Path | None = None
+    if package_dir.exists() or package_dir.is_symlink():
+        backup_dir = package_dir.with_name(f".{package_dir.name}.backup-{uuid.uuid4().hex}")
+        _assert_direct_output_child(backup_dir, output_root)
+        os.replace(package_dir, backup_dir)
+    try:
+        os.replace(staging_dir, package_dir)
+    except Exception:
+        if backup_dir is not None:
+            os.replace(backup_dir, package_dir)
+        raise
+    return backup_dir
+
+
+def _restore_previous_package(
+    package_dir: Path,
+    backup_dir: Path | None,
+    output_root: Path,
+) -> None:
+    _assert_direct_output_child(package_dir, output_root)
+    if backup_dir is not None:
+        _assert_direct_output_child(backup_dir, output_root)
+    _remove_generated_path(package_dir)
+    if backup_dir is not None and (backup_dir.exists() or backup_dir.is_symlink()):
+        os.replace(backup_dir, package_dir)
+
+
 def prepare_application_package(
     job_id: str,
     *,
@@ -1561,33 +1849,99 @@ def prepare_application_package(
     output_dir: Path | str = DEFAULT_OUTPUT_DIR,
     render_pdfs: bool = True,
 ) -> ApplicationPackage:
-    with _connect(db_path) as conn:
+    conn = _connect(db_path)
+    staging_dir: Path | None = None
+    package_dir: Path | None = None
+    backup_dir: Path | None = None
+    output_root: Path | None = None
+    promoted = False
+    committed = False
+    try:
         job = fetch_job(conn, job_id)
         profile = _load_profile(profile_path)
-        package_dir = Path(output_dir) / f"{job_id}-{_slug(job.get('company') or '')}-{_slug(job.get('title') or '')}"
-        package_dir.mkdir(parents=True, exist_ok=True)
-        resume_json = package_dir / "resume.json"
-        cover_json = package_dir / "cover_letter.json"
-        resume_pdf = package_dir / "Resume.pdf"
-        cover_pdf = package_dir / "CoverLetter.pdf"
         resume_payload, selected_variant = _resume_for_job(profile, job)
+        _assert_tailoring_ready(profile, job, selected_variant)
+        safe_job_id = str(job_id)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", safe_job_id):
+            raise ValueError("job_id contains unsafe path characters")
+        output_root = Path(output_dir).resolve()
+        if output_root == Path(output_root.anchor):
+            raise ValueError("The filesystem root cannot be used as the package output directory")
+        package_dir = output_root / f"{safe_job_id}-{_slug(job.get('company') or '')}-{_slug(job.get('title') or '')}"
+        _assert_direct_output_child(package_dir, output_root)
         cover_source = resume_payload if selected_variant is not None else profile
         variant_max_pages = selected_variant.get("max_pages") if selected_variant is not None else None
         if not render_pdfs and variant_max_pages is not None:
             raise RuntimeError("A page-limited confirmed resume variant requires PDF rendering")
-        resume_json.write_text(json.dumps(resume_payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        cover_json.write_text(json.dumps(_cover_letter(cover_source, job), indent=2, ensure_ascii=False), encoding="utf-8")
+
+        output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staging_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f".{package_dir.name}.staging-",
+                dir=output_root,
+            )
+        )
+        _assert_direct_output_child(staging_dir, output_root)
+        staging_dir.chmod(0o700)
+        staged_resume_json = staging_dir / "resume.json"
+        staged_cover_json = staging_dir / "cover_letter.json"
+        staged_manifest_json = staging_dir / "tailoring_manifest.json"
+        staged_resume_pdf = staging_dir / "Resume.pdf"
+        staged_cover_pdf = staging_dir / "CoverLetter.pdf"
+
+        _write_private_json(staged_resume_json, resume_payload)
+        _write_private_json(staged_cover_json, _cover_letter(cover_source, job))
+        resume_page_count: int | None = None
         if render_pdfs:
-            resume_page_count = _render_pdf("resume", resume_json, resume_pdf)
+            resume_page_count = _render_pdf("resume", staged_resume_json, staged_resume_pdf)
             _enforce_resume_page_limit(
                 resume_page_count,
                 variant_max_pages,
             )
-            _render_pdf("cover", cover_json, cover_pdf)
+            _render_pdf("cover", staged_cover_json, staged_cover_pdf)
         else:
-            resume_pdf.write_text("PDF rendering skipped in test mode", encoding="utf-8")
-            cover_pdf.write_text("PDF rendering skipped in test mode", encoding="utf-8")
-        package = ApplicationPackage(job_id, package_dir, resume_json, cover_json, resume_pdf, cover_pdf)
+            staged_resume_pdf.write_text("PDF rendering skipped in test mode", encoding="utf-8")
+            staged_cover_pdf.write_text("PDF rendering skipped in test mode", encoding="utf-8")
+        _make_private(staged_resume_pdf)
+        _make_private(staged_cover_pdf)
+        _write_private_json(
+            staged_manifest_json,
+            {
+                "manifest_version": 1,
+                "job_id": job_id,
+                "job_title": str(job.get("title") or ""),
+                "tailoring_mode": "confirmed_variant" if selected_variant is not None else "legacy_fallback",
+                "selected_variant_id": selected_variant.get("id") if selected_variant is not None else None,
+                "profile_sha256": _profile_digest(profile),
+                "resume_pages": resume_page_count,
+                "quality_checks": {
+                    "timeline_consistent": True,
+                    "role_variant_required": _requires_confirmed_role_variant(job),
+                    "role_variant_requirement_satisfied": _role_variant_requirement_satisfied(
+                        job,
+                        selected_variant,
+                    ),
+                },
+            },
+        )
+
+        backup_dir = _promote_package_directory(staging_dir, package_dir, output_root)
+        staging_dir = None
+        promoted = True
+        resume_json = package_dir / "resume.json"
+        cover_json = package_dir / "cover_letter.json"
+        manifest_json = package_dir / "tailoring_manifest.json"
+        resume_pdf = package_dir / "Resume.pdf"
+        cover_pdf = package_dir / "CoverLetter.pdf"
+        package = ApplicationPackage(
+            job_id,
+            package_dir,
+            resume_json,
+            cover_json,
+            resume_pdf,
+            cover_pdf,
+            manifest_json,
+        )
         scraper.record_application_stage(
             conn,
             job_id,
@@ -1597,8 +1951,31 @@ def prepare_application_package(
             application_type="linkedin_unknown" if "linkedin" in (job.get("url") or "").lower() else "external_unknown",
             application_url=job.get("url"),
             notes="Resume and cover letter generated; awaiting explicit Proceed to apply approval.",
+            commit=False,
+            sync=False,
         )
-        return package
+        conn.commit()
+        committed = True
+    except Exception:
+        conn.rollback()
+        if promoted and not committed and package_dir is not None and output_root is not None:
+            _restore_previous_package(package_dir, backup_dir, output_root)
+            backup_dir = None
+        raise
+    finally:
+        if staging_dir is not None and output_root is not None:
+            _assert_direct_output_child(staging_dir, output_root)
+        _remove_generated_path(staging_dir)
+        conn.close()
+
+    if backup_dir is not None and output_root is not None:
+        _assert_direct_output_child(backup_dir, output_root)
+    _remove_generated_path(backup_dir)
+    try:
+        scraper.sync_application_tracker_if_enabled()
+    except Exception:
+        pass
+    return package
 
 
 def render_research_dry_run(job_id: str, *, db_path: Path | str = DEFAULT_DB_PATH) -> str:

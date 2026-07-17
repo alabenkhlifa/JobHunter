@@ -41,7 +41,7 @@ Edit:
 
 Before enabling application-package generation, place your existing resume in an ignored path under `data/` and ask Hermes to run **Resume Refiner**. Hermes reviews the imported facts with you, interviews you experience by experience, and stores only facts and resume wording you explicitly confirm. The interview can be paused and resumed.
 
-Resume Refiner can also store candidate-confirmed role-family variants, such as a JVM-backend version. A variant is a complete public resume snapshot containing the exact approved headline, summary, skills, certifications, experience selection, education, ordering, section omissions, matching terms, and optional page limit. JobHunter combines it only with the current identity and contact fields; unspecified master-profile sections are not inherited. Draft or unconfirmed variants are ignored. When no variant matches, the existing evidence-ranking behavior remains the fallback.
+Resume Refiner can also store candidate-confirmed role-family variants, such as JVM-backend or software-architect versions. A variant is a complete public resume snapshot containing the exact approved headline, summary, skills, certifications, experience selection, education, ordering, section omissions, matching terms, optional title-scoped `role_terms`, and optional page limit. JobHunter combines it only with the current identity and contact fields; unspecified master-profile sections are not inherited. Draft or unconfirmed variants are ignored. Most jobs use evidence ranking when no variant matches, but architecture-titled jobs pause until a matching role-scoped variant is confirmed. Package generation also pauses for obvious inconsistent role chronology rather than guessing a date.
 
 For the full setup guide, see [`setup.md`](setup.md).
 
@@ -115,7 +115,8 @@ Telegram CTA flow:
 
 ```text
 Interested → brief research card → Apply / Ignore / Details
-Apply      → select confirmed variant or legacy tailoring → enforce page limit → generate package → Proceed to apply / Pause
+Apply      → validate chronology and role-variant gate → select confirmed variant or legacy tailoring → generate package + manifest → Proceed to apply / Pause
+Blocked    → generate nothing and record no package stage → Refine resume / Pause
 Proceed   → begin application prep only; final submit remains explicitly approval-gated
 ```
 

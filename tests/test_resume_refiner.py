@@ -227,6 +227,54 @@ def test_resume_variant_selection_is_confirmed_whole_term_and_deterministic():
     assert select_resume_variant(java_only, "JavaScript and TypeScript") is None
 
 
+def test_role_aware_variant_beats_incidental_legacy_technology_match():
+    profile = _v2_profile(
+        resume_variants=[
+            _variant(
+                "variant-java-legacy",
+                match_terms=["java", "spring boot"],
+                priority=1000,
+            ),
+            _variant(
+                "variant-architect",
+                role_terms=["software architect", "solution architect"],
+                match_terms=["cloud architecture", "distributed systems"],
+                priority=1,
+                resume={"headline": "Software Architect"},
+            ),
+        ]
+    )
+
+    selected = select_resume_variant(
+        profile,
+        "Maintain Java and Spring Boot services.",
+        job_title="Principal Software Architect",
+    )
+
+    assert selected["id"] == "variant-architect"
+
+
+def test_role_terms_block_variant_when_only_supporting_terms_match():
+    profile = _v2_profile(
+        resume_variants=[
+            _variant(
+                "variant-java-backend",
+                role_terms=["backend engineer", "backend developer"],
+                match_terms=["java", "spring boot"],
+            )
+        ]
+    )
+
+    assert (
+        select_resume_variant(
+            profile,
+            "Build Java and Spring Boot services.",
+            job_title="Software Architect",
+        )
+        is None
+    )
+
+
 def test_draft_and_unconfirmed_resume_variants_are_never_selected_or_applied():
     profile = _v2_profile(
         resume_variants=[
@@ -274,6 +322,7 @@ def test_apply_resume_variant_preserves_exact_content_order_and_omits_metadata()
         },
     ]
     variant = _variant(
+        role_terms=["backend engineer"],
         match_terms=["backend"],
         priority=7,
         max_pages=2,
@@ -298,7 +347,11 @@ def test_apply_resume_variant_preserves_exact_content_order_and_omits_metadata()
         private_notes="must not leak",
     )
 
-    selected = select_resume_variant(profile, "Backend services")
+    selected = select_resume_variant(
+        profile,
+        "Backend services",
+        job_title="Senior Backend Engineer",
+    )
     result = apply_resume_variant(profile, selected)
 
     assert "resume_variants" not in project_public_resume(profile)
@@ -316,6 +369,7 @@ def test_apply_resume_variant_preserves_exact_content_order_and_omits_metadata()
         "resume_variants",
         "id",
         "confirmation",
+        "role_terms",
         "match_terms",
         "priority",
         "max_pages",
@@ -364,6 +418,11 @@ def test_resume_variant_rejects_identity_and_contact_overrides(identity_field):
             "id is duplicated",
         ),
         (lambda p: p["resume_variants"][0].update(confirmation="assumed"), "confirmation"),
+        (lambda p: p["resume_variants"][0].update(role_terms=[]), "non-empty list"),
+        (
+            lambda p: p["resume_variants"][0].update(role_terms=["Architect", " architect "]),
+            "unique",
+        ),
         (lambda p: p["resume_variants"][0].update(match_terms=[]), "non-empty list"),
         (lambda p: p["resume_variants"][0].update(match_terms=["Java", " java "]), "unique"),
         (lambda p: p["resume_variants"][0].update(priority=True), "priority must be an integer"),
@@ -569,6 +628,55 @@ def test_atomic_update_preserves_evidence_list_metadata_while_replacing_confirme
     assert evidence["public_text"] == "Candidate-confirmed replacement text."
     assert evidence["role_tags"] == ["backend", "reliability"]
     assert evidence["visibility"] == ["resume", "cover-letter"]
+
+
+def test_atomic_update_merges_nested_engagement_by_label_without_duplicate(tmp_path):
+    path = tmp_path / "master-profile.json"
+    profile = _v2_profile(
+        experience=[
+            _experience(
+                engagements=[
+                    {
+                        "label": "African startup architecture engagement",
+                        "role": "Software Architect",
+                        "dates": "March 2026 – May 2026",
+                        "tech": ["AWS", "Terraform"],
+                        "private_note": "keep",
+                    }
+                ]
+            )
+        ]
+    )
+    path.write_text(json.dumps(profile), encoding="utf-8")
+
+    atomic_update_profile(
+        path,
+        {
+            "experience": [
+                {
+                    "id": "exp-example",
+                    "engagements": [
+                        {
+                            "label": "African startup architecture engagement",
+                            "dates": "March 2026 – June 2026",
+                        }
+                    ],
+                }
+            ]
+        },
+        candidate_confirmed=True,
+    )
+    updated = json.loads(path.read_text(encoding="utf-8"))
+    engagements = updated["experience"][0]["engagements"]
+
+    assert len(engagements) == 1
+    assert engagements[0] == {
+        "label": "African startup architecture engagement",
+        "role": "Software Architect",
+        "dates": "March 2026 – June 2026",
+        "tech": ["AWS", "Terraform"],
+        "private_note": "keep",
+    }
 
 
 def test_atomic_update_replaces_resume_variants_by_id_without_duplicates(tmp_path):

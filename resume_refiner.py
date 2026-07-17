@@ -170,6 +170,7 @@ def _validate_resume_variant(variant: Any, *, index: int) -> None:
     allowed_fields = {
         "id",
         "confirmation",
+        "role_terms",
         "match_terms",
         "priority",
         "max_pages",
@@ -182,6 +183,15 @@ def _validate_resume_variant(variant: Any, *, index: int) -> None:
         raise ProfileValidationError(f"{path}.id is missing or malformed")
     if variant.get("confirmation") not in CONFIRMATION_VALUES:
         raise ProfileValidationError(f"{path}.confirmation contains an unsupported value")
+
+    if "role_terms" in variant:
+        role_terms = variant["role_terms"]
+        _validate_string_list(role_terms, f"{path}.role_terms", non_empty=True)
+        normalized_role_terms = [_normalized_match_text(term) for term in role_terms]
+        if any(not term for term in normalized_role_terms) or len(set(normalized_role_terms)) != len(
+            normalized_role_terms
+        ):
+            raise ProfileValidationError(f"{path}.role_terms must contain unique matchable terms")
 
     match_terms = variant.get("match_terms")
     _validate_string_list(match_terms, f"{path}.match_terms", non_empty=True)
@@ -358,30 +368,46 @@ def _sanitized_variant_resume(resume: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
-def select_resume_variant(profile: dict[str, Any], job_text: str) -> dict[str, Any] | None:
+def _matched_term_count(terms: Iterable[str], normalized_text: str) -> int:
+    padded_text = f" {normalized_text} "
+    return sum(1 for term in terms if f" {_normalized_match_text(term)} " in padded_text)
+
+
+def select_resume_variant(
+    profile: dict[str, Any],
+    job_text: str,
+    job_title: str = "",
+) -> dict[str, Any] | None:
     """Select a confirmed variant for normalized whole-term/phrase matches.
 
-    Eligible variants are ranked by descending matched-term count, then
-    descending ``priority`` (default zero), then their stable source order.
-    The selected stored variant is returned as a deep copy; no profile-level
-    metadata is included.
+    A variant that declares ``role_terms`` is eligible only when at least one
+    role term matches the job title. Role-aware variants are ranked by title
+    matches before supporting ``match_terms``. A title match is sufficient for
+    role-aware eligibility; supporting terms distinguish variants in the same
+    role family. Variants without ``role_terms`` retain the legacy requirement
+    of at least one matching ``match_terms`` phrase. Remaining ties use
+    descending ``priority`` (default zero), then stable source order. The
+    selected stored variant is returned as a deep copy.
     """
     validate_profile(profile)
     normalized_job = _normalized_match_text(str(job_text or ""))
-    padded_job = f" {normalized_job} "
+    normalized_title = _normalized_match_text(str(job_title or ""))
     best_variant: dict[str, Any] | None = None
-    best_score: tuple[int, int, int] | None = None
+    best_score: tuple[int, int, int, int] | None = None
     for index, variant in enumerate(profile.get("resume_variants") or []):
         if variant["confirmation"] != "candidate-confirmed":
             continue
-        matched_count = sum(
-            1
-            for term in variant["match_terms"]
-            if f" {_normalized_match_text(term)} " in padded_job
-        )
-        if not matched_count:
+
+        role_terms = variant.get("role_terms")
+        role_match_count = _matched_term_count(role_terms, normalized_title) if role_terms else 0
+        if role_terms and not role_match_count:
             continue
-        score = (matched_count, variant.get("priority", 0), -index)
+
+        matched_count = _matched_term_count(variant["match_terms"], normalized_job)
+        if not role_terms and not matched_count:
+            continue
+
+        score = (role_match_count, matched_count, variant.get("priority", 0), -index)
         if best_score is None or score > best_score:
             best_score = score
             best_variant = variant
@@ -423,7 +449,7 @@ def _merge_dict(current: dict[str, Any], updates: dict[str, Any], *, path: tuple
             else:
                 merged[key] = _merge_unique_values(current_visibility, updated_visibility)
         elif isinstance(existing, list) and isinstance(value, list):
-            if key in {"experience", "evidence_bank", "resume_variants"}:
+            if key in {"experience", "engagements", "evidence_bank", "resume_variants"}:
                 merged[key] = _merge_records(existing, value, path=next_path)
             else:
                 merged[key] = _merge_unique_values(existing, value)
@@ -449,19 +475,41 @@ def _merge_records(current: list[Any], updates: list[Any], *, path: tuple[str, .
         for index, item in enumerate(merged)
         if isinstance(item, dict) and _valid_id(item.get("id"))
     }
+    if path[-1] == "engagements":
+        indexes.update(
+            {
+                item.get("label"): index
+                for index, item in enumerate(merged)
+                if (
+                    isinstance(item, dict)
+                    and isinstance(item.get("label"), str)
+                    and item["label"].strip()
+                )
+            }
+        )
     for update_index, item in enumerate(updates):
         if not isinstance(item, dict):
             merged.append(copy.deepcopy(item))
             continue
         item_id = item.get("id")
+        match_key = (
+            item.get("label")
+            if path[-1] == "engagements" and not _valid_id(item_id)
+            else item_id
+        )
+        has_match_key = _valid_id(match_key) or (
+            path[-1] == "engagements"
+            and isinstance(match_key, str)
+            and bool(match_key.strip())
+        )
         if (
             path[-1] == "resume_variants"
             and _valid_id(item_id)
             and item_id in indexes
         ):
             merged[indexes[item_id]] = copy.deepcopy(item)
-        elif _valid_id(item_id) and item_id in indexes and isinstance(merged[indexes[item_id]], dict):
-            record_index = indexes[item_id]
+        elif has_match_key and match_key in indexes and isinstance(merged[indexes[match_key]], dict):
+            record_index = indexes[match_key]
             merged[record_index] = _merge_dict(merged[record_index], item, path=(*path, str(record_index)))
         elif (
             _valid_id(item_id)
@@ -480,7 +528,7 @@ def _merge_records(current: list[Any], updates: list[Any], *, path: tuple[str, .
         ):
             merged[update_index] = _merge_dict(merged[update_index], item, path=(*path, str(update_index)))
         else:
-            indexes[item_id] = len(merged)
+            indexes[match_key] = len(merged)
             merged.append(copy.deepcopy(item))
     return merged
 

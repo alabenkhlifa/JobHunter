@@ -103,7 +103,7 @@ Do not change confirmation or visibility flags to make a fact eligible. Ask the 
 
 ### Confirmed resume variant contract
 
-A confirmed role-family variant is a complete candidate-approved presentation, not newly inferred evidence. It may deliberately consolidate or omit master-profile experiences and sections. Identity and contact fields always come from the master profile; every other intended public section must be present in the renderer-compatible variant snapshot because unspecified master sections are not inherited. Selection requires at least one matching `match_terms` phrase, and `max_pages` must pass before `package_generated` is recorded. Preserve selected variant wording and order exactly and never expose its matching or confirmation metadata in generated documents.
+A confirmed role-family variant is a complete candidate-approved presentation, not newly inferred evidence. It may deliberately consolidate or omit master-profile experiences and sections. Identity and contact fields always come from the master profile; every other intended public section must be present in the renderer-compatible variant snapshot because unspecified master sections are not inherited. A legacy variant requires at least one matching `match_terms` phrase. A variant with `role_terms` is eligible only when the job title matches that role family; supporting `match_terms` then rank eligible variants. Architecture-titled jobs require a matching role-scoped confirmed variant and must not use generic fallback tailoring. `max_pages` must pass before `package_generated` is recorded. Preserve selected variant wording and order exactly and never expose its matching or confirmation metadata in generated documents.
 
 ## Scraping Strategy
 The scraper uses **breadth-first round-robin** across 2 buckets:
@@ -178,11 +178,11 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
    ⏳ Analyzing job requirements..."
    ```
 
-3. Read and validate `data/master-profile.json`. If the profile is missing, or the local refiner session records unresolved required facts, pause package generation and offer to resume refinement rather than filling gaps yourself.
+3. Read and validate `data/master-profile.json`. If the profile is missing, the local refiner session records unresolved required facts, or an obvious same-employer progression leaves an earlier lower-seniority role marked current after a later higher-seniority role ended, pause package generation and offer to resume refinement rather than filling gaps yourself. Require the exact corrected date.
 
 4. **AI tailoring** (this is the intelligent part openclaw does):
 
-   First select a matching `candidate-confirmed` role-family variant, if one exists. Preserve every public field, experience choice, bullet, and ordering in that variant exactly, use its selected public resume as the cover-letter evidence source, and enforce its optional `max_pages` value before recording `package_generated`. If no confirmed variant matches, use the legacy rules below.
+   First select a matching `candidate-confirmed` role-family variant, if one exists. Match `role_terms` against the job title as complete terms, then rank eligible variants with supporting `match_terms`. Preserve every public field, experience choice, bullet, and ordering in that variant exactly, use its selected public resume as the cover-letter evidence source, and enforce its optional `max_pages` value before recording `package_generated`. If no confirmed variant matches, use the legacy rules below, except for architecture-titled jobs: pause those until a matching role-scoped variant is confirmed.
 
    **CRITICAL: The master-profile.json contains REAL data. In legacy tailoring, every company name, job title, date range, education entry, and certification is factual and must be preserved EXACTLY. You are tailoring, NOT rewriting.**
 
@@ -208,7 +208,7 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
    - Do NOT remove any experience entries or education during legacy tailoring; a confirmed variant may omit only what the candidate approved
    - Do NOT change the person's name, contact info, or education history
 
-5. Write tailored resume JSON to a temp file using only renderer-compatible public fields. Start from the validated public projection, preserve its immutable values, and make only the adjustments above. Do not copy evidence metadata, refiner state, private notes, or application defaults into the output.
+5. Write tailored resume JSON to a temp file using only renderer-compatible public fields. Start from the validated public projection, preserve its immutable values, and make only the adjustments above. Do not copy evidence metadata, refiner state, private notes, or application defaults into the output. Write a private `tailoring_manifest.json` beside successful package files with the tailoring mode, selected variant ID, profile digest, renderer page count, and readiness checks. Do not create package files or record `package_generated` when a readiness gate blocks generation.
 
 6. Render resume PDF:
    ```bash

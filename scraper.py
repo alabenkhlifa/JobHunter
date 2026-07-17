@@ -97,6 +97,9 @@ CONFIG = {
         "microservices", "rest", "graphql", "grpc", "kafka", "rabbitmq",
         "postgresql", "mysql", "mongodb", "redis", "elasticsearch",
         "linux", "nginx", "devops", "sre", "observability", "prometheus", "grafana",
+        "cloud-native", "saas", "service mesh", "gitops",
+        "multi-tenant", "multi-tenancy", "zero-trust", "data residency",
+        "security", "privacy", "compliance", "mlops", "llmops", "ai model operations",
         "agile", "scrum", "jira",
     ],
     "local_presence_phrases": [
@@ -353,8 +356,12 @@ def record_application_stage(
     notes=None,
     error=None,
     now=None,
+    commit=True,
+    sync=True,
 ):
     """Insert or update the latest application-state row for a job."""
+    if sync and not commit:
+        raise ValueError("sync requires commit=True")
     init_application_tracking(conn)
     timestamp = (now or datetime.now(timezone.utc)).isoformat()
     approved_at = timestamp if stage == "approved" else None
@@ -414,8 +421,9 @@ def record_application_stage(
             ),
         )
         application_id = cur.lastrowid
-    conn.commit()
-    if _connection_has_file_database(conn):
+    if commit:
+        conn.commit()
+    if sync and _connection_has_file_database(conn):
         sync_application_tracker_if_enabled()
     return int(application_id)
 
@@ -1165,8 +1173,19 @@ NICE_TO_HAVE_HEADERS = re.compile(
 
 def _find_tech_in_text(text):
     """Find all tech terms present in a text block."""
-    text_lower = text.lower()
-    return [term for term in CONFIG["tech_terms"] if term.lower() in text_lower]
+    found = []
+    for term in CONFIG["tech_terms"]:
+        # Treat whitespace and hyphens inside configured phrases as equivalent,
+        # while rejecting matches embedded in longer identifiers. Hyphens are
+        # valid boundaries around a technology name (for example, Go-based).
+        # This keeps punctuation-bearing terms such as C#, .NET, Node.js and
+        # CI/CD matchable without reading "rust" from "zero-trust".
+        parts = re.split(r"[\s-]+", term.strip())
+        term_pattern = r"[\s-]+".join(re.escape(part) for part in parts)
+        pattern = rf"(?<!\w){term_pattern}(?!\w)"
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            found.append(term)
+    return found
 
 
 def extract_tech_keywords(text):

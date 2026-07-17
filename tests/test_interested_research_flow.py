@@ -869,6 +869,11 @@ def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_
     )
     conn.commit(); conn.close()
 
+    def fail_tracker_sync():
+        raise RuntimeError("optional tracker unavailable")
+
+    monkeypatch.setattr(flow.scraper, "sync_application_tracker_if_enabled", fail_tracker_sync)
+
     package = flow.prepare_application_package(
         "li-1",
         db_path=db,
@@ -880,8 +885,27 @@ def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_
     assert package.package_dir.exists()
     assert package.resume_json.exists()
     assert package.cover_json.exists()
+    assert package.manifest_json.exists()
     assert package.resume_pdf.name == "Resume.pdf"
     assert package.cover_pdf.name == "CoverLetter.pdf"
+    assert oct(package.package_dir.stat().st_mode & 0o777) == "0o700"
+    for private_file in (
+        package.resume_json,
+        package.cover_json,
+        package.manifest_json,
+        package.resume_pdf,
+        package.cover_pdf,
+    ):
+        assert oct(private_file.stat().st_mode & 0o777) == "0o600"
+    manifest = json.loads(package.manifest_json.read_text(encoding="utf-8"))
+    assert manifest["tailoring_mode"] == "legacy_fallback"
+    assert manifest["selected_variant_id"] is None
+    assert len(manifest["profile_sha256"]) == 64
+    assert manifest["quality_checks"] == {
+        "timeline_consistent": True,
+        "role_variant_required": False,
+        "role_variant_requirement_satisfied": True,
+    }
     resume_payload = json.loads(package.resume_json.read_text(encoding="utf-8"))
     resume_text = json.dumps(resume_payload, ensure_ascii=False).lower()
     assert "tailored" not in resume_text
@@ -895,6 +919,133 @@ def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_
     assert row[0] == "package_generated"
     assert str(package.package_dir) == row[1]
     assert "Resume and cover letter generated" in row[2]
+
+
+def test_failed_regeneration_restores_previous_package_atomically(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    output_dir = tmp_path / "output"
+    profile_path = tmp_path / "master-profile.json"
+    profile_payload = {
+        "name": "Candidate",
+        "headline": "Backend Engineer",
+        "summary": "Original confirmed summary.",
+        "experience": [],
+        "education": [],
+    }
+    profile_path.write_text(json.dumps(profile_payload), encoding="utf-8")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT, "
+        "url TEXT, source TEXT, description TEXT, tech_required TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "li-atomic",
+            "Backend Engineer",
+            "TargetCo",
+            "Dubai",
+            "https://example.com/job",
+            "LinkedIn",
+            "Build backend services.",
+            "java",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    original = flow.prepare_application_package(
+        "li-atomic",
+        db_path=db,
+        profile_path=profile_path,
+        output_dir=output_dir,
+        render_pdfs=False,
+    )
+    original_resume = original.resume_json.read_bytes()
+    original_manifest = original.manifest_json.read_bytes()
+    marker = original.package_dir / "previous-package-marker.txt"
+    marker.write_text("keep the complete previous package", encoding="utf-8")
+    profile_payload["summary"] = "A different confirmed summary for regeneration."
+    profile_path.write_text(json.dumps(profile_payload), encoding="utf-8")
+
+    def fail_stage_record(*args, **kwargs):
+        raise RuntimeError("database stage update failed")
+
+    monkeypatch.setattr(flow.scraper, "record_application_stage", fail_stage_record)
+
+    with pytest.raises(RuntimeError, match="database stage update failed"):
+        flow.prepare_application_package(
+            "li-atomic",
+            db_path=db,
+            profile_path=profile_path,
+            output_dir=output_dir,
+            render_pdfs=False,
+        )
+
+    assert original.resume_json.read_bytes() == original_resume
+    assert original.manifest_json.read_bytes() == original_manifest
+    assert marker.read_text(encoding="utf-8") == "keep the complete previous package"
+    assert [path.name for path in output_dir.iterdir()] == [original.package_dir.name]
+    conn = sqlite3.connect(db)
+    assert conn.execute(
+        "SELECT stage FROM applications WHERE job_id = ?",
+        ("li-atomic",),
+    ).fetchone()[0] == "package_generated"
+    conn.close()
+
+
+def test_package_generation_rejects_job_id_path_traversal(tmp_path):
+    db = tmp_path / "jobs.db"
+    output_dir = tmp_path / "output"
+    profile_path = tmp_path / "master-profile.json"
+    unsafe_job_id = "../victim"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "name": "Candidate",
+                "headline": "Backend Engineer",
+                "experience": [],
+                "education": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT, "
+        "url TEXT, source TEXT, description TEXT, tech_required TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            unsafe_job_id,
+            "Backend Engineer",
+            "TargetCo",
+            "Dubai",
+            "https://example.com/job",
+            "LinkedIn",
+            "Build backend services.",
+            "java",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    escaped_target = tmp_path / "victim-targetco-backend-engineer"
+    escaped_target.mkdir()
+    marker = escaped_target / "keep.txt"
+    marker.write_text("must not be replaced", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsafe path characters"):
+        flow.prepare_application_package(
+            unsafe_job_id,
+            db_path=db,
+            profile_path=profile_path,
+            output_dir=output_dir,
+            render_pdfs=False,
+        )
+
+    assert marker.read_text(encoding="utf-8") == "must not be replaced"
+    assert not output_dir.exists()
 
 
 def test_confirmed_variant_is_preserved_and_drives_cover_letter(tmp_path, monkeypatch):
@@ -1064,6 +1215,8 @@ def test_resume_page_limit_blocks_package_stage_before_cover_render(tmp_path, mo
         )
 
     assert rendered_modes == ["resume"]
+    assert not (output_dir / "li-jvm-targetco-java-engineer").exists()
+    assert not any(output_dir.iterdir())
     conn = sqlite3.connect(db)
     stage_count = conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
     conn.close()
@@ -1137,9 +1290,232 @@ def test_resume_tailoring_only_selects_and_reorders_profile_evidence():
     original_bullets = set(profile["experience"][0]["bullets"])
     selected_bullets = resume["experience"][0]["bullets"]
     assert set(selected_bullets) <= original_bullets
-    assert len(selected_bullets) == 3
+    assert len(selected_bullets) == 4
     assert "Java microservices" in selected_bullets[0]
     assert resume["experience"][0]["tech"] == profile["experience"][0]["tech"]
+
+
+def test_resume_tailoring_ranks_complete_experiences_before_allocating_bullets():
+    profile = {
+        "name": "Candidate",
+        "headline": "Software Architect",
+        "summary": "Software architect with cloud platform experience.",
+        "skills": {"Architecture": ["AWS", "Kubernetes", "Terraform"]},
+        "experience": [
+            {
+                "title": "Chief Technology Officer",
+                "company": "Side Venture",
+                "dates": "2025 - Present",
+                "bullets": ["Managed product planning and commercial delivery."],
+            },
+            {
+                "title": "Lead Software Engineer",
+                "company": "Consultancy",
+                "dates": "2024 - 2026",
+                "bullets": [
+                    "Designed cloud-native services on AWS with Kubernetes and Terraform.",
+                    "Defined API and event-driven architecture decisions.",
+                ],
+                "engagements": [
+                    {
+                        "role": "Software Architect",
+                        "tech": ["AWS", "Kubernetes", "Terraform"],
+                    }
+                ],
+            },
+        ],
+        "education": [],
+    }
+    job = {
+        "title": "Software Architect",
+        "company": "TargetCo",
+        "description": "Design cloud-native SaaS architecture using AWS, Kubernetes, and Terraform.",
+    }
+
+    resume = flow._tailor_resume(profile, job)
+
+    assert [item["company"] for item in resume["experience"]] == ["Consultancy", "Side Venture"]
+    assert resume["experience"][0]["dates"] == "2024 - 2026"
+    assert len(resume["experience"]) == len(profile["experience"])
+
+
+def test_resume_tailoring_ignores_non_public_engagement_metadata_for_ordering():
+    profile = {
+        "name": "Candidate",
+        "experience": [
+            {
+                "title": "Chief Technology Officer",
+                "company": "First Company",
+                "dates": "2025 - Present",
+                "bullets": [],
+            },
+            {
+                "title": "Lead Software Engineer",
+                "company": "Second Company",
+                "dates": "2024 - 2026",
+                "bullets": [],
+                "engagements": [
+                    {
+                        "role": "Software Architect",
+                        "summary": "Unconfirmed private draft architecture work.",
+                    }
+                ],
+            },
+        ],
+        "education": [],
+    }
+    job = {
+        "title": "Software Architect",
+        "description": "Own software architecture decisions.",
+    }
+
+    resume = flow._tailor_resume(profile, job)
+
+    assert [item["company"] for item in resume["experience"]] == [
+        "First Company",
+        "Second Company",
+    ]
+    assert "engagements" not in json.dumps(resume)
+
+
+def test_aiqu_architect_package_blocks_legacy_fallback_without_advancing_stage(tmp_path):
+    db = tmp_path / "jobs.db"
+    profile_path = tmp_path / "master-profile.json"
+    output_dir = tmp_path / "output"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "name": "Candidate",
+                "headline": "Software Architect",
+                "summary": "General architecture profile.",
+                "experience": [],
+                "education": [],
+                "resume_variants": [
+                    {
+                        "id": "jvm-backend",
+                        "confirmation": "candidate-confirmed",
+                        "match_terms": ["java", "spring boot"],
+                        "resume": {"headline": "Senior Backend Engineer"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT, "
+        "url TEXT, source TEXT, description TEXT, tech_required TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "li-4440689544",
+            "Software Architect",
+            "AIQU",
+            "Dubai",
+            "https://example.com/aiqu",
+            "LinkedIn",
+            "Design cloud-native Java SaaS platforms with Kubernetes, Terraform, GitOps, and zero-trust security.",
+            "java, kubernetes, terraform, gitops, zero-trust",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(flow.TailoringReadinessError, match="Software Architect resume variant"):
+        flow.prepare_application_package(
+            "li-4440689544",
+            db_path=db,
+            profile_path=profile_path,
+            output_dir=output_dir,
+            render_pdfs=False,
+        )
+
+    assert not output_dir.exists()
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("senior_dates", "lead_dates"),
+    [
+        ("October 2022 - Present", "November 2024 - May 2026"),
+        ("Oct 2022 - Present", "Nov 2024 - May 2026"),
+        ("2022 - Present", "2024 - 2026"),
+    ],
+)
+def test_same_employer_progression_marked_present_blocks_package_generation(
+    senior_dates,
+    lead_dates,
+):
+    profile = {
+        "name": "Candidate",
+        "experience": [
+            {
+                "title": "Lead Software Engineer",
+                "company": "Example",
+                "dates": lead_dates,
+                "bullets": [],
+            },
+            {
+                "title": "Senior Software Engineer",
+                "company": "Example",
+                "dates": senior_dates,
+                "bullets": [],
+            },
+        ],
+    }
+
+    with pytest.raises(flow.TailoringReadinessError, match="inconsistent same-employer role progression"):
+        flow._assert_tailoring_ready(
+            profile,
+            {"title": "Backend Engineer"},
+            selected_variant=None,
+        )
+
+
+def test_aiqu_architect_role_variant_wins_and_preserves_approved_order():
+    approved_order = ["Architecture Engagement", "Senior Software Engineer", "CTO"]
+    profile = {
+        "name": "Candidate",
+        "headline": "General profile",
+        "experience": [],
+        "resume_variants": [
+            {
+                "id": "software-architect-approved",
+                "confirmation": "candidate-confirmed",
+                "role_terms": ["software architect", "architecture engineer"],
+                "match_terms": ["cloud-native", "kubernetes", "terraform"],
+                "max_pages": 2,
+                "resume": {
+                    "headline": "Software Architect | Cloud-Native Platforms",
+                    "summary": "Approved architecture summary.",
+                    "experience": [
+                        {
+                            "title": title,
+                            "company": "Approved Company",
+                            "dates": "Approved dates",
+                            "bullets": ["Approved evidence."],
+                        }
+                        for title in approved_order
+                    ],
+                },
+            }
+        ],
+    }
+    job = {
+        "title": "Software Architect",
+        "description": "Cloud-native SaaS on Kubernetes with Terraform.",
+        "tech_required": "kubernetes, terraform",
+    }
+
+    resume, variant = flow._resume_for_job(profile, job)
+
+    assert variant["id"] == "software-architect-approved"
+    assert [item["title"] for item in resume["experience"]] == approved_order
+    assert resume["summary"] == "Approved architecture summary."
 
 
 def test_cover_letter_is_specific_complete_and_evidence_based():
@@ -1232,7 +1608,7 @@ def test_package_ready_keyboard_requires_final_apply_approval():
     buttons = [button for row in keyboard["inline_keyboard"] for button in row]
 
     assert {button["text"] for button in buttons} >= {"🚀 Proceed to apply", "⏸ Pause"}
-    assert {button.get("callback_data") for button in buttons if "callback_data" in button} >= {"proceed_apply:li-1", "ignore:li-1"}
+    assert {button.get("callback_data") for button in buttons if "callback_data" in button} >= {"proceed_apply:li-1", "pause:li-1"}
 
 
 def test_research_dry_run_reads_job_without_creating_state_tables(tmp_path, monkeypatch):

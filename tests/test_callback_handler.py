@@ -115,7 +115,93 @@ def test_handle_apply_generates_package_and_sends_final_apply_cta(monkeypatch, t
     assert len(sent) == 1
     assert "Application package ready" in sent[0][0]
     buttons = [button for row in sent[0][1]["inline_keyboard"] for button in row]
-    assert {button.get("callback_data") for button in buttons if "callback_data" in button} >= {"proceed_apply:li-1", "ignore:li-1"}
+    assert {button.get("callback_data") for button in buttons if "callback_data" in button} >= {"proceed_apply:li-1", "pause:li-1"}
+
+
+def test_handle_apply_pauses_when_resume_refinement_is_required(monkeypatch):
+    callback_handler = load_callback_handler(monkeypatch)
+    calls = []
+    job = {
+        "id": "li-1",
+        "title": "Software Architect",
+        "company": "AIQU",
+        "location": "Dubai",
+        "url": "https://example.com/job",
+    }
+
+    monkeypatch.setattr(callback_handler, "get_job", lambda job_id: job if job_id == "li-1" else None)
+
+    def block_package(*args, **kwargs):
+        raise callback_handler.interest_flow.TailoringReadinessError(
+            "Complete the Software Architect resume variant before generating the package."
+        )
+
+    monkeypatch.setattr(callback_handler.interest_flow, "prepare_application_package", block_package)
+    monkeypatch.setattr(
+        callback_handler,
+        "answer_callback",
+        lambda callback_id, text=None: calls.append(("answer", callback_id, text)),
+    )
+    monkeypatch.setattr(
+        callback_handler,
+        "send_message",
+        lambda text, reply_markup=None: calls.append(("send", text, reply_markup)) or True,
+    )
+
+    callback_handler.handle_apply("li-1", "callback-1")
+
+    assert ("answer", "callback-1", "Resume refinement needed") in calls
+    sent = [(call[1], call[2]) for call in calls if call[0] == "send"]
+    assert len(sent) == 1
+    assert "Resume package paused" in sent[0][0]
+    buttons = [button for row in sent[0][1]["inline_keyboard"] for button in row]
+    assert {button.get("callback_data") for button in buttons if "callback_data" in button} == {
+        "resume_refine:li-1",
+        "pause:li-1",
+    }
+    assert any(button.get("url") == job["url"] for button in buttons)
+
+
+def test_resume_refine_and_pause_callbacks_record_feedback(monkeypatch):
+    callback_handler = load_callback_handler(monkeypatch)
+    calls = []
+    job = {
+        "id": "li-1",
+        "title": "Software Architect",
+        "company": "AIQU",
+        "location": "Dubai",
+    }
+
+    monkeypatch.setattr(callback_handler, "get_job", lambda job_id: job if job_id == "li-1" else None)
+    monkeypatch.setattr(
+        callback_handler,
+        "record_feedback",
+        lambda job_id, action, reason=None: calls.append(("feedback", job_id, action, reason)),
+    )
+    monkeypatch.setattr(
+        callback_handler,
+        "answer_callback",
+        lambda callback_id, text=None: calls.append(("answer", callback_id, text)),
+    )
+    monkeypatch.setattr(
+        callback_handler,
+        "send_message",
+        lambda text, reply_markup=None: calls.append(("send", text, reply_markup)) or True,
+    )
+
+    callback_handler.handle_resume_refine("li-1", "callback-refine")
+    callback_handler.handle_pause("li-1", "callback-pause")
+
+    assert (
+        "feedback",
+        "li-1",
+        "resume_refine",
+        "resume refinement requested after tailoring gate",
+    ) in calls
+    assert ("feedback", "li-1", "paused", "user paused application workflow") in calls
+    assert ("answer", "callback-refine", "Resume refinement instructions ready") in calls
+    assert ("answer", "callback-pause", "✓ Paused") in calls
+    assert any(call[0] == "send" and "Software Architect" in call[1] for call in calls)
 
 
 def test_runtime_paths_are_project_anchored_outside_repo(monkeypatch, tmp_path):

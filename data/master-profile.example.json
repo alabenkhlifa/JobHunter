@@ -69,6 +69,11 @@
     {
       "id": "jvm-backend",
       "confirmation": "candidate-confirmed",
+      "role_terms": [
+        "backend engineer",
+        "software engineer",
+        "backend developer"
+      ],
       "match_terms": [
         "java",
         "kotlin",

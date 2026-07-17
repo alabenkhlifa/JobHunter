@@ -100,7 +100,9 @@ python resume_refiner.py validate data/master-profile.json
 
 Only evidence marked `candidate-confirmed`, `public`, and visible to `resume` or `cover-letter` is eligible for generated documents. Private, draft, rejected, or interview-only notes are excluded from the public application package.
 
-For a role family that needs a deliberately curated resume structure, Resume Refiner may add a `resume_variants` entry after the user confirms the complete public output. Each variant has a stable ID, `match_terms`, optional priority and `max_pages`, optional omitted sections, and a complete renderer-compatible public resume snapshot. Identity and contact data always come from the master profile; unspecified master-profile resume sections are not inherited. JobHunter selects only `candidate-confirmed` variants, preserves their wording and order exactly, and falls back to legacy evidence ranking when none matches. The renderer must report a page count within `max_pages` before the application can reach `package_generated`.
+For a role family that needs a deliberately curated resume structure, Resume Refiner may add a `resume_variants` entry after the user confirms the complete public output. Each variant has a stable ID, `match_terms`, optional title-scoped `role_terms`, optional priority and `max_pages`, optional omitted sections, and a complete renderer-compatible public resume snapshot. Identity and contact data always come from the master profile; unspecified master-profile resume sections are not inherited. JobHunter selects only `candidate-confirmed` variants, preserves their wording and order exactly, and normally falls back to legacy evidence ranking when none matches. Architecture-titled jobs are stricter: they require a matching role-scoped confirmed variant instead of the generic fallback. The renderer must report a page count within `max_pages` before the application can reach `package_generated`.
+
+Package generation also pauses when the profile contains an obvious inconsistent same-employer progression, such as an earlier lower-seniority role marked `Present` after a later higher-seniority role has ended. Confirm and store the exact date before retrying; do not guess it. Each successful package includes a private `tailoring_manifest.json` recording the selected mode, variant ID, profile digest, page count, and readiness checks.
 
 ## 5. Dedicated application mailbox and dual-account model
 
@@ -216,7 +218,7 @@ Typical flow:
 5. User taps **Interested** or **Skip**.
 6. **Interested** records feedback/application state and sends a concise research brief: company context, recruiter/poster if known, warning-only legitimacy notes, and salary guidance vs `JOBHUNTER_TARGET_SALARY_AED_MONTHLY`.
 7. The research brief offers **Apply**, **Ignore**, and **Details** CTAs.
-8. **Apply** selects a matching candidate-confirmed resume variant when available, otherwise uses legacy evidence ranking. It generates a truthful resume + cover-letter package from `data/master-profile.json`, enforces any confirmed page limit, records `package_generated`, and sends a final **Proceed to apply** / **Pause** CTA.
+8. **Apply** selects a matching candidate-confirmed resume variant when available, otherwise uses legacy evidence ranking. Architecture-titled jobs require a matching role-scoped variant, and inconsistent role chronology pauses generation. A successful run generates a truthful resume + cover-letter package and private tailoring manifest from `data/master-profile.json`, enforces any confirmed page limit, records `package_generated`, and sends a final **Proceed to apply** / **Pause** CTA. A blocked run records no package stage and offers **Refine resume** / **Pause** instead.
 9. **Proceed to apply** starts application preparation only. Final submit, CAPTCHA, legal/visa/salary questions, and sensitive confirmations remain approval-gated.
 
 Useful commands:
