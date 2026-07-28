@@ -182,7 +182,7 @@ python -m jobhunter_integrations.gmail_watcher \
   --google-token "$GOOGLE_TOKEN_PATH"
 ```
 
-It prints nothing when there is nothing new to report, so it is safe for script-only cron jobs. It marks every inspected message as read to keep the jobs mailbox clean. Schedule it against the dedicated jobs Gmail account, for example at 10:00 and 15:00.
+It prints nothing when there is nothing new to report, so it is safe for script-only cron jobs. It marks every successfully inspected message as read to keep the jobs mailbox clean. When rejection language matches exactly one submitted application, it records `rejected`, updates the job status, requests tracker sync, and prints an explicit alert for the scheduler to deliver. If the application match is missing or ambiguous, it prints a warning without changing state. Schedule it against the dedicated jobs Gmail account, for example at 10:00 and 15:00.
 
 ## 6. LinkedIn browser profile
 
@@ -427,7 +427,7 @@ Useful formatting for the tracker:
 - frozen header row;
 - status colors, for example:
   - `submitted` → green
-  - `blocked_*`, `failed`, `unavailable` → soft red
+  - `rejected`, `blocked_*`, `failed`, `unavailable` → soft red
   - `package_generated`, `package_prepared`, `draft_ready`, `approved` → blue
   - `interested` → purple
   - `skipped` → grey

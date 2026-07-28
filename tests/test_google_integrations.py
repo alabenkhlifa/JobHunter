@@ -10,6 +10,8 @@ def test_tracker_formats_dates_and_status_colors():
     assert google_tracker.sheet_text_dt("2026-07-18T15:47:00+00:00").startswith("'")
     assert google_tracker.status_color("submitted")["green"] > google_tracker.status_color("submitted")["red"]
     assert google_tracker.status_color("blocked_login_required")["red"] > google_tracker.status_color("blocked_login_required")["green"]
+    assert google_tracker.status_color("rejected")["red"] > google_tracker.status_color("rejected")["green"]
+    assert google_tracker.next_action("rejected", None) == "Application closed"
 
 
 def test_tracker_rows_include_resume_cover_and_screenshot_paths_without_drive(tmp_path: Path):
@@ -68,6 +70,222 @@ def test_gmail_watcher_ignores_google_sheet_share_mail_even_with_application_wor
     relevant, reasons = gmail_watcher.is_relevant(text, jobs)
     assert not relevant
     assert reasons == []
+
+
+def test_gmail_watcher_classifies_common_rejection_language():
+    rejection_messages = [
+        (
+            "After careful consideration, we regret to inform you that we will not be "
+            "progressing with your application."
+        ),
+        "Your application has not been successful.",
+        "We won't be moving forward with your application.",
+    ]
+    for message in rejection_messages:
+        outcome, reasons = gmail_watcher.classify_application_outcome(message)
+        assert outcome == "rejected"
+        assert reasons
+
+    assert gmail_watcher.classify_application_outcome(
+        "We received your application and will contact you about next steps."
+    ) == (None, [])
+
+
+def test_gmail_watcher_matches_one_submitted_application_by_exact_title():
+    jobs = [
+        {
+            "id": "job-skycargo",
+            "title": "Solutions Architect - SkyCargo",
+            "company": "Emirates",
+            "stage": "submitted",
+        },
+        {
+            "id": "job-network",
+            "title": "Solutions Architect - Network Operations",
+            "company": "Emirates",
+            "stage": "submitted",
+        },
+    ]
+
+    job, reason = gmail_watcher.match_submitted_application(
+        "Update for Solutions Architect - SkyCargo at Emirates", jobs
+    )
+
+    assert job["id"] == "job-skycargo"
+    assert reason == "exact job title"
+
+
+def test_gmail_watcher_does_not_match_ambiguous_or_unsubmitted_application():
+    ambiguous = [
+        {
+            "id": "job-1",
+            "title": "Backend Engineer",
+            "company": "ExampleCo",
+            "stage": "submitted",
+        },
+        {
+            "id": "job-2",
+            "title": "Backend Engineer",
+            "company": "ExampleCo",
+            "stage": "submitted",
+        },
+    ]
+    job, reason = gmail_watcher.match_submitted_application(
+        "Backend Engineer application at ExampleCo", ambiguous
+    )
+    assert job is None
+    assert "multiple" in reason
+
+    job, reason = gmail_watcher.match_submitted_application(
+        "Backend Engineer application at ExampleCo",
+        [{**ambiguous[0], "stage": "package_generated"}],
+    )
+    assert job is None
+    assert "no unique" in reason
+
+
+def test_gmail_watcher_records_rejection_and_syncs_tracker_once(tmp_path: Path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        CREATE TABLE jobs (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            company TEXT,
+            url TEXT,
+            date_scraped TEXT,
+            status TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            package_path TEXT,
+            created_at TEXT NOT NULL,
+            approved_at TEXT,
+            submitted_at TEXT,
+            platform TEXT,
+            application_type TEXT,
+            application_url TEXT,
+            evidence_path TEXT,
+            notes TEXT,
+            error TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "job-skycargo",
+            "Solutions Architect - SkyCargo",
+            "Emirates",
+            "https://example.com/job",
+            "2026-07-01T00:00:00+00:00",
+            "interested",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO applications (
+            job_id, stage, created_at, submitted_at, notes
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "job-skycargo",
+            "submitted",
+            "2026-07-10T15:21:41+00:00",
+            "2026-07-10T15:21:41+00:00",
+            "Submission confirmed.",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    sync_calls = []
+    monkeypatch.setattr(
+        "scraper.sync_application_tracker_if_enabled",
+        lambda: sync_calls.append("sync") or True,
+    )
+    job = {
+        "id": "job-skycargo",
+        "title": "Solutions Architect - SkyCargo",
+        "company": "Emirates",
+        "stage": "submitted",
+    }
+    now = datetime(2026, 7, 17, 9, 0, tzinfo=timezone.utc)
+
+    result = gmail_watcher.record_rejected_application(db, job, now=now)
+    repeated = gmail_watcher.record_rejected_application(db, job, now=now)
+
+    assert result == {
+        "status": "updated",
+        "reason": "application marked rejected",
+        "tracker_synced": True,
+    }
+    assert repeated["status"] == "already_rejected"
+    assert sync_calls == ["sync"]
+
+    conn = sqlite3.connect(db)
+    application = conn.execute(
+        "SELECT stage, submitted_at, notes FROM applications WHERE job_id = ?",
+        ("job-skycargo",),
+    ).fetchone()
+    job_status = conn.execute(
+        "SELECT status FROM jobs WHERE id = ?",
+        ("job-skycargo",),
+    ).fetchone()[0]
+    conn.close()
+
+    assert application[0] == "rejected"
+    assert application[1] == "2026-07-10T15:21:41+00:00"
+    assert application[2].startswith("Submission confirmed. | Rejection detected by Gmail watcher")
+    assert job_status == "rejected"
+
+
+def test_gmail_watcher_formats_explicit_rejection_alert():
+    alert = gmail_watcher.format_alert(
+        [
+            {
+                "outcome": "rejected",
+                "matched_job": {
+                    "id": "job-skycargo",
+                    "title": "Solutions Architect - SkyCargo",
+                    "company": "Emirates",
+                },
+                "application_update": {
+                    "status": "updated",
+                    "reason": "application marked rejected",
+                    "tracker_synced": True,
+                },
+                "date": "Fri, 17 Jul 2026 05:13:10 +0000",
+            }
+        ]
+    )
+
+    assert "Application rejected" in alert
+    assert "Solutions Architect - SkyCargo" in alert
+    assert "Status: rejected" in alert
+    assert "Application tracker: synced" in alert
+
+
+def test_gmail_watcher_formats_retry_alert_before_partial_outcome():
+    alert = gmail_watcher.format_alert(
+        [
+            {
+                "outcome": "rejected",
+                "processing_error": "OperationalError",
+            }
+        ]
+    )
+
+    assert "processing failed" in alert
+    assert "next watcher run can retry" in alert
+    assert "Status update skipped" not in alert
 
 
 class FakeModifyCall:

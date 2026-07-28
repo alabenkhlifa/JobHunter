@@ -13,7 +13,7 @@ It can:
 - generate truthful tailored resume / cover-letter packages from a local candidate profile;
 - inspect LinkedIn / external ATS application pages through Chromium CDP;
 - upload or submit only after explicit user approval;
-- monitor a dedicated jobs Gmail mailbox for recruiter/ATS replies;
+- monitor a dedicated jobs Gmail mailbox, classify rejection replies, and close uniquely matched submitted applications;
 - sync an application tracker to a shared Google Sheet, including status, dates, resume/cover-letter links, and evidence screenshots;
 - store generated ATS credentials in a local encrypted vault.
 
@@ -188,7 +188,7 @@ Recommended permissions:
 3. JobHunter OAuth for the jobs Gmail includes Gmail scopes plus `spreadsheets` and `drive.file`.
 4. Files uploaded by the jobs Gmail, such as resumes, cover letters, and screenshots, must also be shared with the main/personal Google account so the owner can open links from the Sheet.
 
-Recommended formatting includes wrapped text, taller rows, frozen headers, `dd/mm/yyyy hh:mm`-style dates, and status colors such as green for `submitted`, red for blockers/failures, blue for package/draft states, purple for `interested`, and grey for `skipped`.
+Recommended formatting includes wrapped text, taller rows, frozen headers, `dd/mm/yyyy hh:mm`-style dates, and status colors such as green for `submitted`, red for `rejected`/blockers/failures, blue for package/draft states, purple for `interested`, and grey for `skipped`.
 
 Run a tracker sync:
 
@@ -205,7 +205,7 @@ python -m jobhunter_integrations.gmail_watcher \
   --google-token "$GOOGLE_TOKEN_PATH"
 ```
 
-Both commands are safe to schedule from cron/Hermes cron. They read secrets only from local ignored files/env variables. The Gmail watcher marks inspected messages as read so the dedicated jobs mailbox stays clean.
+Both commands are safe to schedule from cron/Hermes cron. They read secrets only from local ignored files/env variables. The Gmail watcher marks inspected messages as read so the dedicated jobs mailbox stays clean. When rejection language matches exactly one submitted application, the watcher records `rejected`, updates the job status, requests tracker sync, and prints an explicit alert for the scheduler to deliver. If the application match is missing or ambiguous, it prints a warning without changing state.
 
 To keep the Sheet live while applying, enable best-effort auto-sync after every application stage update:
 

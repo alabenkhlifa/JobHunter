@@ -109,6 +109,8 @@ def next_action(stage: str, error: str | None) -> str:
     stage = stage or ""
     if stage == "submitted":
         return "Monitor Gmail / ATS replies"
+    if stage == "rejected":
+        return "Application closed"
     if stage.startswith("blocked"):
         return error or "Needs manual unblock/review"
     if stage in {"package_generated", "package_prepared", "draft_ready", "interested"}:
@@ -122,7 +124,7 @@ def status_color(status: str) -> dict[str, float]:
     s = (status or "").lower()
     if s == "submitted":
         return {"red": 0.82, "green": 0.94, "blue": 0.82}
-    if s.startswith("blocked") or s in {"failed", "unavailable"}:
+    if s.startswith("blocked") or s in {"failed", "rejected", "unavailable"}:
         return {"red": 0.98, "green": 0.83, "blue": 0.80}
     if s in {"package_generated", "package_prepared", "draft_ready", "approved"}:
         return {"red": 0.82, "green": 0.90, "blue": 1.0}
