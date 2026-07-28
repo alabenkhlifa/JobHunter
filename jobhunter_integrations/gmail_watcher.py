@@ -27,7 +27,8 @@ SCOPES = [
 ]
 POSITIVE_KEYWORDS = [
     "application", "applied", "interview", "shortlist", "shortlisted",
-    "assessment", "recruiter", "talent acquisition", "hiring", "next step",
+    "assessment", "offer letter", "job offer", "action required", "recruiter",
+    "talent acquisition", "hiring", "move forward", "proceed", "next step",
     "next steps", "thank you for applying", "we received your application",
     "your application", "job application", "workday", "greenhouse", "lever", "avature",
 ]
@@ -82,6 +83,129 @@ REJECTION_PATTERNS = [
         r"\bunable to (?:progress|proceed|move forward)(?: with)? (?:your|the) application\b",
     ),
 ]
+OFFER_PATTERNS = [
+    (
+        "offer extended",
+        r"\b(?:pleased|delighted|happy|would like|d like) to "
+        r"(?:extend|make|present) (?:you )?"
+        r"(?:a|an) (?:job |employment )?offer\b",
+    ),
+    (
+        "position offered",
+        r"\b(?:pleased|delighted|happy) to offer you (?:the |a )?"
+        r"(?:position|role|job)\b",
+    ),
+    ("offer of employment", r"\boffer of employment\b"),
+    (
+        "offer issued",
+        r"\b(?:your|the) (?:job |employment )?offer (?:is|has been) "
+        r"(?:ready|approved|issued|attached|enclosed)\b",
+    ),
+    ("offer letter", r"\b(?:your|the) offer letter\b|\boffer letter (?:for|regarding)\b"),
+]
+INTERVIEW_PATTERNS = [
+    (
+        "interview invitation",
+        r"\b(?:(?:invite|invited) (?:you )?(?:to|for)|invitation (?:to|for)) "
+        r"(?:an? )?(?:initial |technical |phone |video |onsite |on site )?interview\b",
+    ),
+    (
+        "interview scheduling",
+        r"\b(?:would like|d like|want|wish) to (?:schedule|arrange|book) "
+        r"(?:an? )?(?:initial |technical |phone |video |onsite |on site )?interview\b",
+    ),
+    (
+        "selected for interview",
+        r"\b(?:selected|shortlisted) (?:you )?for (?:an? )?"
+        r"(?:initial |technical |phone |video |onsite |on site )?interview\b",
+    ),
+    (
+        "accepted for interview",
+        r"\b(?:your application has been|you have been) (?:accepted|progressed|advanced) "
+        r"(?:to|for) (?:an? |the )?(?:interview|interview stage|interview process)\b",
+    ),
+    ("interview request", r"\binterview (?:invitation|request)\b"),
+]
+ASSESSMENT_PATTERNS = [
+    (
+        "assessment invitation",
+        r"\b(?:(?:invite|invited) (?:you )?(?:to (?:complete |take )?|for )|"
+        r"invitation (?:to (?:complete |take )?|for ))(?:the |an? |your )?"
+        r"(?:online |technical |coding )?(?:assessment|coding challenge|technical test)\b",
+    ),
+    (
+        "assessment requested",
+        r"\b(?:please|kindly) (?:complete|take|submit) (?:the |an? |your )?"
+        r"(?:online |technical |coding )?(?:assessment|coding challenge|technical test)\b",
+    ),
+    (
+        "assessment required",
+        r"\b(?:assessment|coding challenge|technical test) "
+        r"(?:invitation|request|required|is required)\b",
+    ),
+]
+ACTION_REQUIRED_PATTERNS = [
+    ("action required", r"\baction required\b"),
+    (
+        "information requested",
+        r"\b(?:please|kindly) (?:provide|submit|upload|complete|confirm) "
+        r"(?:the )?(?:additional|required|requested|following) "
+        r"(?:information|documents|details|fields)\b",
+    ),
+    ("additional information required", r"\badditional information (?:is )?required\b"),
+]
+PROGRESSION_PATTERNS = [
+    (
+        "application progressed",
+        r"\b(?:pleased|happy) to inform you (?:that )?(?:your application|you) "
+        r"(?:has|have) (?:progressed|advanced|been shortlisted)\b",
+    ),
+    (
+        "proceeding with application",
+        r"\b(?:would like|d like|wish|want) to (?:proceed|progress|move forward) "
+        r"with (?:your|the) application\b",
+    ),
+    (
+        "application moving forward",
+        r"\b(?:we are|we re) (?:proceeding|progressing|moving forward) "
+        r"with (?:your|the) application\b",
+    ),
+    ("shortlisted", r"\byou (?:have been|were) shortlisted\b"),
+    (
+        "invited to next stage",
+        r"\b(?:invite|invited) (?:you )?to (?:the )?next (?:stage|step)"
+        r"(?: of (?:the )?(?:hiring|recruitment) process)?\b",
+    ),
+    (
+        "selected for next stage",
+        r"\bselected (?:you )?to (?:proceed|progress|move forward) "
+        r"(?:to|with) (?:the )?next (?:stage|step)\b",
+    ),
+]
+OUTCOME_PATTERNS = [
+    ("rejected", REJECTION_PATTERNS),
+    ("offer_received", OFFER_PATTERNS),
+    ("interview_invited", INTERVIEW_PATTERNS),
+    ("assessment_requested", ASSESSMENT_PATTERNS),
+    ("action_required", ACTION_REQUIRED_PATTERNS),
+    ("application_progressed", PROGRESSION_PATTERNS),
+]
+ACTIVE_EMAIL_STAGES = {
+    "submitted",
+    "application_progressed",
+    "action_required",
+    "assessment_requested",
+    "interview_invited",
+    "offer_received",
+}
+OUTCOME_ALERTS = {
+    "rejected": ("❌", "Application rejected"),
+    "offer_received": ("📄", "Job offer received"),
+    "interview_invited": ("📅", "Interview invitation received"),
+    "assessment_requested": ("🧪", "Assessment requested"),
+    "action_required": ("⚠️", "Application action required"),
+    "application_progressed": ("➡️", "Application progressed"),
+}
 GENERIC_TITLE_TERMS = {
     "architect",
     "backend",
@@ -154,7 +278,18 @@ def interested_jobs(db_path: Path) -> list[dict[str, str]]:
             )
             WHERE (
                     j.status IN ('interested', 'submitted')
-                 OR a.stage IN ('submitted', 'draft_ready', 'package_generated', 'package_prepared', 'approved')
+                 OR a.stage IN (
+                        'submitted',
+                        'draft_ready',
+                        'package_generated',
+                        'package_prepared',
+                        'approved',
+                        'application_progressed',
+                        'action_required',
+                        'assessment_requested',
+                        'interview_invited',
+                        'offer_received'
+                    )
             )
               AND COALESCE(a.stage, '') NOT IN ('rejected', 'withdrawn')
             ORDER BY datetime(j.date_scraped) DESC
@@ -216,30 +351,33 @@ def job_terms(jobs: list[dict[str, str]]) -> set[str]:
 
 def classify_application_outcome(message_text: str) -> tuple[str | None, list[str]]:
     text = normalize_for_matching(message_text)
-    reasons = [label for label, pattern in REJECTION_PATTERNS if re.search(pattern, text)]
-    return ("rejected", reasons) if reasons else (None, [])
+    for outcome, patterns in OUTCOME_PATTERNS:
+        reasons = [label for label, pattern in patterns if re.search(pattern, text)]
+        if reasons:
+            return outcome, reasons
+    return None, []
 
 
-def match_submitted_application(
+def match_active_application(
     message_text: str,
     jobs: list[dict[str, str]],
 ) -> tuple[dict[str, str] | None, str]:
     text = normalize_for_matching(message_text)
-    submitted = [job for job in jobs if normalize(job.get("stage", "")) == "submitted"]
+    active = [job for job in jobs if normalize(job.get("stage", "")) in ACTIVE_EMAIL_STAGES]
 
     exact = [
         job
-        for job in submitted
+        for job in active
         if len(normalize_for_matching(job.get("title", ""))) >= 8
         and normalize_for_matching(job.get("title", "")) in text
     ]
     if len(exact) == 1:
         return exact[0], "exact job title"
     if len(exact) > 1:
-        return None, "multiple submitted applications share the matched title"
+        return None, "multiple active applications share the matched title"
 
     scored: list[tuple[int, dict[str, str], list[str]]] = []
-    for job in submitted:
+    for job in active:
         company = normalize_for_matching(job.get("company", ""))
         title_terms = {
             token
@@ -254,13 +392,25 @@ def match_submitted_application(
         if company_matched or len(matched_terms) >= 2:
             scored.append((score, job, matched_terms))
 
-    if not scored:
-        return None, "no unique submitted application matched the email"
-    scored.sort(key=lambda item: item[0], reverse=True)
-    if len(scored) > 1 and scored[0][0] == scored[1][0]:
-        return None, "multiple submitted applications matched with equal confidence"
-    score, job, matched_terms = scored[0]
-    return job, f"company/title terms: {', '.join(matched_terms)} (score {score})"
+    if scored:
+        scored.sort(key=lambda item: item[0], reverse=True)
+        if len(scored) > 1 and scored[0][0] == scored[1][0]:
+            return None, "multiple active applications matched with equal confidence"
+        score, job, matched_terms = scored[0]
+        return job, f"company/title terms: {', '.join(matched_terms)} (score {score})"
+
+    company_matches = [
+        job
+        for job in active
+        if len(normalize_for_matching(job.get("company", ""))) >= 3
+        and normalize_for_matching(job.get("company", "")) in text
+    ]
+    company_names = {normalize_for_matching(job.get("company", "")) for job in company_matches}
+    if len(company_matches) == 1:
+        return company_matches[0], "only active application for matched company"
+    if len(company_names) == 1 and len(company_matches) > 1:
+        return None, "multiple active applications matched the same company"
+    return None, "no unique active application matched the email"
 
 
 def is_relevant(message_text: str, jobs: list[dict[str, str]]) -> tuple[bool, list[str]]:
@@ -298,13 +448,17 @@ def message_summary(service, msg_id: str) -> dict[str, Any]:
     }
 
 
-def record_rejected_application(
+def record_application_outcome(
     db_path: Path,
     job: dict[str, str],
+    outcome: str,
     *,
     now: dt.datetime | None = None,
 ) -> dict[str, Any]:
     import scraper
+
+    if outcome not in OUTCOME_ALERTS:
+        raise ValueError(f"Unsupported application email outcome: {outcome}")
 
     timestamp = now or dt.datetime.now(dt.timezone.utc)
     conn = sqlite3.connect(db_path)
@@ -322,31 +476,56 @@ def record_rejected_application(
         ).fetchone()
         if current is None:
             return {"status": "skipped", "reason": "application record not found", "tracker_synced": False}
-        if current["stage"] == "rejected":
-            return {"status": "already_rejected", "reason": "already rejected", "tracker_synced": False}
-        if current["stage"] != "submitted":
+        current_stage = current["stage"]
+        if current_stage == outcome:
+            return {
+                "status": "already_recorded",
+                "reason": f"already recorded as {outcome}",
+                "tracker_synced": False,
+            }
+        if current_stage not in ACTIVE_EMAIL_STAGES:
             return {
                 "status": "skipped",
-                "reason": f"latest application stage is {current['stage']!r}, not 'submitted'",
+                "reason": f"latest application stage {current_stage!r} is not active",
+                "tracker_synced": False,
+            }
+        if outcome == "application_progressed" and current_stage != "submitted":
+            return {
+                "status": "skipped",
+                "reason": f"kept more specific application stage {current_stage!r}",
+                "tracker_synced": False,
+            }
+        if current_stage == "offer_received" and outcome != "rejected":
+            return {
+                "status": "skipped",
+                "reason": "kept more specific application stage 'offer_received'",
                 "tracker_synced": False,
             }
 
-        audit_note = f"Rejection detected by Gmail watcher at {timestamp.isoformat(timespec='seconds')}."
+        if outcome == "rejected":
+            audit_note = f"Rejection detected by Gmail watcher at {timestamp.isoformat(timespec='seconds')}."
+            audit_marker = "Rejection detected by Gmail watcher"
+        else:
+            audit_note = (
+                f"Application email classified as {outcome} by Gmail watcher "
+                f"at {timestamp.isoformat(timespec='seconds')}."
+            )
+            audit_marker = f"Application email classified as {outcome} by Gmail watcher"
         existing_notes = (current["notes"] or "").strip()
         notes = existing_notes
-        if "Rejection detected by Gmail watcher" not in existing_notes:
+        if audit_marker not in existing_notes:
             notes = " | ".join(part for part in (existing_notes, audit_note) if part)
 
         scraper.record_application_stage(
             conn,
             job["id"],
-            "rejected",
+            outcome,
             notes=notes,
             now=timestamp,
             commit=False,
             sync=False,
         )
-        conn.execute("UPDATE jobs SET status = 'rejected' WHERE id = ?", (job["id"],))
+        conn.execute("UPDATE jobs SET status = ? WHERE id = ?", (outcome, job["id"]))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -355,7 +534,20 @@ def record_rejected_application(
         conn.close()
 
     tracker_synced = scraper.sync_application_tracker_if_enabled()
-    return {"status": "updated", "reason": "application marked rejected", "tracker_synced": tracker_synced}
+    return {
+        "status": "updated",
+        "reason": f"application marked {outcome}",
+        "tracker_synced": tracker_synced,
+    }
+
+
+def record_rejected_application(
+    db_path: Path,
+    job: dict[str, str],
+    *,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    return record_application_outcome(db_path, job, "rejected", now=now)
 
 
 def process_application_outcome(
@@ -368,10 +560,8 @@ def process_application_outcome(
         return
     summary["outcome"] = outcome
     summary["outcome_reasons"] = outcome_reasons
-    if outcome != "rejected":
-        return
 
-    job, match_reason = match_submitted_application(summary["text"], jobs)
+    job, match_reason = match_active_application(summary["text"], jobs)
     summary["application_match_reason"] = match_reason
     if job is None:
         summary["application_update"] = {
@@ -386,7 +576,7 @@ def process_application_outcome(
         "title": job.get("title", ""),
         "company": job.get("company", ""),
     }
-    summary["application_update"] = record_rejected_application(db_path, job)
+    summary["application_update"] = record_application_outcome(db_path, job, outcome)
 
 
 def format_alert(matches: list[dict[str, Any]]) -> str:
@@ -402,10 +592,12 @@ def format_alert(matches: list[dict[str, Any]]) -> str:
             )
             continue
 
-        if m.get("outcome") == "rejected":
+        outcome = m.get("outcome")
+        if outcome in OUTCOME_ALERTS:
             job = m.get("matched_job") or {}
             update = m.get("application_update") or {}
-            lines.extend(["", f"{idx}. ❌ Application rejected"])
+            icon, label = OUTCOME_ALERTS[outcome]
+            lines.extend(["", f"{idx}. {icon} {label}"])
             if job:
                 lines.append(
                     f"Job: {html.escape(job.get('title') or 'Unknown')} — "
@@ -413,8 +605,8 @@ def format_alert(matches: list[dict[str, Any]]) -> str:
                 )
             else:
                 lines.append("Job: automatic match was not unique")
-            if update.get("status") in {"updated", "already_rejected"}:
-                lines.append("Status: rejected")
+            if update.get("status") in {"updated", "already_recorded"}:
+                lines.append(f"Status: {outcome}")
             else:
                 lines.append(f"Status update skipped: {html.escape(update.get('reason') or 'unknown reason')}")
             if update.get("status") == "updated":

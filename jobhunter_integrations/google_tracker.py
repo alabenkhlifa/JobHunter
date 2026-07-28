@@ -111,6 +111,16 @@ def next_action(stage: str, error: str | None) -> str:
         return "Monitor Gmail / ATS replies"
     if stage == "rejected":
         return "Application closed"
+    if stage == "interview_invited":
+        return "Review and respond to interview invitation"
+    if stage == "assessment_requested":
+        return "Review and complete assessment"
+    if stage == "action_required":
+        return "Review requested action"
+    if stage == "application_progressed":
+        return "Monitor email for next steps"
+    if stage == "offer_received":
+        return "Review offer; acceptance requires approval"
     if stage.startswith("blocked"):
         return error or "Needs manual unblock/review"
     if stage in {"package_generated", "package_prepared", "draft_ready", "interested"}:
@@ -122,12 +132,21 @@ def next_action(stage: str, error: str | None) -> str:
 
 def status_color(status: str) -> dict[str, float]:
     s = (status or "").lower()
-    if s == "submitted":
+    if s in {"submitted", "offer_received"}:
         return {"red": 0.82, "green": 0.94, "blue": 0.82}
     if s.startswith("blocked") or s in {"failed", "rejected", "unavailable"}:
         return {"red": 0.98, "green": 0.83, "blue": 0.80}
-    if s in {"package_generated", "package_prepared", "draft_ready", "approved"}:
+    if s in {
+        "application_progressed",
+        "interview_invited",
+        "package_generated",
+        "package_prepared",
+        "draft_ready",
+        "approved",
+    }:
         return {"red": 0.82, "green": 0.90, "blue": 1.0}
+    if s in {"action_required", "assessment_requested"}:
+        return {"red": 1.0, "green": 0.93, "blue": 0.72}
     if s == "interested":
         return {"red": 0.91, "green": 0.86, "blue": 0.98}
     if s == "skipped":

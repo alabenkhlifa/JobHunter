@@ -182,7 +182,7 @@ python -m jobhunter_integrations.gmail_watcher \
   --google-token "$GOOGLE_TOKEN_PATH"
 ```
 
-It prints nothing when there is nothing new to report, so it is safe for script-only cron jobs. It marks every successfully inspected message as read to keep the jobs mailbox clean. When rejection language matches exactly one submitted application, it records `rejected`, updates the job status, requests tracker sync, and prints an explicit alert for the scheduler to deliver. If the application match is missing or ambiguous, it prints a warning without changing state. Schedule it against the dedicated jobs Gmail account, for example at 10:00 and 15:00.
+It prints nothing when there is nothing new to report, so it is safe for script-only cron jobs. It marks every successfully inspected message as read to keep the jobs mailbox clean. When recognized rejection, interview, assessment, action-required, progression, or offer language matches exactly one active application, the watcher updates its status, requests tracker sync, and prints an explicit alert for the scheduler to deliver. Basic receipt acknowledgements remain `submitted`. If the application match is missing or ambiguous, it prints a warning without changing state. It never replies, schedules an interview, completes an assessment, follows action links, or accepts an offer automatically. Schedule it against the dedicated jobs Gmail account, for example at 10:00 and 15:00.
 
 ## 6. LinkedIn browser profile
 
@@ -427,8 +427,10 @@ Useful formatting for the tracker:
 - frozen header row;
 - status colors, for example:
   - `submitted` → green
+  - `offer_received` → green
   - `rejected`, `blocked_*`, `failed`, `unavailable` → soft red
-  - `package_generated`, `package_prepared`, `draft_ready`, `approved` → blue
+  - `application_progressed`, `interview_invited`, package/draft states → blue
+  - `assessment_requested`, `action_required` → amber
   - `interested` → purple
   - `skipped` → grey
 
