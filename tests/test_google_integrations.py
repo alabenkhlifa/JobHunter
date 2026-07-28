@@ -83,6 +83,80 @@ def test_tracker_formats_dates_and_status_colors():
     assert "acceptance requires approval" in google_tracker.next_action("offer_received", None)
 
 
+def test_tracker_assigns_non_white_color_to_every_status_family():
+    statuses = [
+        "new",
+        "interested",
+        "package_generated",
+        "package_prepared",
+        "draft_ready",
+        "draft_inspected",
+        "approved",
+        "approved_to_prepare_apply",
+        "resume_uploaded",
+        "after_upload",
+        "submitted",
+        "submission_result",
+        "application_progressed",
+        "interview_invited",
+        "assessment_requested",
+        "action_required",
+        "offer_received",
+        "rejected",
+        "blocked_login_required",
+        "blocked_privacy_notice",
+        "blocked_unknown_questions",
+        "blocked_site_challenge",
+        "blocked_resume_upload_approval",
+        "blocked_submit_approval",
+        "failed",
+        "unavailable",
+        "skipped",
+        "withdrawn",
+        "closed",
+        "archived",
+        "future_status_not_yet_mapped",
+        "",
+    ]
+
+    for status in statuses:
+        color = google_tracker.status_color(status)
+        assert set(color) == {"red", "green", "blue"}
+        assert color != {"red": 1.0, "green": 1.0, "blue": 1.0}
+
+    assert google_tracker.status_color("rejected") == google_tracker.STATUS_PALETTE["red"]
+    assert google_tracker.status_color(" Rejected ") == google_tracker.STATUS_PALETTE["red"]
+    assert google_tracker.status_color("blocked_privacy_notice") == google_tracker.STATUS_PALETTE["blocked"]
+    assert google_tracker.status_color("future_status_not_yet_mapped") == google_tracker.STATUS_PALETTE["neutral"]
+
+
+def test_tracker_applies_status_background_to_entire_data_row():
+    statuses = ["submitted", "rejected", "interview_invited", "unknown_future_status"]
+    values = [google_tracker.HEADERS]
+    for status in statuses:
+        row = [""] * len(google_tracker.HEADERS)
+        row[2] = status
+        values.append(row)
+
+    requests = google_tracker.formatting_requests(123, values)
+    backgrounds = [
+        request["repeatCell"]
+        for request in requests
+        if request.get("repeatCell", {}).get("fields") == "userEnteredFormat.backgroundColor"
+    ]
+
+    assert len(backgrounds) == len(statuses)
+    for index, (status, repeat) in enumerate(zip(statuses, backgrounds), start=1):
+        assert repeat["range"] == {
+            "sheetId": 123,
+            "startRowIndex": index,
+            "endRowIndex": index + 1,
+            "startColumnIndex": 0,
+            "endColumnIndex": len(google_tracker.HEADERS),
+        }
+        assert repeat["cell"]["userEnteredFormat"]["backgroundColor"] == google_tracker.status_color(status)
+
+
 def test_tracker_rows_include_resume_cover_and_screenshot_paths_without_drive(tmp_path: Path):
     repo = tmp_path
     output = repo / "data" / "output" / "job-1"

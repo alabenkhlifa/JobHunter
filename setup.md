@@ -428,11 +428,13 @@ Useful formatting for the tracker:
 - status colors, for example:
   - `submitted` → green
   - `offer_received` → green
-  - `rejected`, `blocked_*`, `failed`, `unavailable` → soft red
+  - `rejected`, `failed`, `unavailable` → soft red
+  - `blocked_*` → soft orange
   - `application_progressed`, `interview_invited`, package/draft states → blue
   - `assessment_requested`, `action_required` → amber
   - `interested` → purple
-  - `skipped` → grey
+  - closed/skipped states → grey
+  - new, empty, or unknown statuses → light blue-grey
 
 Keep the Sheet as a human-friendly mirror. SQLite remains the source of truth for automation.
 

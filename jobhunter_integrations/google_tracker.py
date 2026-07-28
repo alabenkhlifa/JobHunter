@@ -40,6 +40,17 @@ HEADERS = [
     "Notes",
     "Next Action",
 ]
+STATUS_PALETTE = {
+    "green": {"red": 0.82, "green": 0.94, "blue": 0.82},
+    "offer": {"red": 0.75, "green": 0.93, "blue": 0.78},
+    "red": {"red": 0.98, "green": 0.83, "blue": 0.80},
+    "blocked": {"red": 0.99, "green": 0.88, "blue": 0.75},
+    "blue": {"red": 0.82, "green": 0.90, "blue": 1.0},
+    "amber": {"red": 1.0, "green": 0.93, "blue": 0.72},
+    "purple": {"red": 0.91, "green": 0.86, "blue": 0.98},
+    "grey": {"red": 0.92, "green": 0.92, "blue": 0.92},
+    "neutral": {"red": 0.95, "green": 0.96, "blue": 0.98},
+}
 
 
 def default_repo_root() -> Path:
@@ -131,27 +142,35 @@ def next_action(stage: str, error: str | None) -> str:
 
 
 def status_color(status: str) -> dict[str, float]:
-    s = (status or "").lower()
-    if s in {"submitted", "offer_received"}:
-        return {"red": 0.82, "green": 0.94, "blue": 0.82}
-    if s.startswith("blocked") or s in {"failed", "rejected", "unavailable"}:
-        return {"red": 0.98, "green": 0.83, "blue": 0.80}
+    s = (status or "").strip().lower()
+    if s in {"submitted", "submission_result"}:
+        return STATUS_PALETTE["green"]
+    if s == "offer_received":
+        return STATUS_PALETTE["offer"]
+    if s in {"failed", "rejected", "unavailable"}:
+        return STATUS_PALETTE["red"]
+    if s.startswith("blocked"):
+        return STATUS_PALETTE["blocked"]
     if s in {
         "application_progressed",
         "interview_invited",
         "package_generated",
         "package_prepared",
         "draft_ready",
+        "draft_inspected",
         "approved",
+        "approved_to_prepare_apply",
+        "resume_uploaded",
+        "after_upload",
     }:
-        return {"red": 0.82, "green": 0.90, "blue": 1.0}
+        return STATUS_PALETTE["blue"]
     if s in {"action_required", "assessment_requested"}:
-        return {"red": 1.0, "green": 0.93, "blue": 0.72}
+        return STATUS_PALETTE["amber"]
     if s == "interested":
-        return {"red": 0.91, "green": 0.86, "blue": 0.98}
-    if s == "skipped":
-        return {"red": 0.92, "green": 0.92, "blue": 0.92}
-    return {"red": 1.0, "green": 1.0, "blue": 1.0}
+        return STATUS_PALETTE["purple"]
+    if s in {"archived", "closed", "skipped", "withdrawn"}:
+        return STATUS_PALETTE["grey"]
+    return STATUS_PALETTE["neutral"]
 
 
 def google_services(token_path: Path):

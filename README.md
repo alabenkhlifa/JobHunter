@@ -188,7 +188,7 @@ Recommended permissions:
 3. JobHunter OAuth for the jobs Gmail includes Gmail scopes plus `spreadsheets` and `drive.file`.
 4. Files uploaded by the jobs Gmail, such as resumes, cover letters, and screenshots, must also be shared with the main/personal Google account so the owner can open links from the Sheet.
 
-Recommended formatting includes wrapped text, taller rows, frozen headers, `dd/mm/yyyy hh:mm`-style dates, and status colors such as green for `submitted`/`offer_received`, red for `rejected`/blockers/failures, blue for application progression/interviews/package states, amber for assessments/actions, purple for `interested`, and grey for `skipped`.
+Recommended formatting includes wrapped text, taller rows, frozen headers, `dd/mm/yyyy hh:mm`-style dates, and a non-white color for every application row: green for `submitted`/`offer_received`, red for `rejected`/failures, orange for blockers, blue for application progression/interviews/package states, amber for assessments/actions, purple for `interested`, grey for closed/skipped states, and light blue-grey for new or unknown statuses.
 
 Run a tracker sync:
 
