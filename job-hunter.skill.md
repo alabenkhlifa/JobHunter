@@ -126,8 +126,9 @@ Switzerland):
 Each region is a search string plus a whitelist of displayed locations
 (`allowed_locations`); anything else is dropped even if the board returns it.
 - **Dubai**, **Abu Dhabi**, **Jeddah** — searched by city
-- **Switzerland** — searched country-wide, then kept only for Zurich, Geneva,
-  Basel, Bern, Lausanne, Zug and Lucerne (in their local spellings too)
+- **Switzerland** — searched country-wide. Any displayed location naming the
+  country passes, so Winterthur and Ticino are kept as well as Zurich; the city
+  names in `allowed_locations` only catch postings that omit the country
 
 ## Scoring System
 Jobs are scored by matching keywords in title + company + full description:
