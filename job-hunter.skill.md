@@ -1,6 +1,6 @@
 ---
 name: job-hunter
-description: Automated job search agent for Dubai market.
+description: Automated job search agent for the Dubai, Abu Dhabi, Jeddah and Switzerland markets.
   Scrapes LinkedIn and Foundit Gulf, scores matches against a
   Software Architect / Tech Lead / Senior Engineer backend profile, and notifies via Telegram.
 triggers:
@@ -15,7 +15,8 @@ triggers:
 
 ## Overview
 This skill automates job searching for Software Architect / Cloud Architect /
-Tech Lead / Senior Engineer backend roles in Dubai. It scrapes LinkedIn (guest API) and
+Tech Lead / Senior Engineer backend roles in Dubai, Abu Dhabi, Jeddah and
+Switzerland. It scrapes LinkedIn (guest API) and
 Foundit Gulf (JSON API), stores keyword-qualified candidates, then a Hermes
 cron job reviews them with an LLM before suggesting offers.
 
@@ -106,9 +107,12 @@ Do not change confirmation or visibility flags to make a fact eligible. Ask the 
 A confirmed role-family variant is a complete candidate-approved presentation, not newly inferred evidence. It may deliberately consolidate or omit master-profile experiences and sections. Identity and contact fields always come from the master profile; every other intended public section must be present in the renderer-compatible variant snapshot because unspecified master sections are not inherited. A legacy variant requires at least one matching `match_terms` phrase. A variant with `role_terms` is eligible only when the job title matches that role family; supporting `match_terms` then rank eligible variants. Architecture-titled jobs require a matching role-scoped confirmed variant and must not use generic fallback tailoring. `max_pages` must pass before `package_generated` is recorded. Preserve selected variant wording and order exactly and never expose its matching or confirmation metadata in generated documents.
 
 ## Scraping Strategy
-The scraper uses **breadth-first round-robin** across 2 buckets:
-- LinkedIn/Dubai, Foundit/Dubai
-- Collects **1 matching job per bucket** (2 total)
+The scraper uses **breadth-first round-robin** across one bucket per
+scraper/region pair (8 today: LinkedIn and Foundit x Dubai, Abu Dhabi, Jeddah,
+Switzerland):
+- Collects up to **25 matching jobs per bucket** (`min_matching_jobs`)
+- Foundit is a Gulf board, so its Switzerland bucket returns nothing and exits
+  after the first empty page
 - Fetches page 1 of every keyword before going to page 2
 - Evaluates jobs after each page fetch to stop early
 - Scrapers are generators that yield one page at a time
@@ -119,7 +123,11 @@ The scraper uses **breadth-first round-robin** across 2 buckets:
 - platform architect, solutions architect
 
 ### Regions
-- **Dubai only**: searches "Dubai" and filters out returned jobs whose displayed location does not include Dubai
+Each region is a search string plus a whitelist of displayed locations
+(`allowed_locations`); anything else is dropped even if the board returns it.
+- **Dubai**, **Abu Dhabi**, **Jeddah** — searched by city
+- **Switzerland** — searched country-wide, then kept only for Zurich, Geneva,
+  Basel, Bern, Lausanne, Zug and Lucerne (in their local spellings too)
 
 ## Scoring System
 Jobs are scored by matching keywords in title + company + full description:
@@ -127,15 +135,18 @@ Jobs are scored by matching keywords in title + company + full description:
   team lead, java, kotlin, backend
 - **Medium (+1)**: docker, ci/cd, kubernetes, terraform, cloud, .net,
   typescript, devops, infrastructure
-- **Threshold**: score >= 13 to qualify as a match
+- **Threshold**: score >= 15 to qualify as a match (`score_threshold`)
 
 ## Filters (applied before scoring)
-1. **Excluded titles**: test engineer, qa, staff software engineer, sdet,
-   machine learning, ml engineer, ml architect
+1. **Excluded titles**: test engineer, qa, sdet, staff engineer, staff
+   software engineer, senior architect, senior cloud architect, senior lead
+   software engineer, machine learning, ml engineer, ml architect, plus the
+   infra, data, security, embedded and frontend lists in `exclude_terms`
 2. **Job age**: posted within last 7 days only
-3. **Location**: only keeps jobs whose displayed location includes Dubai
-4. **Local presence**: skips jobs requiring existing UAE/Saudi residency or
-   that won't sponsor visas
+3. **Location**: only keeps jobs whose displayed location matches one of the
+   configured regions
+4. **Local presence**: skips jobs requiring existing UAE/Saudi residency, an
+   existing Swiss permit or EU/EFTA nationality, or that won't sponsor visas
 5. **Experience**: skips jobs requiring more than 8 years
 
 ## Job Enrichment
@@ -151,12 +162,12 @@ For each candidate job, the scraper fetches the full description and extracts:
 ### When triggered by Hermes cron (scheduled):
 1. Run the collector script: `~/.hermes/scripts/jobhunter_collect_candidates.py`
 2. The collector runs: `.venv/bin/python3 scraper.py --collect-only`
-2. Scraper iterates Dubai buckets only
+2. Scraper iterates every configured region bucket
 3. For each new job passing hard filters and keyword score threshold:
    - Saves to SQLite database
    - Does **not** notify directly
 4. Hermes cron reviews unnotified candidates with an LLM against the local candidate profile,
-   feedback-adjusted score, and `feedback_learning_notes`; it rejects low-seniority/student/intern/junior roles, non-Dubai roles,
+   feedback-adjusted score, and `feedback_learning_notes`; it rejects low-seniority/student/intern/junior roles, roles outside the configured regions,
    local-only/no-relocation roles, and unrelated frontend/QA/data/ML/DevOps-only roles.
 5. Hermes sends at most the best 5 human-approved recommendations back to Telegram and marks
    reviewed candidate IDs as `notified=1` to avoid repeats.
@@ -304,7 +315,11 @@ python3 -m jobhunter_auto_apply.cli submit --job-id <job_id> --selector 'button[
 - Profile schema example: `data/master-profile.example.json`
 - Database: `data/jobs.db` (local, ignored)
 - Logs: `data/scraper.log` (local, ignored)
-- Config: `.env` (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
+- Config: `.env` (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, and the optional
+  per-market targets JOBHUNTER_TARGET_SALARY_AED_MONTHLY,
+  JOBHUNTER_TARGET_SALARY_SAR_MONTHLY, JOBHUNTER_TARGET_SALARY_CHF_YEARLY)
+- Salary ask: resolved from the job's location — AED 30k/month for the UAE,
+  SAR 30k/month for Saudi, CHF 130k/year for Switzerland
 - Auto-apply engine: `jobhunter_auto_apply/`
 - Dependencies: `requirements.txt`
 

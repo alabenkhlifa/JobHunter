@@ -37,8 +37,19 @@ CONFIG = {
     ],
     "regions": {
         "Dubai": ["Dubai"],
+        "Abu Dhabi": ["Abu Dhabi"],
+        "Jeddah": ["Jeddah"],
+        # One country-wide query rather than a city list: LinkedIn resolves
+        # "Switzerland" fine, and five city generators would multiply the
+        # scrape time for the same postings.
+        "Switzerland": ["Switzerland"],
     },
-    "allowed_locations": ["dubai"],
+    "allowed_locations": [
+        "dubai", "abu dhabi", "jeddah",
+        "switzerland", "schweiz", "suisse", "svizzera",
+        "zurich", "zürich", "geneva", "genève", "genf",
+        "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
+    ],
     "scoring": {
         "high": {
             "weight": 3,
@@ -64,7 +75,11 @@ CONFIG = {
     },
     "exclude_terms": [
         "test engineer", "qa engineer", "quality assurance",
-        "staff software engineer", "manual test", "sdet",
+        "staff software engineer", "staff engineer", "manual test", "sdet",
+        # "senior architect" on Gulf boards is usually a building architect;
+        # the software ones read "senior software architect" and still pass.
+        "senior architect", "senior cloud architect",
+        "senior lead software engineer",
         "machine learning", "ml engineer", "ml architect",
         # Infra / Network / SRE / Ops
         "infrastructure engineer", "infrastructure manager",
@@ -112,6 +127,10 @@ CONFIG = {
         "no relocation", "no visa sponsorship", "not offering visa",
         "will not sponsor", "won't sponsor", "does not sponsor",
         "valid uae residence", "valid residence visa", "existing visa",
+        # Switzerland: the same wall, worded as nationality or permit status.
+        "eu/efta", "eu or efta", "efta citizens", "eu citizens only",
+        "swiss work permit", "valid work permit for switzerland",
+        "must hold a valid work permit", "existing work permit",
     ],
     "max_experience": 8,
     "max_job_age_days": 7,
@@ -922,8 +941,10 @@ def scrape_linkedin(session, keyword, location):
 FOUNDIT_LOCATION_MAP = {
     "UAE": "United Arab Emirates",
     "Dubai": "Dubai, United Arab Emirates",
+    "Abu Dhabi": "Abu Dhabi, United Arab Emirates",
     "Saudi Arabia": "Saudi Arabia",
     "Riyadh": "Riyadh, Saudi Arabia",
+    "Jeddah": "Jeddah, Saudi Arabia",
 }
 
 

@@ -39,6 +39,35 @@ from resume_refiner import (
 )
 
 DEFAULT_TARGET_SALARY_AED_MONTHLY = 30000
+
+# What to ask for, per market. The pay scale differs enough between the Gulf and
+# Switzerland that a single number would be wrong in at least one of them, and
+# quoting AED at a Zurich recruiter is worse than quoting nothing.
+SALARY_TARGETS = {
+    "uae": {"currency": "AED", "amount": DEFAULT_TARGET_SALARY_AED_MONTHLY, "period": "month"},
+    "saudi": {"currency": "SAR", "amount": 30000, "period": "month"},
+    "switzerland": {"currency": "CHF", "amount": 130000, "period": "year"},
+}
+DEFAULT_SALARY_MARKET = "uae"
+
+# Matched against the job's displayed location, longest alias first.
+SALARY_MARKET_ALIASES = {
+    "uae": ("dubai", "abu dhabi", "sharjah", "united arab emirates", "uae"),
+    "saudi": ("jeddah", "riyadh", "dammam", "saudi arabia", "ksa"),
+    "switzerland": (
+        "switzerland", "schweiz", "suisse", "svizzera",
+        "zurich", "z\u00fcrich", "geneva", "gen\u00e8ve", "genf",
+        "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
+    ),
+}
+
+# Fallback bands are expressed as a fraction of the market target so they stay
+# sane in any currency. The AED ratios reproduce the previous hard-coded bands.
+SALARY_BANDS = {
+    "senior": (0.73, 1.0),
+    "backend": (0.5, 0.73),
+    "broad": (0.4, 0.6),
+}
 COMPANY_PAY_PLATFORMS = ("Glassdoor", "Indeed", "PayScale", "GulfTalent", "Levels.fyi")
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_PATH = PROJECT_DIR / "data" / "jobs.db"
@@ -129,19 +158,46 @@ class TailoringReadinessError(RuntimeError):
     """Raised when a safe, role-appropriate application package cannot be generated."""
 
 
-def target_salary_aed_monthly() -> int:
-    raw = os.getenv("JOBHUNTER_TARGET_SALARY_AED_MONTHLY", "").strip()
-    if not raw:
-        return DEFAULT_TARGET_SALARY_AED_MONTHLY
+def salary_market(job: dict[str, Any] | None = None) -> str:
+    """Which pay market a job belongs to, from its displayed location."""
+    if not job:
+        return DEFAULT_SALARY_MARKET
+    location = scraper.normalize_location(job.get("location", "")).lower()
+    if not location:
+        return DEFAULT_SALARY_MARKET
+    best_market, best_len = DEFAULT_SALARY_MARKET, 0
+    for market, aliases in SALARY_MARKET_ALIASES.items():
+        for alias in aliases:
+            if alias in location and len(alias) > best_len:
+                best_market, best_len = market, len(alias)
+    return best_market
+
+
+def salary_target(job: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The configured ask for a job's market, env override applied."""
+    target = dict(SALARY_TARGETS[salary_market(job)])
+    env = f"JOBHUNTER_TARGET_SALARY_{target['currency']}_{target['period'].upper()}LY"
+    raw = os.getenv(env, "").strip()
     digits = re.sub(r"[^0-9]", "", raw)
-    return int(digits) if digits else DEFAULT_TARGET_SALARY_AED_MONTHLY
+    if digits:
+        target["amount"] = int(digits)
+    return target
 
 
-def target_salary_label() -> str:
-    value = target_salary_aed_monthly()
-    if value % 1000 == 0:
-        return f"AED {value // 1000}k/month"
-    return f"AED {value:,}/month"
+def target_salary_aed_monthly() -> int:
+    """The UAE ask. Kept as its own function: it is the documented env var."""
+    return salary_target()["amount"]
+
+
+def format_salary(amount: int, currency: str, period: str) -> str:
+    if amount % 1000 == 0:
+        return f"{currency} {amount // 1000}k/{period}"
+    return f"{currency} {amount:,}/{period}"
+
+
+def target_salary_label(job: dict[str, Any] | None = None) -> str:
+    target = salary_target(job)
+    return format_salary(target["amount"], target["currency"], target["period"])
 
 
 def web_research_enabled() -> bool:
@@ -981,6 +1037,16 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     return research
 
 
+def format_salary_band(band_name: str, job: dict[str, Any] | None = None) -> str:
+    """A rough pay band for the job's market, derived from the configured ask."""
+    target = salary_target(job)
+    low_ratio, high_ratio = SALARY_BANDS[band_name]
+    step = 1000 if target["period"] == "month" else 5000
+    low = int(round(target["amount"] * low_ratio / step) * step)
+    high = int(round(target["amount"] * high_ratio / step) * step)
+    return f"{target['currency']} {low // 1000}k–{high // 1000}k/{target['period']}"
+
+
 def estimate_salary_range(job: dict[str, Any]) -> str:
     """Return a conservative salary note for the role.
 
@@ -988,17 +1054,17 @@ def estimate_salary_range(job: dict[str, Any]) -> str:
     or augment this text, but callbacks need a no-network fallback.
     """
     if (job.get("salary") or "").strip():
-        return f"Published salary: {job['salary']}. Target ask: {target_salary_label()}."
+        return f"Published salary: {job['salary']}. Target ask: {target_salary_label(job)}."
     title = (job.get("title") or "").lower()
     tech = (job.get("tech_required") or "").lower()
     exp = job.get("min_experience") or -1
     if any(term in title for term in ("lead", "principal", "architect")) or (isinstance(exp, int) and exp >= 6):
-        band = "AED 22k–30k/month market ask band"
+        band_name, note = "senior", "market ask band"
     elif any(term in tech for term in ("java", "spring", "golang", "microservices", "kubernetes", "aws", "azure")):
-        band = "AED 15k–22k/month likely band; higher if backend/cloud ownership is real"
+        band_name, note = "backend", "likely band; higher if backend/cloud ownership is real"
     else:
-        band = "AED 12k–18k/month broad Dubai software range"
-    return f"{band}. Configured target: {target_salary_label()}."
+        band_name, note = "broad", "broad software range"
+    return f"{format_salary_band(band_name, job)} {note}. Configured target: {target_salary_label(job)}."
 
 
 def build_default_research(job: dict[str, Any]) -> JobResearch:

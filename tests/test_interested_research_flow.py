@@ -46,6 +46,50 @@ def test_salary_target_can_be_configured(monkeypatch):
     assert flow.target_salary_aed_monthly() == 24000
 
 
+def test_salary_market_resolves_from_job_location():
+    assert flow.salary_market(sample_job(location="Dubai, United Arab Emirates")) == "uae"
+    assert flow.salary_market(sample_job(location="Abu Dhabi")) == "uae"
+    assert flow.salary_market(sample_job(location="Jeddah, Saudi Arabia")) == "saudi"
+    assert flow.salary_market(sample_job(location="Zurich, Switzerland")) == "switzerland"
+
+
+def test_salary_market_falls_back_to_uae_when_location_is_unknown():
+    assert flow.salary_market(sample_job(location="")) == "uae"
+    assert flow.salary_market(None) == "uae"
+
+
+def test_target_salary_label_uses_the_market_currency_and_period():
+    assert flow.target_salary_label(sample_job(location="Dubai")) == "AED 30k/month"
+    assert flow.target_salary_label(sample_job(location="Jeddah")) == "SAR 30k/month"
+    assert flow.target_salary_label(sample_job(location="Geneva")) == "CHF 130k/year"
+
+
+def test_each_market_target_can_be_overridden_by_its_own_env_var(monkeypatch):
+    monkeypatch.setenv("JOBHUNTER_TARGET_SALARY_CHF_YEARLY", "150000")
+
+    assert flow.target_salary_label(sample_job(location="Zurich")) == "CHF 150k/year"
+    assert flow.target_salary_label(sample_job(location="Dubai")) == "AED 30k/month"
+
+
+def test_estimated_band_never_quotes_the_wrong_currency(monkeypatch):
+    monkeypatch.delenv("JOBHUNTER_TARGET_SALARY_CHF_YEARLY", raising=False)
+    swiss = flow.estimate_salary_range(
+        sample_job(location="Zurich, Switzerland", title="Software Architect", min_experience=7)
+    )
+
+    assert "CHF" in swiss
+    assert "AED" not in swiss
+
+
+def test_uae_estimated_bands_are_unchanged(monkeypatch):
+    monkeypatch.delenv("JOBHUNTER_TARGET_SALARY_AED_MONTHLY", raising=False)
+    band = flow.estimate_salary_range(
+        sample_job(location="Dubai", title="Software Architect", min_experience=7)
+    )
+
+    assert band.startswith("AED 22k\u201330k/month")
+
+
 def test_web_research_parser_extracts_result_and_unwraps_redirect():
     html = '''
     <a class="result__a" href="/l/?uddg=https%3A%2F%2Fagapi.ae%2F">AGAPI Information Technology</a>
