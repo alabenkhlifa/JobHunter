@@ -227,6 +227,27 @@ def test_employer_fit_matches_agency_words_whole_not_as_substrings():
     assert job_scoring.employer_fit(job(company="Fox Talent")) == 0.3
 
 
+def test_employer_fit_does_not_read_a_government_agency_as_a_recruiter():
+    for name in ("UAE Space Agency", "Environment Agency - Abu Dhabi", "Emirates News Agency"):
+        assert job_scoring.employer_fit(job(company=name, recruiter_company="")) == 1.0, name
+
+
+def test_employer_fit_still_catches_the_recruiters_it_caught_before():
+    for name in ("TALENTMATE", "Halian", "Inspire Selection | Recruitment Agency"):
+        assert job_scoring.employer_fit(job(company=name, recruiter_company="")) == 0.3, name
+
+
+def test_employer_fit_reads_every_confidential_placeholder_the_same_way():
+    # 60 corpus rows hide the employer behind "Confidential ..."; their
+    # descriptions speak as the employer, so none is an agency.
+    for name in ("Confidential", "Confidential Jobs", "Confidential Careers",
+                 "Confidential Government", "Confidential Startup"):
+        assert job_scoring.employer_fit(job(company=name, recruiter_company="")) == 1.0, name
+    # The job boards that "jobs" used to catch are still caught, by name.
+    for name in ("Jobs Ai", "Women First Jobs", "Senior IT Jobs UK", "Jobs via eFinancialCareers"):
+        assert job_scoring.employer_fit(job(company=name, recruiter_company="")) == 0.3, name
+
+
 def test_employer_fit_reads_an_aggregator_note_as_an_agency():
     reposted = job(credibility_notes="posted via TalentPool aggregator")
     assert job_scoring.employer_fit(reposted) == 0.3

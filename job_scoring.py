@@ -264,17 +264,19 @@ AGENCY_MARKERS = ("aggregator", "agency")
 # is an agency or aggregator the corpus carries, most with "our client" in
 # the descriptions. Matched as whole words, so "talent" flags "MCG Talent" and
 # "Talents Tide" but not a product name with the string inside it. No
-# "consulting", "consultancy" or "careers": Cognizant Consulting, Tata
-# Consultancy Services, BCG and NAFFCO Careers hire directly, so the
-# consulting-named agencies are listed by name instead.
+# "consulting", "consultancy", "careers", "agency" or "jobs": Cognizant
+# Consulting, Tata Consultancy Services, BCG, NAFFCO Careers, a government
+# or creative agency, and the 60 "Confidential ..." placeholders that speak
+# as the employer all hire directly, so the consulting-named agencies and
+# the job boards are listed by name instead.
 AGENCY_COMPANY_TERMS = (
     "recruitment", "recruit", "staffing", "talent", "hr solutions",
     "outsourcing", "manpower", "headhunting", "placement", "executive search",
-    "agency", "jobs",
     "talentmate", "jobgether", "halian", "dicetek", "dautom",
     "penta consulting", "nexus consulting", "yo it consulting",
     "avensys consulting", "hyve technology consulting",
     "accel human resource consultants", "agile consultants", "hired",
+    "jobs ai", "women first jobs", "senior it jobs uk", "jobs via efinancialcareers",
 )
 _AGENCY_PATTERNS = tuple(
     re.compile(rf"\b{re.escape(term)}{_INFLECTION}\b") for term in AGENCY_COMPANY_TERMS
