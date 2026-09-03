@@ -1687,9 +1687,17 @@ def main():
                 "pending_jobs": [],  # jobs fetched but not yet evaluated
             }
 
+    # Titles already stored this run. Inception posted one architect role three
+    # times in a single night; three rows would take three of the daily slots.
+    seen_titles = set()
+
     def evaluate_job(job):
         """Evaluate a single job: fetch details, filter, score. Returns job if it passes, None otherwise."""
         if is_job_seen(conn, job["id"]):
+            return None
+        title_key = job_scoring.duplicate_key(job)
+        if title_key in seen_titles:
+            log.info(f"Skipped (repost of a title already stored): {job['title']} @ {job['company']}")
             return None
         if is_excluded(job):
             log.debug(f"Excluded: {job['title']}")
@@ -1747,6 +1755,7 @@ def main():
         score, breakdown = score_job(job)
         job["score"] = score
         job["score_breakdown"] = ", ".join(breakdown)
+        seen_titles.add(title_key)
         save_job(conn, job)
         return job
 

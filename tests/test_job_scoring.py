@@ -447,3 +447,11 @@ def test_allowed_locations_still_exclude_the_markets_he_declined():
         assert job_scoring.knockout({"title": "Software Architect", "location": location,
                                      "description": "", "min_experience": 6},
                                     allowed_locations=job_scoring.DEFAULT_MARKETS), location
+
+
+def test_duplicate_key_collapses_a_repost_of_the_same_role():
+    a = {"title": "Senior Technical Architect", "company": "Inception"}
+    b = {"title": "Technical Architect", "company": "Inception"}
+    c = {"title": "Technical Architect", "company": "Different Co"}
+    assert job_scoring.duplicate_key(a) == job_scoring.duplicate_key(b)
+    assert job_scoring.duplicate_key(a) != job_scoring.duplicate_key(c)
