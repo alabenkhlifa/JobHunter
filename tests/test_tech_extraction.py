@@ -108,3 +108,36 @@ def test_find_tech_still_reads_go_as_a_language_next_to_the_english_word():
         "Own the go-to-market plan; the services themselves are written in Go."
     )
     assert "go" in found
+
+
+AI_POSTING = (
+    "Strong expertise in Python, Generative AI, Large Language Models (LLMs), "
+    "prompt engineering, RAG architectures, and modern AI frameworks such as "
+    "LangChain or similar. Experience building scalable backend services, APIs, "
+    "and distributed applications. Strong understanding of cloud platforms, "
+    "containerisation, CI/CD, MLOps, and deploying AI applications at scale. "
+    "Experience working with SQL/NoSQL databases, ETL pipelines."
+)
+
+
+def test_extracts_the_ai_stack_a_posting_actually_names():
+    required, _ = scraper.extract_tech_keywords(AI_POSTING)
+    found = set(required)
+    for term in ("python", "generative ai", "llms", "prompt engineering", "rag", "langchain"):
+        assert term in found, f"{term} missing from {sorted(found)}"
+
+
+def test_extracts_the_supporting_terms_named_beside_the_ai_stack():
+    required, _ = scraper.extract_tech_keywords(AI_POSTING)
+    found = set(required)
+    for term in ("ci/cd", "mlops", "containerisation", "etl", "nosql"):
+        assert term in found, f"{term} missing from {sorted(found)}"
+
+
+def test_short_ai_terms_respect_word_boundaries():
+    # "ml" must not be read out of html/xml, and "rag" not out of a longer word.
+    required, _ = scraper.extract_tech_keywords(
+        "Build HTML and XML pipelines for a ragged edge renderer."
+    )
+    assert "ml" not in required
+    assert "rag" not in required

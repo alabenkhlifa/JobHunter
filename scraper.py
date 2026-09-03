@@ -93,6 +93,35 @@ CONFIG = {
         "multi-tenant", "multi-tenancy", "zero-trust", "data residency",
         "security", "privacy", "compliance", "mlops", "llmops", "ai model operations",
         "agile", "scrum", "jira",
+        # The AI stack. Before this block the list held three AI-shaped entries
+        # (mlops, llmops, ai model operations) and not one of them appears in
+        # the way postings actually write the work: an "Artificial Intelligence
+        # Engineer" asking for "Generative AI, Large Language Models (LLMs),
+        # prompt engineering, RAG architectures, and modern AI frameworks such
+        # as LangChain" yielded python and ci/cd and nothing else.
+        #
+        # Every spelling below was counted in the 4,575 descriptions in
+        # data/jobs.db and kept only if it occurs there, which is why both
+        # "hugging face" and "huggingface" are listed but "keras" and "sklearn"
+        # are not, and why the British "containerisation" (29 rows) sits beside
+        # the American "containerization" (221). Plurals are separate entries
+        # because the matcher anchors on `(?!\w)`: "large language model" cannot
+        # read "models".
+        "artificial intelligence", "machine learning", "ml", "ai/ml",
+        "generative ai", "genai", "gen ai",
+        "llm", "llms", "large language model", "large language models",
+        "gpt", "chatgpt", "openai", "anthropic", "claude", "gemini",
+        "nlp", "natural language processing",
+        "rag", "retrieval-augmented generation",
+        "vector database", "vector databases", "embeddings",
+        "prompt engineering", "agentic", "ai agent", "ai agents", "multi-agent",
+        "mcp", "model context protocol",
+        "langchain", "langgraph", "llamaindex", "semantic kernel", "crewai",
+        "autogen", "hugging face", "huggingface", "pytorch", "tensorflow",
+        "copilot", "vllm", "rlhf",
+        "pinecone", "weaviate", "qdrant", "milvus", "faiss",
+        # Named in the same postings and missing for the same reason.
+        "etl", "nosql", "containerization", "containerisation",
     ],
     "local_presence_phrases": [
         "must be based in", "must be located in", "must be residing",
