@@ -516,3 +516,36 @@ def test_the_junior_knockout_still_leaves_the_words_that_only_look_junior():
     for title in ("International Solutions Architect", "Internal Tools Architect",
                   "Senior Freshservice Solution Architect"):
         assert job_scoring.knockout(job(title=title), allowed_locations=UAE) is None, title
+
+
+def test_a_family_word_does_not_veto_a_role_he_searches_for():
+    # "cloud architect" is one of his own search keywords (scraper CONFIG),
+    # so a bare "infrastructure" block vetoed his own search. A Java
+    # microservices role must not die because its title lists front end as
+    # one of four technologies.
+    for title in ("Cloud Infrastructure Architect",
+                  "Azure Cloud & Infrastructure Solution Architect",
+                  "Senior Software & Infrastructure Architect",
+                  "Java Software Engineer(.Net + Microservices + front end + Cloud)",
+                  "Software Developer (Java / Backend / Frontend)"):
+        assert job_scoring.blocked_title({"title": title}) is None, title
+
+
+def test_a_title_that_is_the_family_role_is_still_blocked():
+    # The rescue is adjacency, not co-occurrence: a qualifier has to sit in
+    # front of the family word, or the family word names the job.
+    for title in ("Infrastructure Architect", "Senior Infrastructure Engineer",
+                  "Virtualization Infrastructure Architect",
+                  "IT Infrastructure Administrator", "Infrastructure & Cloud Engineer",
+                  "Frontend Developer", "Senior Frontend Engineer",
+                  "Software Engineer - Frontend", "Front End Developer",
+                  "Network Engineer", "Senior Network Specialist",
+                  "Lead Architect - Network & Infrastructure"):
+        assert job_scoring.blocked_title({"title": title}), title
+
+
+def test_only_the_three_widened_families_can_be_rescued():
+    # devops, qa and the rest were never widened, so no qualifier saves them.
+    for title in ("Cloud DevOps Engineer", "Software QA Engineer",
+                  "Backend Data Engineer", "Cloud Security Architect"):
+        assert job_scoring.blocked_title({"title": title}), title

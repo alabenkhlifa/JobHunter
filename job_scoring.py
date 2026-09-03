@@ -46,6 +46,44 @@ _FAMILY_PATTERNS = tuple(
     for family in ROLE_FAMILY_BLOCKS
 )
 
+# Three family words name a technology at least as often as they name a role,
+# and blocking them bare vetoed titles he searches for by name: "cloud
+# architect" is one of his own search keywords, yet `Cloud Infrastructure
+# Architect` was blocked. These three, and only these three, can be rescued.
+RESCUABLE_FAMILIES = ("infrastructure", "network", "frontend", "front-end", "front end")
+
+# A rescuable family word that directly follows one of these is a qualifier on
+# a role he wants rather than the role itself. The test is adjacency, not mere
+# co-occurrence: `Cloud Infrastructure Architect` is a cloud architect,
+# `Infrastructure Architect` is an infrastructure architect, and `Software
+# Engineer - Frontend` is still a frontend job however the title is arranged.
+FAMILY_QUALIFIERS = (
+    "cloud", "software", "solution", "solutions", "backend", "back-end",
+    "microservices", "api", "application", "applications",
+)
+
+# Separators survive normalisation as their own tokens ("+" in "Microservices
+# + front end + Cloud"), so allow them between the qualifier and the family.
+_QUALIFIED_BY = re.compile(
+    r"\b(?:" + "|".join(re.escape(term) for term in FAMILY_QUALIFIERS) + r")"
+    r"(?:\s+[^a-z0-9\s]+)*\s+$"
+)
+
+
+def _names_work_he_wants(raw_title, normalised):
+    """True when a title names one of his role heads or a core technology.
+
+    The second half of the rescue. A qualifier alone is not enough: "Cloud
+    Infrastructure Lead" is an infrastructure job whatever precedes the word,
+    and without this it was rescued into a score of 53 and sent. Derived from
+    ROLE_FAMILIES and CORE_STACK rather than restated, so the rescue cannot
+    drift away from the rubric it is protecting. Both are defined below; the
+    reference resolves at call time.
+    """
+    if role_fit({"title": raw_title}) >= 0.8:
+        return True
+    return any(re.search(rf"\b{re.escape(term)}\b", normalised) for term in CORE_STACK)
+
 
 def normalise_title(title):
     """Lowercase a title and drop the words that only describe seniority."""
@@ -65,8 +103,14 @@ def blocked_title(job):
             return f"blocked title: {phrase}"
 
     normalised = normalise_title(raw)
+    rescuable = None  # computed once, and only if a rescuable family matches
     for family, pattern in _FAMILY_PATTERNS:
-        if pattern.search(normalised):
+        for match in pattern.finditer(normalised):
+            if family in RESCUABLE_FAMILIES and _QUALIFIED_BY.search(normalised[:match.start()]):
+                if rescuable is None:
+                    rescuable = _names_work_he_wants(raw, normalised)
+                if rescuable:
+                    continue  # a qualifier on the role, not the role itself
             return f"blocked role family: {family}"
     return None
 
