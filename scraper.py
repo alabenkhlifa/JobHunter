@@ -1158,6 +1158,31 @@ def assess_company_recruiter_credibility(job):
     return score, notes
 
 
+def readable_text(el):
+    """Flatten a description element to text WITHOUT destroying its structure.
+
+    Job ads are mostly headings and bullet lists, and a single-space separator
+    turns all of that into one unreadable run-on paragraph. Every list item
+    keeps a marker and every block keeps its own line, so a human — and the
+    rating page — can still see where the requirements start.
+    """
+    for li in el.find_all("li"):
+        li.insert(0, "\u2022 ")
+    for br in el.find_all("br"):
+        br.replace_with("\n")
+    text = el.get_text(separator="\n")
+    lines = [" ".join(line.split()) for line in text.split("\n")]
+    out, blank = [], False
+    for line in lines:
+        if line:
+            out.append(line)
+            blank = False
+        elif out and not blank:
+            out.append("")
+            blank = True
+    return "\n".join(out).strip()
+
+
 def fetch_job_description(session, job):
     """Fetch the full job description from the job detail page."""
     try:
@@ -1197,7 +1222,7 @@ def fetch_job_description(session, job):
         if job["source"] == "LinkedIn":
             desc_el = soup.find("div", class_="show-more-less-html__markup")
             if desc_el:
-                return desc_el.get_text(separator=" ", strip=True)
+                return readable_text(desc_el)
 
         return ""
     except requests.RequestException as e:
