@@ -272,6 +272,19 @@ def load_recent_duplicate_keys(conn, max_age_days, min_score):
     }
 
 
+def remember_if_sent(seen_titles, title_key, score, min_score):
+    """Record a title for the duplicate guard only once it has been sent.
+
+    The in-run add and load_recent_duplicate_keys must apply the same rule:
+    deduplication suppresses repeat sends, and nothing below the cutoff has a
+    send to repeat. Recording every scored key meant that within one night a
+    copy knocked out at 0 killed a later sendable copy of the same role before
+    its description was fetched - the seed's defect, with a one-night window.
+    """
+    if score >= min_score:
+        seen_titles.add(title_key)
+
+
 def init_application_tracking(conn):
     """Create the application-state table used after a job becomes interesting."""
     conn.execute(
@@ -1793,7 +1806,7 @@ def main():
         score, breakdown = score_job(job)
         job["score"] = score
         job["score_breakdown"] = ", ".join(breakdown)
-        seen_titles.add(title_key)
+        remember_if_sent(seen_titles, title_key, score, CONFIG["score_threshold"])
         save_job(conn, job)
         return job
 

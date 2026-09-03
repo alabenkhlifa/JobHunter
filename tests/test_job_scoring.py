@@ -636,6 +636,27 @@ def test_a_row_he_never_saw_does_not_seed_the_duplicate_guard(tmp_path):
     assert job_scoring.duplicate_key(sent) in keys
 
 
+def test_a_posting_that_was_not_sent_does_not_suppress_a_later_copy_in_the_same_run():
+    # The in-run add had the seed's defect with a one-night window: every
+    # scored key was recorded, so a copy knocked out at 0 hid a later sendable
+    # copy of the same role before its description was fetched.
+    seen = set()
+    cutoff = scraper.CONFIG["score_threshold"]
+    knocked_out = {"title": "Solution Architect, SASE", "company": "Check Point Software",
+                   "location": "United Arab Emirates"}
+    later_copy = {"title": "Senior Solution Architect, SASE", "company": "check point software",
+                  "location": "Abu Dhabi, United Arab Emirates"}
+    key = job_scoring.duplicate_key(knocked_out)
+    assert job_scoring.duplicate_key(later_copy) == key
+
+    scraper.remember_if_sent(seen, key, 0, cutoff)
+    scraper.remember_if_sent(seen, key, cutoff - 1, cutoff)
+    assert key not in seen
+    # Once a copy is actually sent, the next one is the repost to suppress.
+    scraper.remember_if_sent(seen, key, cutoff, cutoff)
+    assert key in seen
+
+
 def test_knockout_catches_the_sponsorship_refusals_the_corpus_carries():
     # "Back End Developer @ Coders Connect" scored 60, band good, sendable.
     for text in ("Please note a visa sponsorship is not available for this role.",
