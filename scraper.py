@@ -1273,22 +1273,157 @@ def extract_tech_keywords(text):
     return required, nice_to_have
 
 
+# Real postings punctuate the same figure a dozen ways: an en or em dash in a
+# range, a space before the plus, a curly apostrophe in "years' experience".
+# Fold all of those to one spelling before matching anything.
+_EXPERIENCE_DASHES = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"
+_EXPERIENCE_FOLD = {ord(c): "-" for c in _EXPERIENCE_DASHES}
+_EXPERIENCE_FOLD[0x2019] = "'"
+_EXPERIENCE_FOLD[0x2018] = "'"
+_EXPERIENCE_FOLD[0x00a0] = " "
+
+# How far a years phrase reaches for context. A paragraph break, a bullet or a
+# sentence end stops it; a bare newline does not, because foundit wraps single
+# sentences over several lines ("Minimum\n5 years\nof professional experience").
+_EXPERIENCE_BOUNDARY = re.compile(r"\n[ \t]*\n|\u2022|(?<=[a-z0-9\)\]'\"])[.!?](?=\s+[A-Z0-9])")
+_EXPERIENCE_WINDOW = 220
+
+# A range yields its low end, so "12 - 18 + years" asks for 12. The "(?!ly)"
+# keeps "yearly" out; no word boundary follows, because mojibake in the corpus
+# glues the next token on ("5 yearsu2019 experience", "8 yearsof experience").
+_YEARS_PHRASE = re.compile(
+    r"(?P<low>\d{1,3})\s*\+?\s*(?:-|to)\s*\d{1,3}\s*\+?\s*(?:years?|yrs?|year\(s\))(?!ly)"
+    r"|(?P<single>\d{1,3})\s*\+?\s*(?:years?|yrs?|year\(s\))(?!ly)",
+    re.I,
+)
+MIN_EXPERIENCE_YEARS, MAX_EXPERIENCE_YEARS = 0, 30
+
+# "exper" covers experience, experienced, expertise and the "experince" typo
+# three postings carry; "\bexp\b" covers the "4 to 7 years exp" shorthand.
+_EXPERIENCE_WORD = re.compile(r"exper|\bexp\b|background|track\s+record", re.I)
+
+# What the years belong to, when they are not the candidate's. The first group
+# never describes a person, so an adjective may sit in front of it
+# ("10-20 years of market presence"). The second group has honest requirement
+# readings ("5 years of service experience", "5 years of proven success
+# leading a team"), so those only disqualify when the noun ends the phrase.
+_NOT_A_CANDIDATE = re.compile(
+    r"^\s*'?s?\s*(?:of\s+|in\s+)?(?:[a-z]+\s+)?"
+    r"(?:impact|histor(?:y|ies)|innovation|excellence|legac(?:y|ies)|heritage"
+    r"|presence|existence|standing|tenure|employment"
+    r"|(?:services?|operations?|business|growth|success(?:es)?|partnerships?)"
+    r"\s*(?=[.,;:)]|$))",
+    re.I,
+)
+_YEARS_AGO = re.compile(r"^\s*ago\b", re.I)
+
+# A span of elapsed time rather than a bar to clear: "founded over 35 years
+# ago", "spent the last 5 years", "after 1 year of employment".
+_ELAPSED_SPAN = re.compile(
+    r"(?:\bfor\s+(?:over|more\s+than|nearly|almost|about|around|the\s+(?:past|last))\s+"
+    r"|\bthe\s+(?:past|last)\s+"
+    r"|\b(?:every|each|per|first|next|after)\s+)$",
+    re.I,
+)
+
+# A bare "for" is ambiguous: "managed by Dalkia for 3 years" is a project term,
+# but "what we are looking for 5+ years in backend" is the requirement itself.
+# Only the hiring verbs rescue it.
+_BARE_FOR = re.compile(r"\bfor\s+$", re.I)
+_HIRING_FOR = re.compile(
+    r"\b(?:look(?:ing)?|search(?:ing)?|seek(?:ing)?|hiring|need(?:ed|s)?"
+    r"|require[ds]?|ask(?:ing)?)\s+for\s+$",
+    re.I,
+)
+
+_BENEFIT_CONTEXT = re.compile(
+    r"vacation|paid\s+time\s+off|sabbatical|parental\s+leave|public\s+holidays?"
+    r"|annual\s+leave|gratuity|days\s+off|leave\s+entitlement",
+    re.I,
+)
+_EMPLOYER_TENURE = re.compile(r"tenure\s+(?:is|of|:)|employee\s+tenure", re.I)
+
+# "Contract: 1 year", "Duration : 1 year of contract extendable" — the length
+# of the engagement, not of the candidate's career.
+_ENGAGEMENT_BEFORE = re.compile(
+    r"\b(?:contract|duration|fixed[\s-]term|notice\s+period|probation|period|term)"
+    r"[\s:\-(]*(?:of\s+)?$",
+    re.I,
+)
+_ENGAGEMENT_AFTER = re.compile(
+    r"^\s*\+?\s*\)?\s*(?:of\s+)?(?:contract|extendable|renewable)\b", re.I
+)
+
+# Language that only ever introduces a bar the candidate must clear.
+_REQUIREMENT_LEAD_IN = re.compile(
+    r"(?:\b(?:a\s+)?minimum(?:\s+of)?|\bmin\.?|\bat\s+least|\bno\s+less\s+than"
+    r"|\bmore\s+than|\babove|\bover|\brequires?|\brequired|\bmust\s+have"
+    r"|\bshould\s+have|\btotal\s+of)[\s:,\-]*$",
+    re.I,
+)
+# The years are attached to a field of work: "8+ years in solution
+# architecture", "8+ Years working in a related IT Engineering".
+_ROLE_ATTACHMENT = re.compile(
+    r"^\s*'?s?\s*(?:,\s*)?(?:ideally\s+|primarily\s+|preferably\s+|mainly\s+)?"
+    r"(?:of|in|as|with|within|on|working|leading|building|designing|managing|developing)\b",
+    re.I,
+)
+_TRAILING_REQUIREMENT = re.compile(
+    r"^\s*'?s?\s*(?:minimum|min\.?|or\s+more|or\s+above|and\s+above|plus\b)", re.I
+)
+
+
+def _experience_context(text, start, end):
+    """The sentence-ish text on either side of a years phrase, whitespace flattened."""
+    before = _EXPERIENCE_BOUNDARY.split(text[max(0, start - _EXPERIENCE_WINDOW):start])[-1]
+    after = _EXPERIENCE_BOUNDARY.split(text[end:end + _EXPERIENCE_WINDOW])[0]
+    return re.sub(r"\s+", " ", before), re.sub(r"\s+", " ", after)
+
+
+def _states_a_requirement(before, after):
+    """Does this years phrase describe what the candidate must bring?
+
+    Widening the shapes we recognise is only safe with an anchor, because the
+    result is the minimum of every figure found: one stray "10+ Years of
+    Impact" from an About Us section would drag a senior posting under the
+    experience cap and rescue it from the knockout. Of the 4,575 descriptions
+    in data/jobs.db, the four anchors below cover every requirement phrasing
+    in the corpus, and each rejected shape above was read back to confirm it
+    was the company, a benefit or a contract talking, not the job.
+    """
+    if _NOT_A_CANDIDATE.match(after) and not _EXPERIENCE_WORD.search(after[:60]):
+        return False
+    if _YEARS_AGO.match(after) or _ELAPSED_SPAN.search(before):
+        return False
+    if _BARE_FOR.search(before) and not _HIRING_FOR.search(before):
+        return False
+    if _ENGAGEMENT_BEFORE.search(before) or _ENGAGEMENT_AFTER.match(after):
+        return False
+    local = before[-100:] + after[:100]
+    if _BENEFIT_CONTEXT.search(local) or _EMPLOYER_TENURE.search(local):
+        return False
+    return bool(
+        _EXPERIENCE_WORD.search(after[:75])
+        or _EXPERIENCE_WORD.search(before[-60:])
+        or _REQUIREMENT_LEAD_IN.search(before)
+        or _ROLE_ATTACHMENT.match(after)
+        or _TRAILING_REQUIREMENT.match(after)
+    )
+
+
 def extract_min_experience(text):
     """Extract minimum years of experience from job description. Returns -1 if not found."""
-    patterns = [
-        r'(\d+)\+?\s*(?:years?|yrs?)[\s\w]*(?:of\s+)?(?:experience|exp)',
-        r'(?:minimum|min|at\s+least|over)\s+(\d+)\s*(?:years?|yrs?)',
-        r'(\d+)\s*(?:-|to)\s*\d+\s*(?:years?|yrs?)[\s\w]*(?:of\s+)?(?:experience|exp)',
-        r'(?:experience|exp)\s*(?:of\s+)?(\d+)\+?\s*(?:years?|yrs?)',
-    ]
+    if not text:
+        return -1
+    text = str(text).translate(_EXPERIENCE_FOLD)
     years_found = []
-    text_lower = text.lower()
-    for pattern in patterns:
-        matches = re.findall(pattern, text_lower)
-        for m in matches:
-            val = int(m)
-            if 1 <= val <= 30:
-                years_found.append(val)
+    for match in _YEARS_PHRASE.finditer(text):
+        value = int(match.group("low") or match.group("single"))
+        if not (MIN_EXPERIENCE_YEARS <= value <= MAX_EXPERIENCE_YEARS):
+            continue
+        before, after = _experience_context(text, match.start(), match.end())
+        if _states_a_requirement(before, after):
+            years_found.append(value)
     return min(years_found) if years_found else -1
 
 
