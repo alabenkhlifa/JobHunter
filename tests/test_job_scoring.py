@@ -109,3 +109,15 @@ def test_duplicate_key_ignores_the_german_gender_marker():
     for title in ("Software Architect (m/w/d)", "Software Architect (w/m/d)",
                   "Software Architect (m/f/x)", "Software Architect m/w/d"):
         assert job_scoring.duplicate_key(job(title=title, company="Acme")) == plain, title
+
+
+def test_knockout_reads_a_curly_apostrophe_as_a_refusal():
+    straight = job(description="We won't sponsor visas for this role.")
+    curly = job(description="We won’t sponsor visas for this role.")
+    assert job_scoring.knockout(straight, allowed_locations=UAE)
+    assert job_scoring.knockout(curly, allowed_locations=UAE)
+
+
+def test_knockout_rejects_interns_in_the_plural_too():
+    assert job_scoring.knockout(job(title="Software Engineering Intern"), allowed_locations=UAE)
+    assert job_scoring.knockout(job(title="Software Engineering Interns"), allowed_locations=UAE)

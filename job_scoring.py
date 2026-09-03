@@ -73,7 +73,7 @@ def blocked_title(job):
 # Promoted from a -3 penalty to a knockout: as points it was defeatable by
 # buzzword count, so junior roles with a dense stack list still got through.
 JUNIOR_WORDS = (
-    "junior", "intern", "internship", "entry level", "entry-level",
+    "junior", "intern", "interns", "internship", "entry level", "entry-level",
     "graduate", "fresh graduate", "trainee", "apprentice",
 )
 
@@ -126,7 +126,9 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset())
     if isinstance(years, int) and years > max_experience:
         return f"wants {years}+ years, over the {max_experience} cap"
 
-    description = str(job.get("description") or "").lower()
+    # 85 of 4,580 real descriptions use a curly apostrophe, which would make
+    # "won't sponsor" a dead entry. Fold it to the straight form before matching.
+    description = str(job.get("description") or "").lower().replace("\u2019", "'").replace("\u2018", "'")
     for phrase in REFUSES_SPONSORSHIP:
         if phrase in description:
             return f"refuses sponsorship: {phrase}"
