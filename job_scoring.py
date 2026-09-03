@@ -103,16 +103,18 @@ def duplicate_key(job):
     return f"{normalise_title(title)}|{_words(job.get('company'))}"
 
 
-# The four markets he chose, matched as substrings of the displayed location,
+# The five markets he chose, matched as substrings of the displayed location,
 # with the Swiss city and language spellings for postings that omit the
 # country. scraper.CONFIG["allowed_locations"] and tools/eval_scoring.py both
 # read it from here, so the number the tool measures is the number the
-# scraper ships. Riyadh, Sharjah and a bare "United Arab Emirates" are not
-# here on purpose: the boards return them for these searches, and he did not
-# pick them. "jiddah" is not a fifth market: it is one board's spelling of
-# Jeddah, on 17 of the 4,580 corpus rows.
+# scraper ships. Sharjah and a bare "United Arab Emirates" are not here on
+# purpose: the boards return them for these searches, and he did not pick
+# them. Jeddah and Riyadh are cities, not the country: "saudi" would bring
+# Dammam and Khobar with it. "jiddah" is one board's spelling of Jeddah, on
+# 17 of the 4,580 corpus rows; every Riyadh row in the corpus spells it
+# "riyadh", so that one term covers all 989 of them.
 DEFAULT_MARKETS = (
-    "dubai", "abu dhabi", "jeddah", "jiddah",
+    "dubai", "abu dhabi", "jeddah", "jiddah", "riyadh",
     "switzerland", "schweiz", "suisse", "svizzera",
     "zurich", "zürich", "geneva", "genève", "genf",
     "basel", "bern", "lausanne", "zug", "lucerne", "luzern",

@@ -1,6 +1,6 @@
 ---
 name: job-hunter
-description: Automated job search agent for the Dubai, Abu Dhabi, Jeddah and Switzerland markets.
+description: Automated job search agent for the Dubai, Abu Dhabi, Jeddah, Riyadh and Switzerland markets.
   Scrapes LinkedIn and Foundit Gulf, scores matches against a
   Software Architect / Tech Lead / Senior Engineer backend profile, and notifies via Telegram.
 triggers:
@@ -15,8 +15,8 @@ triggers:
 
 ## Overview
 This skill automates job searching for Software Architect / Cloud Architect /
-Tech Lead / Senior Engineer backend roles in Dubai, Abu Dhabi, Jeddah and
-Switzerland. It scrapes LinkedIn (guest API) and
+Tech Lead / Senior Engineer backend roles in Dubai, Abu Dhabi, Jeddah, Riyadh
+and Switzerland. It scrapes LinkedIn (guest API) and
 Foundit Gulf (JSON API), stores keyword-qualified candidates, then a Hermes
 cron job reviews them with an LLM before suggesting offers.
 
@@ -108,8 +108,8 @@ A confirmed role-family variant is a complete candidate-approved presentation, n
 
 ## Scraping Strategy
 The scraper uses **breadth-first round-robin** across one bucket per
-scraper/region pair (8 today: LinkedIn and Foundit x Dubai, Abu Dhabi, Jeddah,
-Switzerland):
+scraper/region pair (10 today: LinkedIn and Foundit x Dubai, Abu Dhabi, Jeddah,
+Riyadh, Switzerland):
 - Collects up to **25 matching jobs per bucket** (`min_matching_jobs`)
 - Foundit is a Gulf board, so its Switzerland bucket returns nothing and exits
   after the first empty page
@@ -126,9 +126,11 @@ Switzerland):
 Each region is a search string plus a whitelist of displayed locations
 (`allowed_locations`, read from `job_scoring.DEFAULT_MARKETS`); anything else
 is dropped even if the board returns it.
-- **Dubai**, **Abu Dhabi**, **Jeddah** — searched by city. The boards also
-  return Sharjah, Riyadh and a bare "United Arab Emirates" for these searches;
-  those are dropped, since they are not markets he chose
+- **Dubai**, **Abu Dhabi**, **Jeddah**, **Riyadh** — searched by city. The
+  boards also return Sharjah, a bare "United Arab Emirates", and other Saudi
+  cities such as Dammam for these searches; those are dropped, since they are
+  not markets he chose. Jeddah and Riyadh are the two Saudi cities he did
+  choose; the country itself is not a market
 - **Switzerland** — searched country-wide. Any displayed location naming the
   country passes, so Winterthur and Ticino are kept as well as Zurich; the city
   names in `allowed_locations` only catch postings that omit the country

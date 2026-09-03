@@ -413,12 +413,12 @@ def test_scraper_score_job_returns_zero_for_a_knocked_out_job():
 
 def test_the_scraper_reads_its_markets_from_job_scoring():
     # One list, three readers: the rubric, the scraper's location filter, and
-    # the measurement tool. It holds the four markets he chose and nothing
+    # the measurement tool. It holds the five markets he chose and nothing
     # else: the wider Gulf was an evaluation convenience, never a choice.
     assert list(scraper.CONFIG["allowed_locations"]) == list(job_scoring.DEFAULT_MARKETS)
-    for market in ("dubai", "abu dhabi", "jeddah", "switzerland", "zurich", "lausanne"):
+    for market in ("dubai", "abu dhabi", "jeddah", "riyadh", "switzerland", "zurich", "lausanne"):
         assert market in job_scoring.DEFAULT_MARKETS, market
-    for market in ("riyadh", "sharjah", "saudi", "united arab emirates"):
+    for market in ("sharjah", "saudi", "saudi arabia", "united arab emirates"):
         assert market not in job_scoring.DEFAULT_MARKETS, market
 
 
@@ -431,15 +431,19 @@ def test_the_shipped_threshold_is_the_rubrics_send_cutoff():
 
 def test_allowed_locations_cover_the_board_spellings_of_the_chosen_markets():
     for location in ("Jiddah, Makkah, Saudi Arabia", "Jeddah, Saudi Arabia",
-                     "Dubai, United Arab Emirates", "Abu Dhabi", "Zurich, Switzerland"):
+                     "Dubai, United Arab Emirates", "Abu Dhabi", "Zurich, Switzerland",
+                     "Riyadh, Saudi Arabia", "Saudi Arabia, Riyadh", "Riyadh Region"):
         assert job_scoring.knockout({"title": "Software Architect", "location": location,
                                      "description": "", "min_experience": 6},
                                     allowed_locations=job_scoring.DEFAULT_MARKETS) is None, location
 
 
 def test_allowed_locations_still_exclude_the_markets_he_declined():
-    for location in ("Riyadh, Saudi Arabia", "Sharjah, United Arab Emirates",
-                     "United Arab Emirates", "Cairo, Egypt"):
+    # Jeddah and Riyadh are the two Saudi cities he chose; the country is not
+    # a market, so a bare "Saudi Arabia" or any other Saudi city stays out.
+    for location in ("Sharjah, United Arab Emirates", "United Arab Emirates",
+                     "Saudi Arabia", "Dammam, Eastern, Saudi Arabia",
+                     "Riyad Qana, Al Qasim, Saudi Arabia", "Cairo, Egypt"):
         assert job_scoring.knockout({"title": "Software Architect", "location": location,
                                      "description": "", "min_experience": 6},
                                     allowed_locations=job_scoring.DEFAULT_MARKETS), location

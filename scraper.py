@@ -41,6 +41,7 @@ CONFIG = {
         "Dubai": ["Dubai"],
         "Abu Dhabi": ["Abu Dhabi"],
         "Jeddah": ["Jeddah"],
+        "Riyadh": ["Riyadh"],
         # One country-wide query rather than a city list: LinkedIn resolves
         # "Switzerland" fine, and five city generators would multiply the
         # scrape time for the same postings.
