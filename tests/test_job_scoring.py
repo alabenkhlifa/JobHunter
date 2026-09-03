@@ -551,6 +551,21 @@ def test_only_the_three_widened_families_can_be_rescued():
         assert job_scoring.blocked_title({"title": title}), title
 
 
+def test_network_roles_are_blocked_even_when_the_title_says_architect():
+    # Rescuing `network` freed no corpus title (29 blocked before and after)
+    # but let genuine network roles through on the word "architect" alone.
+    for title in ("Cloud Network Architect", "Solutions Network Architect",
+                  "Tech Lead - Cloud Network"):
+        assert job_scoring.blocked_title({"title": title}), title
+
+
+def test_the_infrastructure_rescue_still_works():
+    for title in ("Cloud Infrastructure Architect",
+                  "Azure Cloud & Infrastructure Solution Architect",
+                  "Senior Software & Infrastructure Architect"):
+        assert job_scoring.blocked_title({"title": title}) is None, title
+
+
 def test_the_duplicate_guard_is_seeded_from_the_database(tmp_path):
     # The spec's rule is "inside the freshness window", not "inside this
     # process". Built empty in main() it caught only the reposts that arrive

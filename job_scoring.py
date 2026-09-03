@@ -46,11 +46,15 @@ _FAMILY_PATTERNS = tuple(
     for family in ROLE_FAMILY_BLOCKS
 )
 
-# Three family words name a technology at least as often as they name a role,
+# Two family words name a technology at least as often as they name a role,
 # and blocking them bare vetoed titles he searches for by name: "cloud
 # architect" is one of his own search keywords, yet `Cloud Infrastructure
-# Architect` was blocked. These three, and only these three, can be rescued.
-RESCUABLE_FAMILIES = ("infrastructure", "network", "frontend", "front-end", "front end")
+# Architect` was blocked. These, and only these, can be rescued. `network` is
+# deliberately absent: rescuing it freed no corpus title (29 blocked before
+# and after) while `Cloud Network Architect` and `Tech Lead - Cloud Network`
+# slipped through on the word `architect` alone — all of the escape risk and
+# none of the gain.
+RESCUABLE_FAMILIES = ("infrastructure", "frontend", "front-end", "front end")
 
 # A rescuable family word that directly follows one of these is a qualifier on
 # a role he wants rather than the role itself. The test is adjacency, not mere
