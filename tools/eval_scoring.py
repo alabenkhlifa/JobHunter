@@ -63,6 +63,20 @@ def load_labels(db_path=DEFAULT_DB):
     return interested, skipped
 
 
+# scraper.save_job writes recruiter_company and credibility_notes AFTER
+# score_job has already run, so a job is scored live without either field.
+# Scoring the stored rows with them present would measure a scorer that never
+# ships. Blanking them here makes the measured number the shipped one; it
+# moves 2 of the 4,580 corpus rows. Delete this if the scraper ever fills the
+# metadata before it scores.
+UNSCORED_AT_COLLECTION_TIME = {"recruiter_company": "", "credibility_notes": ""}
+
+
+def as_scored_live(job):
+    """A stored row with the fields production cannot supply at scoring time."""
+    return dict(job, **UNSCORED_AT_COLLECTION_TIME)
+
+
 def _freshness_neutral_total(result):
     """The total with freshness pinned to its undated value.
 
@@ -90,7 +104,10 @@ def report(db_path=DEFAULT_DB, *, now=None):
     interested, skipped = load_labels(db_path)
 
     def results(jobs):
-        return [job_scoring.evaluate(j, allowed_locations=MARKETS, now=now) for j in jobs]
+        return [
+            job_scoring.evaluate(as_scored_live(j), allowed_locations=MARKETS, now=now)
+            for j in jobs
+        ]
 
     scored_interested, scored_skipped = results(interested), results(skipped)
     positives = [r["total"] for r in scored_interested]

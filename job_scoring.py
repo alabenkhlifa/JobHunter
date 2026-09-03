@@ -436,6 +436,20 @@ def employer_fit(job):
     company_website is not read: no scraper fills it today, and with two
     tiers a website could only ever confirm what the absence of an agency
     signal already says.
+
+    ACCEPTED ORDERING: in the live scraper the first two branches almost
+    never fire. `recruiter_company` and `credibility_notes` are written by
+    scraper.save_job, which runs AFTER score_job, so a job is scored before
+    either field exists; `recruiter_company` is empty on all 4,580 stored
+    rows. Live scoring therefore reduces to the company-name list below.
+    That is accepted rather than fixed: generating the notes before scoring
+    would pull scraper's coarser AGENCY_OR_AGGREGATOR_TERMS in through the
+    back door — its "consulting" entry alone re-flags Cognizant Consulting
+    and Boston Consulting Group, the exact false positives this list was
+    trimmed to avoid — while closing a gap worth 2 rows in 4,580. The two
+    branches stay for callers that re-score stored rows, and
+    tools/eval_scoring.py blanks both fields so the measured number is the
+    shipped one.
     """
     company = str(job.get("company") or "").strip().lower()
     recruiter = str(job.get("recruiter_company") or "").strip().lower()
