@@ -73,9 +73,24 @@ def blocked_title(job):
 
 # Promoted from a -3 penalty to a knockout: as points it was defeatable by
 # buzzword count, so junior roles with a dense stack list still got through.
+#
+# A knockout is only as good as its spellings. "jr" sat in SENIORITY_WORDS and
+# not here, so `Jr Backend Engineer` scored 84 and was sent while
+# `Junior Backend Engineer` was knocked out — one abbreviation deciding whether
+# a junior role reached his phone. Every form below is one the corpus actually
+# writes: `Jr. Architect- Modeler` (3 rows), `Software Engineer (Fresh
+# Graduates)`, `Fresher Software Engineer`, `Fresh -Technical architect`.
+#
+# Ordered most specific first, so the entry that matches is also the entry that
+# names the reason and no longer phrase is shadowed by a shorter one inside it.
+# That ordering is what brings "fresh graduate" back to life: it sat behind
+# "graduate", which claimed every match, and could never fire.
 JUNIOR_WORDS = (
-    "junior", "intern", "interns", "internship", "entry level", "entry-level",
-    "graduate", "fresh graduate", "trainee", "apprentice",
+    "junior-level", "entry-level", "entry level", "graduate level",
+    "fresh graduate", "fresh graduates", "graduates", "graduate",
+    "junior", "jr", "freshers", "fresher", "fresh",
+    "internship", "interns", "intern",
+    "trainee", "apprenticeship", "apprentice",
 )
 
 # The rare posting that says outright it will not sponsor. 2 of 4,575 postings
@@ -171,9 +186,13 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset())
         return reason
 
     # Whole-word match: "intern" must not reject "International Architect".
+    # A hyphen joins two tokens into one, so "Junior-Level Developer" reads as
+    # a single "junior-level" token and " junior " would miss it. Match against
+    # the split spelling too, which is also how normalise_title reads a title.
     title = f" {_words(job.get('title'))} "
+    unhyphenated = title.replace("-", " ")
     for word in JUNIOR_WORDS:
-        if f" {word} " in title:
+        if f" {word} " in title or f" {word} " in unhyphenated:
             return f"too junior: {word}"
 
     location = str(job.get("location") or "").lower()

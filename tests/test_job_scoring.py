@@ -478,3 +478,41 @@ def test_default_markets_is_exactly_the_markets_he_chose():
         "zurich", "zürich", "geneva", "genève", "genf",
         "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
     )
+
+
+
+# ── Final review fixes ───────────────────────────────────────────────────────
+
+
+def test_the_abbreviated_spelling_of_junior_is_the_same_verdict_as_the_word():
+    # "jr" was in SENIORITY_WORDS and missing from JUNIOR_WORDS, so
+    # "Jr Backend Engineer" scored 84 and was sent while "Junior Backend
+    # Engineer" was knocked out. One spelling of one word decided it.
+    spelled = job_scoring.evaluate(job(title="Junior Backend Engineer"), allowed_locations=UAE)
+    short = job_scoring.evaluate(job(title="Jr Backend Engineer"), allowed_locations=UAE)
+    dotted = job_scoring.evaluate(job(title="Jr. Backend Engineer"), allowed_locations=UAE)
+    for name, result in (("junior", spelled), ("jr", short), ("jr.", dotted)):
+        assert result["reason"].startswith("too junior"), name
+        assert result["total"] == 0, name
+        assert not job_scoring.sendable(result), name
+
+
+def test_knockout_catches_the_junior_spellings_the_corpus_actually_carries():
+    # Every one of these is a real title from data/jobs.db that reached a
+    # score. "Junior-Level" escaped because the token matcher keeps the
+    # hyphen while normalise_title strips it.
+    for title in ("Jr. Architect- Modeler ( UAE National Only )",
+                  "Jr. Architect - Saudi Talent",
+                  "Software Engineer (Fresh Graduates)",
+                  "Fresher Software Engineer",
+                  "Fresh -Technical architect",
+                  "Junior-Level Developer",
+                  "Graduate-Level Engineer",
+                  "Software Engineer Apprenticeship"):
+        assert job_scoring.knockout(job(title=title), allowed_locations=UAE), title
+
+
+def test_the_junior_knockout_still_leaves_the_words_that_only_look_junior():
+    for title in ("International Solutions Architect", "Internal Tools Architect",
+                  "Senior Freshservice Solution Architect"):
+        assert job_scoring.knockout(job(title=title), allowed_locations=UAE) is None, title
