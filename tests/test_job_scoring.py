@@ -102,3 +102,10 @@ def test_duplicate_key_ignores_seniority_and_case():
 
 def test_knockout_passes_a_job_he_wants():
     assert job_scoring.knockout(job(), allowed_locations=UAE) is None
+
+
+def test_duplicate_key_ignores_the_german_gender_marker():
+    plain = job_scoring.duplicate_key(job(title="Software Architect", company="Acme"))
+    for title in ("Software Architect (m/w/d)", "Software Architect (w/m/d)",
+                  "Software Architect (m/f/x)", "Software Architect m/w/d"):
+        assert job_scoring.duplicate_key(job(title=title, company="Acme")) == plain, title

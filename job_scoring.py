@@ -91,9 +91,15 @@ def _words(text):
     return " ".join(w.rstrip(".") for w in _WORD.findall(str(text or "").lower()))
 
 
+# German postings tag the title with "(m/w/d)" and variants. The same role
+# posted with and without the tag must land on one key, so strip it first.
+_GENDER_MARKER = re.compile(r"\(?\b[mwfdx](?:\s*/\s*[mwfdx]){1,3}\b\)?")
+
+
 def duplicate_key(job):
     """Identity of a posting for deduplication: normalised title plus company."""
-    return f"{normalise_title(job.get('title'))}|{_words(job.get('company'))}"
+    title = _GENDER_MARKER.sub(" ", str(job.get("title") or "").lower())
+    return f"{normalise_title(title)}|{_words(job.get('company'))}"
 
 
 def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset()):
