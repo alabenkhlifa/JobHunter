@@ -23,8 +23,8 @@ ROLE_FAMILY_BLOCKS = (
     "platform engineer", "data engineer", "data architect", "data platform",
     "machine learning", "ml engineer", "ml architect", "security engineer",
     "security architect", "cybersecurity", "information security", "infosec",
-    "embedded", "firmware", "hardware", "frontend", "front-end", "ui engineer",
-    "ui developer", "ux engineer", "react", "angular", "vue",
+    "embedded", "firmware", "hardware", "frontend", "front-end", "front end",
+    "ui engineer", "ui developer", "ux engineer", "react", "angular", "vue",
 )
 
 # Exact strings he asked to block. These stay literal: stripping "senior" from
@@ -35,6 +35,15 @@ LITERAL_BLOCKS = (
 )
 
 _WORD = re.compile(r"[a-z0-9+#.-]+")
+
+# A family word may carry an inflection in a title: "manual tester",
+# "networking engineer", "reactjs developer". The list is closed so a short
+# entry such as "qa" can never match inside an unrelated word like "qatar".
+_INFLECTION = r"(?:s|es|er|ers|ing|js|\.js)?"
+_FAMILY_PATTERNS = tuple(
+    (family, re.compile(rf"\b{re.escape(family)}{_INFLECTION}\b"))
+    for family in ROLE_FAMILY_BLOCKS
+)
 
 
 def normalise_title(title):
@@ -55,7 +64,7 @@ def blocked_title(job):
             return f"blocked title: {phrase}"
 
     normalised = normalise_title(raw)
-    for family in ROLE_FAMILY_BLOCKS:
-        if re.search(rf"\b{re.escape(family)}\b", normalised):
+    for family, pattern in _FAMILY_PATTERNS:
+        if pattern.search(normalised):
             return f"blocked role family: {family}"
     return None

@@ -32,3 +32,18 @@ def test_blocked_title_is_not_fooled_by_a_hyphen():
 
 def test_normalise_title_strips_abbreviated_seniority():
     assert job_scoring.normalise_title("Sr. Software Architect") == "software architect"
+
+
+def test_blocked_title_catches_every_frontend_spelling():
+    for title in ("Frontend Developer", "Front-End Developer", "Front End Developer"):
+        assert job_scoring.blocked_title({"title": title}), title
+
+
+def test_blocked_title_catches_suffixed_forms_of_blocked_families():
+    for title in ("Manual Tester", "Manual Testing Specialist", "Networking Engineer"):
+        assert job_scoring.blocked_title({"title": title}), title
+
+
+def test_blocked_title_says_which_rule_rejected_it():
+    assert job_scoring.blocked_title({"title": "DevOps Manager"}) == "blocked role family: devops"
+    assert job_scoring.blocked_title({"title": "Staff Engineer"}) == "blocked title: staff engineer"
