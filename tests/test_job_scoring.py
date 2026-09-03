@@ -598,3 +598,23 @@ def test_the_sponsorship_list_does_not_read_export_control_boilerplate():
     text = ("This role requires the ability to be hired without sponsorship "
             "for a US export licence.")
     assert job_scoring.knockout(job(description=text), allowed_locations=UAE) is None
+
+
+def test_the_cloud_ring_holds_exactly_five_terms():
+    # The ring is a coverage fraction, so a sixth term dilutes every other
+    # posting's cloud score. That is why k8s is an alias, not a member, and
+    # this pin is what stops the next alias being added as a term instead.
+    assert len(job_scoring.CLOUD_STACK) == 5
+    assert job_scoring.STACK_ALIASES["k8s"] == "kubernetes"
+    assert "k8s" not in job_scoring.CLOUD_STACK
+
+
+def test_the_cutoff_rounds_the_way_python_rounds():
+    # round() is banker's rounding: 44.5 goes DOWN to 44 and is not sent,
+    # 45.5 goes UP to 46 and is. Task 9's refit must round the same way or
+    # its measured AUC will not be the number production ships.
+    assert round(44.5) == 44
+    assert round(45.5) == 46
+    assert not job_scoring.sendable({"total": round(44.5)})
+    assert job_scoring.sendable({"total": round(45.5)})
+    assert job_scoring.sendable({"total": job_scoring.SEND_CUTOFF})
