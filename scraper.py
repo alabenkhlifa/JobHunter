@@ -110,7 +110,9 @@ CONFIG = {
     ],
     "max_experience": 8,
     "max_job_age_days": 7,
-    "score_threshold": 45,
+    # One number, the rubric's: a profile config may override it, but the
+    # default it starts from must not drift from job_scoring.SEND_CUTOFF.
+    "score_threshold": job_scoring.SEND_CUTOFF,
     # Per scraper/region bucket. Keep this high so one good match does not stop
     # the scrape early; the LLM review can rank/reject multiple good offers.
     "min_matching_jobs": 25,

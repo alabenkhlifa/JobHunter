@@ -413,7 +413,17 @@ def test_scraper_score_job_returns_zero_for_a_knocked_out_job():
 
 def test_the_scraper_reads_its_markets_from_job_scoring():
     # One list, three readers: the rubric, the scraper's location filter, and
-    # the measurement tool. Swiss cities and the wider Gulf both belong to it.
+    # the measurement tool. It holds the four markets he chose and nothing
+    # else: the wider Gulf was an evaluation convenience, never a choice.
     assert list(scraper.CONFIG["allowed_locations"]) == list(job_scoring.DEFAULT_MARKETS)
-    for market in ("zurich", "lausanne", "riyadh", "sharjah", "saudi", "united arab emirates"):
+    for market in ("dubai", "abu dhabi", "jeddah", "switzerland", "zurich", "lausanne"):
         assert market in job_scoring.DEFAULT_MARKETS, market
+    for market in ("riyadh", "sharjah", "saudi", "united arab emirates"):
+        assert market not in job_scoring.DEFAULT_MARKETS, market
+
+
+def test_the_shipped_threshold_is_the_rubrics_send_cutoff():
+    # A profile config may still override score_threshold; the default it
+    # starts from must be the one number the rubric defines.
+    assert scraper.DEFAULT_CONFIG["score_threshold"] == job_scoring.SEND_CUTOFF
+    assert scraper.CONFIG["score_threshold"] == job_scoring.SEND_CUTOFF
