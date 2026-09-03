@@ -560,18 +560,18 @@ def test_the_duplicate_guard_is_seeded_from_the_database(tmp_path):
 
     db = tmp_path / "jobs.db"
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE jobs (title TEXT, company TEXT, location TEXT, date_scraped TEXT)")
+    conn.execute("CREATE TABLE jobs (title TEXT, company TEXT, location TEXT, score INTEGER, date_scraped TEXT)")
     now = datetime.now(timezone.utc)
     conn.executemany(
-        "INSERT INTO jobs VALUES (?, ?, ?, ?)",
+        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?)",
         [
-            ("Senior Cloud Architect Remote", "Joveo AI", "Dubai, UAE", (now - timedelta(days=3)).isoformat()),
-            ("Technical Architect", "Inception", "Dubai, UAE", (now - timedelta(days=30)).isoformat()),
+            ("Senior Cloud Architect Remote", "Joveo AI", "Dubai, UAE", 60, (now - timedelta(days=3)).isoformat()),
+            ("Technical Architect", "Inception", "Dubai, UAE", 60, (now - timedelta(days=30)).isoformat()),
         ],
     )
     conn.commit()
 
-    keys = scraper.load_recent_duplicate_keys(conn, 7)
+    keys = scraper.load_recent_duplicate_keys(conn, 7, scraper.CONFIG["score_threshold"])
 
     repost = {"title": "Cloud Architect Remote", "company": "joveo ai", "location": "Abu Dhabi"}
     assert job_scoring.duplicate_key(repost) in keys
@@ -583,6 +583,42 @@ def test_the_duplicate_guard_is_seeded_from_the_database(tmp_path):
         allowed_locations=job_scoring.DEFAULT_MARKETS,
         seen_keys=keys,
     ) == "duplicate of a posting already seen"
+
+
+def test_a_row_he_never_saw_does_not_seed_the_duplicate_guard(tmp_path):
+    # evaluate_job stores every row it scores, knockouts at 0, so a seed with
+    # no score predicate suppressed postings he never received. "Solution
+    # Architect, SASE @ Check Point Software" was stored on 2026-04-26 with a
+    # bare "United Arab Emirates" location and knocked out on location; the
+    # same role for Abu Dhabi two nights later scored 65 and was skipped as a
+    # repost. Deduplication stops repeat sends; an unsent row cannot repeat.
+    import sqlite3
+
+    db = tmp_path / "jobs.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE jobs (title TEXT, company TEXT, location TEXT, score INTEGER, date_scraped TEXT)")
+    now = datetime.now(timezone.utc)
+    cutoff = scraper.CONFIG["score_threshold"]
+    conn.executemany(
+        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?)",
+        [
+            ("Solution Architect, SASE", "Check Point Software", "United Arab Emirates", 0, (now - timedelta(days=2)).isoformat()),
+            ("Backend Engineer", "Below The Line", "Dubai, UAE", cutoff - 1, (now - timedelta(days=1)).isoformat()),
+            ("Java Technical Lead", "IC Markets", "Dubai, UAE", cutoff, (now - timedelta(days=1)).isoformat()),
+        ],
+    )
+    conn.commit()
+
+    keys = scraper.load_recent_duplicate_keys(conn, 7, cutoff)
+
+    check_point = {"title": "Solution Architect, SASE", "company": "Check Point Software",
+                   "location": "Abu Dhabi, Abu Dhabi Emirate, United Arab Emirates"}
+    assert job_scoring.duplicate_key(check_point) not in keys
+    below = {"title": "Backend Engineer", "company": "Below The Line", "location": "Dubai, UAE"}
+    assert job_scoring.duplicate_key(below) not in keys
+    # At the cutoff it was sent, so its repost is the one to suppress.
+    sent = {"title": "Java Technical Lead", "company": "IC Markets", "location": "Dubai, UAE"}
+    assert job_scoring.duplicate_key(sent) in keys
 
 
 def test_knockout_catches_the_sponsorship_refusals_the_corpus_carries():

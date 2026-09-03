@@ -238,8 +238,8 @@ def is_job_seen(conn, job_id):
     return row is not None
 
 
-def load_recent_duplicate_keys(conn, max_age_days):
-    """Duplicate keys of every job stored inside the freshness window.
+def load_recent_duplicate_keys(conn, max_age_days, min_score):
+    """Duplicate keys of every job sent inside the freshness window.
 
     The spec's duplicate knockout is "same normalised title at the same
     company inside the freshness window", so the seen set has to outlive the
@@ -251,10 +251,20 @@ def load_recent_duplicate_keys(conn, max_age_days):
 
     date_scraped is the window, not date_posted: it is set on every row, and
     it is when the posting last competed for one of his daily slots.
+
+    Only rows at or above min_score seed the set. evaluate_job stores every
+    row it scores, knockouts included at 0, and a seed built from all of them
+    suppressed postings he never saw: `Solution Architect, SASE @ Check Point
+    Software` was stored on 2026-04-26 with a bare "United Arab Emirates"
+    location, knocked out on location at 0, and when the same role was posted
+    for Abu Dhabi two nights later — a 65 — it was skipped as a repost before
+    its description was even fetched. Deduplication exists to stop repeat
+    sends; a row that was never sent has nothing to suppress.
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
     rows = conn.execute(
-        "SELECT title, company, location FROM jobs WHERE date_scraped >= ?", (cutoff,)
+        "SELECT title, company, location FROM jobs WHERE date_scraped >= ? AND score >= ?",
+        (cutoff, min_score),
     ).fetchall()
     return {
         job_scoring.duplicate_key({"title": t, "company": c, "location": loc})
@@ -1716,8 +1726,8 @@ def main():
     # architect role three times in a single night, and "cloud architect
     # remote @ joveo ai" came back on nine consecutive nights with a fresh job
     # id each time; without the seed each night's copy takes a daily slot.
-    seen_titles = load_recent_duplicate_keys(conn, CONFIG["max_job_age_days"])
-    log.info(f"Duplicate guard seeded with {len(seen_titles)} titles from the last {CONFIG['max_job_age_days']} days")
+    seen_titles = load_recent_duplicate_keys(conn, CONFIG["max_job_age_days"], CONFIG["score_threshold"])
+    log.info(f"Duplicate guard seeded with {len(seen_titles)} sent titles from the last {CONFIG['max_job_age_days']} days")
 
     def evaluate_job(job):
         """Evaluate a single job: fetch details, filter, score. Returns job if it passes, None otherwise."""
