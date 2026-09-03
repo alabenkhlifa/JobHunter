@@ -98,9 +98,14 @@ _GENDER_MARKER = re.compile(r"\(?\b[mwfdx](?:\s*/\s*[mwfdx]){1,3}\b\)?")
 
 
 def duplicate_key(job):
-    """Identity of a posting for deduplication: normalised title plus company."""
+    """Identity of a posting for deduplication: normalised title, company, country.
+
+    The country, not the city: the same title at one company in Dubai and in
+    Riyadh is two jobs he could take, in two countries he chose separately,
+    so collapsing them would hide one. Dubai and Abu Dhabi are one repost.
+    """
     title = _GENDER_MARKER.sub(" ", str(job.get("title") or "").lower())
-    return f"{normalise_title(title)}|{_words(job.get('company'))}"
+    return f"{normalise_title(title)}|{_words(job.get('company'))}|{market_country(job.get('location'))}"
 
 
 # The five markets he chose, matched as substrings of the displayed location,
@@ -113,12 +118,42 @@ def duplicate_key(job):
 # Dammam and Khobar with it. "jiddah" is one board's spelling of Jeddah, on
 # 17 of the 4,580 corpus rows; every Riyadh row in the corpus spells it
 # "riyadh", so that one term covers all 989 of them.
-DEFAULT_MARKETS = (
-    "dubai", "abu dhabi", "jeddah", "jiddah", "riyadh",
-    "switzerland", "schweiz", "suisse", "svizzera",
-    "zurich", "zürich", "geneva", "genève", "genf",
-    "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
-)
+#
+# Grouped by country because duplicate_key needs the country a market is in;
+# DEFAULT_MARKETS is the same flat tuple every caller always read.
+MARKET_COUNTRIES = {
+    "uae": ("dubai", "abu dhabi"),
+    "ksa": ("jeddah", "jiddah", "riyadh"),
+    "ch": (
+        "switzerland", "schweiz", "suisse", "svizzera",
+        "zurich", "zürich", "geneva", "genève", "genf",
+        "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
+    ),
+}
+DEFAULT_MARKETS = tuple(term for terms in MARKET_COUNTRIES.values() for term in terms)
+
+# Names that place a location in a country without naming a chosen market.
+# They decide the country segment of duplicate_key only, never whether a
+# market is allowed: a bare "United Arab Emirates" is still knocked out. 862
+# of the 4,580 corpus rows name only the country or an unchosen city, and
+# without these the same Dubai title split between "uae" and "unknown".
+COUNTRY_NAMES = {
+    "uae": ("united arab emirates", "uae"),
+    "ksa": ("saudi arabia", "saudi"),
+}
+
+
+def market_country(location):
+    """The country a displayed location falls in, matched the way knockout matches markets.
+
+    "unknown" when nothing places it, so every undetermined location lands
+    in one bucket instead of fragmenting the duplicate key.
+    """
+    location = str(location or "").lower()
+    for country, terms in MARKET_COUNTRIES.items():
+        if any(term in location for term in terms + COUNTRY_NAMES.get(country, ())):
+            return country
+    return "unknown"
 
 
 def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset()):
@@ -126,6 +161,10 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset())
 
     Runs before any scoring. No number of matching keywords overturns one of
     these, which is the whole point of separating them from the score.
+
+    `seen_keys` is not passed by the scraper. It enforces the duplicate rule
+    in its collection loop, before the description fetch, so a repost costs
+    no network round trip. The parameter is for other callers and the tests.
     """
     reason = blocked_title(job)
     if reason:

@@ -455,3 +455,11 @@ def test_duplicate_key_collapses_a_repost_of_the_same_role():
     c = {"title": "Technical Architect", "company": "Different Co"}
     assert job_scoring.duplicate_key(a) == job_scoring.duplicate_key(b)
     assert job_scoring.duplicate_key(a) != job_scoring.duplicate_key(c)
+
+
+def test_duplicate_key_separates_the_same_role_in_two_countries():
+    dubai = job(title="Technical Architect", company="Inception", location="Dubai, United Arab Emirates")
+    riyadh = job(title="Technical Architect", company="Inception", location="Riyadh, Saudi Arabia")
+    abu_dhabi = job(title="Technical Architect", company="Inception", location="Abu Dhabi")
+    assert job_scoring.duplicate_key(dubai) != job_scoring.duplicate_key(riyadh)
+    assert job_scoring.duplicate_key(dubai) == job_scoring.duplicate_key(abu_dhabi)
