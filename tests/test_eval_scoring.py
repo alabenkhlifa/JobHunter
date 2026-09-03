@@ -86,3 +86,34 @@ def test_report_counts_the_interested_jobs_the_knockouts_removed(tmp_path):
     # The one that survived outranks the skip; the two knocked out score 0 and tie
     # or lose against the skipped job's real total.
     assert 0.0 < result["auc"] < 1.0
+
+
+def test_report_also_measures_auc_with_freshness_held_constant(tmp_path):
+    # Same job twice: the interested copy is undated (0.7), the skipped copy
+    # carries an old date (0.2). Raw AUC rewards "has no date"; the neutral
+    # figure must not.
+    job = {"title": "Software Architect", "company": "Acme", "location": "Dubai",
+           "tech_required": "java, spring boot, aws"}
+    path = _db(tmp_path, [
+        {**job, "status": "interested", "date_posted": ""},
+        {**job, "status": "skipped", "date_posted": "2020-01-01"},
+    ])
+    result = eval_scoring.report(path)
+    assert result["auc"] == 1.0
+    assert result["auc_freshness_neutral"] == 0.5
+
+
+def test_report_says_it_is_an_in_sample_measurement(tmp_path, capsys):
+    path = _db(tmp_path, [
+        {"title": "Software Architect", "company": "Acme", "location": "Dubai",
+         "status": "interested"},
+        {"title": "Office Manager", "company": "Globex", "location": "Dubai",
+         "status": "skipped"},
+    ])
+    result = eval_scoring.report(path)
+    note = result["in_sample"]
+    assert "same rows" in note and "Task 9" in note
+    eval_scoring._print(result)
+    out = capsys.readouterr().out
+    assert note in out
+    assert "auc_freshness_neutral" in out

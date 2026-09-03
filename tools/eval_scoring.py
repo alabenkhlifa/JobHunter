@@ -21,9 +21,21 @@ DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "jobs.db"
 MARKETS = ("dubai", "abu dhabi", "jeddah", "switzerland", "riyadh",
            "saudi", "united arab emirates", "sharjah")
 
-# Rows written by the test harness, not by the scraper. They would otherwise
-# dominate: one of them carries a hand-set score of 99.
+# Rows written by the test harness, not by the scraper. Their labels are not
+# his judgement, so they say nothing about ranking. This tool never reads the
+# score column, so the hand-set 99 one of them carries could only skew the
+# stored-score baseline, not this measurement.
 FAKE = ("JobHunter Test", "Example FinTech", "Example SaaS")
+
+# The rubric's constants (agency names, stack rings, band floors) were derived
+# from the same data/jobs.db these labels live in. There is no held-out split,
+# so the figure is a fit-set measurement and will read higher than the rubric
+# performs on jobs it has not seen.
+IN_SAMPLE_NOTE = (
+    "in-sample: measured on the only labelled rows that exist, and the "
+    "rubric's constants were derived from the same rows. Task 9 refits the "
+    "weights against an unbiased sample and must not be re-scored on these."
+)
 
 
 def auc(positives, negatives):
@@ -50,14 +62,29 @@ def load_labels(db_path=DEFAULT_DB):
     return interested, skipped
 
 
+def _freshness_neutral_total(result):
+    """The total with freshness pinned to its undated value.
+
+    In the labelled set most interested jobs carry no date (0.7) while many
+    skipped ones carry an old one (0.2), so raw AUC partly measures "has a
+    date". In production every job is fresh when scored, so that part of the
+    figure does not transfer. Knocked-out jobs stay at 0.
+    """
+    if not result["passed"]:
+        return 0
+    parts = dict(result["parts"], freshness=job_scoring.UNDATED_FRESHNESS)
+    return round(sum(parts[name] * job_scoring.WEIGHTS[name] for name in job_scoring.WEIGHTS))
+
+
 def report(db_path=DEFAULT_DB, *, now=None):
     """Score both label sets and return the comparison against the baseline.
 
-    A knocked-out job scores 0, so an interested job that trips a knockout
-    drags AUC down exactly as a badly ranked one would. `knocked_out_positives`
-    separates the two: it counts the interested jobs the knockouts removed, by
-    reason. `interested` carries each interested job's parts so a weak
-    dimension is visible rather than buried in the total.
+    `auc` is the raw figure; `auc_freshness_neutral` holds freshness constant
+    and is the one that predicts production. A knocked-out job scores 0, so an
+    interested job that trips a knockout drags AUC down exactly as a badly
+    ranked one would; `knocked_out_positives` counts those by reason.
+    `interested` carries each interested job's parts so a weak dimension is
+    visible rather than buried in the total.
     """
     interested, skipped = load_labels(db_path)
 
@@ -67,11 +94,15 @@ def report(db_path=DEFAULT_DB, *, now=None):
     scored_interested, scored_skipped = results(interested), results(skipped)
     positives = [r["total"] for r in scored_interested]
     negatives = [r["total"] for r in scored_skipped]
+    neutral_positives = [_freshness_neutral_total(r) for r in scored_interested]
+    neutral_negatives = [_freshness_neutral_total(r) for r in scored_skipped]
     above = sum(1 for r in scored_interested if job_scoring.sendable(r))
     knocked = Counter(r["reason"] for r in scored_interested if r["reason"])
     return {
         "auc": round(auc(positives, negatives), 3),
+        "auc_freshness_neutral": round(auc(neutral_positives, neutral_negatives), 3),
         "baseline_auc": BASELINE_AUC,
+        "in_sample": IN_SAMPLE_NOTE,
         "n_positive": len(positives),
         "n_negative": len(negatives),
         "above_cutoff": f"{above}/{len(positives)}",
@@ -90,7 +121,11 @@ def report(db_path=DEFAULT_DB, *, now=None):
 
 
 def _print(summary):
-    for key in ("auc", "baseline_auc", "n_positive", "n_negative", "above_cutoff"):
+    print(f"{'auc_freshness_neutral':22} {summary['auc_freshness_neutral']}   <- predicts production")
+    print(f"{'auc':22} {summary['auc']}   <- raw; freshness artifact included")
+    print(f"{'baseline_auc':22} {summary['baseline_auc']}")
+    print(f"{'in_sample':22} {summary['in_sample']}")
+    for key in ("n_positive", "n_negative", "above_cutoff"):
         print(f"{key:22} {summary[key]}")
     knocked = summary["knocked_out_positives"]
     print(f"{'knocked_out_positives':22} {sum(knocked.values())}")
