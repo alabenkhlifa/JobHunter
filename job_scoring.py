@@ -152,18 +152,31 @@ ADJACENT_STACK = (
 # less. The old scorer gave a flat +1 for any nice-to-have match at all.
 NICE_TO_HAVE_CREDIT = 0.4
 
-# Ordered: the first family whose pattern matches the normalised title wins, so
-# "full stack architect" resolves to full-stack rather than architect.
+# Ordered: the first family whose pattern matches the title wins, so "full
+# stack architect" resolves to full-stack rather than architect. "platform
+# architect" is not listed separately: "architect" claims it, which is right.
+# "architecture" earns the same rung: 16 of the 24 corpus titles that carry the
+# word without "architect" own the architecture ("Cloud Solution Architecture",
+# "Director IT Architecture"), against 8 that merely mention it.
 ROLE_FAMILIES = (
     (0.4, ("full stack", "fullstack", "full-stack")),
-    (1.0, ("architect", "tech lead", "technical lead", "software lead",
-           "lead software engineer", "lead backend", "backend lead")),
+    (1.0, ("architect", "architecture", "tech lead", "technical lead",
+           "software lead", "lead software engineer", "lead backend",
+           "backend lead")),
     (0.8, ("backend engineer", "backend developer", "backend software engineer",
-           "software engineer backend", "platform architect")),
+           "software engineer backend")),
     (0.5, ("engineering manager", "head of engineering", "vp engineering",
            "director of engineering", "cto")),
 )
 GENERIC_ROLE_FIT = 0.3
+
+# Whole words only, as the blocked families are matched. As a substring "cto"
+# sat inside "director", "sector" and "contractor", which put 75 sales and
+# management titles in the corpus on the CTO rung.
+_ROLE_PATTERNS = tuple(
+    (value, tuple(re.compile(rf"\b{re.escape(phrase)}{_INFLECTION}\b") for phrase in phrases))
+    for value, phrases in ROLE_FAMILIES
+)
 
 
 def _ring_coverage(terms, required, optional):
@@ -192,10 +205,13 @@ def stack_fit(job):
 
 def role_fit(job):
     """How close the title is to the work he wants, 0.0-1.0."""
+    # Both forms are searched: "Tech Lead" only survives in the raw title
+    # because normalising strips "lead", while "Software Engineer, Backend"
+    # only reads as "software engineer backend" once the comma is gone.
     title = normalise_title(job.get("title"))
     raw = str(job.get("title") or "").lower()
-    for value, phrases in ROLE_FAMILIES:
-        for phrase in phrases:
-            if phrase in title or phrase in raw:
+    for value, patterns in _ROLE_PATTERNS:
+        for pattern in patterns:
+            if pattern.search(title) or pattern.search(raw):
                 return value
     return GENERIC_ROLE_FIT

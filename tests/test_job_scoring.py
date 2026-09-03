@@ -159,3 +159,22 @@ def test_role_fit_ranks_the_families_the_way_he_does():
 def test_role_fit_reads_full_stack_before_architect():
     # "Full Stack Architect" contains "architect" but half the job is frontend.
     assert job_scoring.role_fit(job(title="Full Stack Architect")) == 0.4
+
+
+def test_role_fit_does_not_find_cto_inside_another_word():
+    assert job_scoring.role_fit(job(title="Customer Success Director")) < 0.5
+    assert job_scoring.role_fit(job(title="CTO")) == 0.5
+
+
+def test_role_fit_still_reads_the_titles_he_wants():
+    assert job_scoring.role_fit(job(title="Software Architect")) == 1.0
+    assert job_scoring.role_fit(job(title="Platform Architect")) == 1.0
+    assert job_scoring.role_fit(job(title="Full Stack Architect")) == 0.4
+
+
+def test_role_fit_reads_architecture_ownership_as_architect_work():
+    # 16 of the 24 corpus titles that say "architecture" without "architect"
+    # own the architecture, so the word alone earns the architect rung.
+    assert job_scoring.role_fit(job(title="Head of Architecture")) == 1.0
+    assert job_scoring.role_fit(job(title="Cloud Solution Architecture")) == 1.0
+    assert job_scoring.role_fit(job(title="Estimation Engineer - Architectural Opening Solutions")) == 0.3
