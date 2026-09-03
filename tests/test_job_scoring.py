@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import job_scoring
 
 
@@ -189,3 +191,38 @@ def test_stack_fit_treats_k8s_as_kubernetes():
     spelled = job(tech_required="java, spring boot, kubernetes")
     short = job(tech_required="java, spring boot, k8s")
     assert job_scoring.stack_fit(short) == job_scoring.stack_fit(spelled)
+
+
+def test_seniority_fit_peaks_in_his_band():
+    assert job_scoring.seniority_fit(job(min_experience=6)) == 1.0
+    assert job_scoring.seniority_fit(job(min_experience=3)) == 0.6
+    assert job_scoring.seniority_fit(job(min_experience=-1)) == 0.6
+
+
+def test_employer_fit_prefers_a_direct_employer_over_an_agency():
+    direct = job(company="Acme", company_website="https://acme.example", recruiter_company="")
+    agency = job(company="Acme", recruiter_company="Dicetek LLC")
+    unknown = job(company="Acme", company_website="", recruiter_company="")
+    assert job_scoring.employer_fit(direct) == 1.0
+    assert job_scoring.employer_fit(agency) == 0.3
+    assert job_scoring.employer_fit(unknown) == 0.6
+
+
+def test_employer_fit_reads_an_aggregator_note_as_an_agency():
+    reposted = job(credibility_notes="posted via TalentPool aggregator")
+    assert job_scoring.employer_fit(reposted) == 0.3
+
+
+def test_freshness_decays_over_the_seven_day_window():
+    now = datetime(2026, 9, 3, tzinfo=timezone.utc)
+
+    def posted(days):
+        return job(date_posted=(now - timedelta(days=days)).isoformat())
+
+    assert job_scoring.freshness(posted(1), now=now) == 1.0
+    assert job_scoring.freshness(posted(3), now=now) == 0.7
+    assert job_scoring.freshness(posted(6), now=now) == 0.4
+
+
+def test_freshness_of_an_undated_posting_is_the_middle_band():
+    assert job_scoring.freshness(job(date_posted="")) == 0.7

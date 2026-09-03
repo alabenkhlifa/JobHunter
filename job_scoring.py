@@ -5,6 +5,7 @@ module imports nothing from scraper.py so it can be tested without a database.
 """
 
 import re
+from datetime import datetime, timezone
 
 # Words that describe how senior a role is, not what the role is. Stripping
 # them collapses "Senior DevOps Manager" and "Lead DevOps" onto one family, so
@@ -239,3 +240,65 @@ def role_fit(job):
             if pattern.search(title) or pattern.search(raw):
                 return value
     return GENERIC_ROLE_FIT
+
+
+# He has 7+ years. A posting asking 5-8 is aimed at him; one asking 3 is aimed
+# lower and usually pays lower. Above 8 was already knocked out.
+#
+# Extracted min_experience takes the smallest year figure anywhere in the text,
+# so it understates: "5+ years backend, 2+ years Kubernetes" records 2. That
+# is why this dimension is worth only 15 of 100.
+SENIORITY_BANDS = ((5, 8, 1.0), (3, 4, 0.6), (0, 2, 0.3))
+UNSTATED_SENIORITY = 0.6
+
+# credibility_notes is written only by scraper.py, from a fixed set of phrases.
+# "posted by agency/aggregator" and "posted via <company> aggregator" are the
+# two that name an agency employer; both carry "agency" or "aggregator".
+AGENCY_MARKERS = ("aggregator", "agency", "recruitment", "staffing", "consultancy")
+
+FRESHNESS_BANDS = ((0, 2, 1.0), (3, 4, 0.7), (5, 7, 0.4))
+UNDATED_FRESHNESS = 0.7
+
+
+def seniority_fit(job):
+    """How well the years asked for match the years he has, 0.0-1.0."""
+    years = job.get("min_experience", -1)
+    if not isinstance(years, int) or years < 0:
+        return UNSTATED_SENIORITY
+    for low, high, value in SENIORITY_BANDS:
+        if low <= years <= high:
+            return value
+    return 0.3
+
+
+def employer_fit(job):
+    """Whether the employer is hiring directly, 0.0-1.0."""
+    company = str(job.get("company") or "").strip().lower()
+    recruiter = str(job.get("recruiter_company") or "").strip().lower()
+    notes = str(job.get("credibility_notes") or "").lower()
+
+    if recruiter and recruiter != company:
+        return 0.3
+    if any(marker in notes for marker in AGENCY_MARKERS):
+        return 0.3
+    if str(job.get("company_website") or "").strip():
+        return 1.0
+    return 0.6
+
+
+def freshness(job, *, now=None):
+    """How recently it was posted, 0.0-1.0."""
+    raw = str(job.get("date_posted") or "").strip()
+    if not raw:
+        return UNDATED_FRESHNESS
+    try:
+        posted = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return UNDATED_FRESHNESS
+    if posted.tzinfo is None:
+        posted = posted.replace(tzinfo=timezone.utc)
+    days = ((now or datetime.now(timezone.utc)) - posted).days
+    for low, high, value in FRESHNESS_BANDS:
+        if low <= days <= high:
+            return value
+    return 0.2
