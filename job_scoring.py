@@ -5,7 +5,6 @@ module imports nothing from scraper.py so it can be tested without a database.
 """
 
 import re
-from datetime import datetime, timezone
 
 # Words that describe how senior a role is, not what the role is. Stripping
 # them collapses "Senior DevOps Manager" and "Lead DevOps" onto one family, so
@@ -35,13 +34,16 @@ LITERAL_BLOCKS = (
     "senior cloud architect", "senior lead software engineer",
 )
 
-_WORD = re.compile(r"[a-z0-9+#.]+")
+_WORD = re.compile(r"[a-z0-9+#.-]+")
 
 
 def normalise_title(title):
     """Lowercase a title and drop the words that only describe seniority."""
     words = _WORD.findall(str(title or "").lower())
-    kept = [w for w in words if w not in SENIORITY_WORDS]
+    # "Sr." and "Front-End" must land on the same tokens as "Sr" and "Front-End",
+    # so drop a trailing dot and any hyphen that is not joining two words.
+    tokens = [w.strip("-").rstrip(".") for w in words]
+    kept = [w for w in tokens if w and w not in SENIORITY_WORDS]
     return " ".join(kept)
 
 
