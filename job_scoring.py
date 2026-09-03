@@ -221,9 +221,11 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset())
     Runs before any scoring. No number of matching keywords overturns one of
     these, which is the whole point of separating them from the score.
 
-    `seen_keys` is not passed by the scraper. It enforces the duplicate rule
-    in its collection loop, before the description fetch, so a repost costs
-    no network round trip. The parameter is for other callers and the tests.
+    `seen_keys` is not passed by the scraper. It enforces the same rule in
+    its collection loop, before the description fetch, so a repost costs no
+    network round trip — over a set seeded from the database across the
+    freshness window, not one that dies with the process. The parameter is
+    for other callers and the tests.
     """
     reason = blocked_title(job)
     if reason:

@@ -238,6 +238,30 @@ def is_job_seen(conn, job_id):
     return row is not None
 
 
+def load_recent_duplicate_keys(conn, max_age_days):
+    """Duplicate keys of every job stored inside the freshness window.
+
+    The spec's duplicate knockout is "same normalised title at the same
+    company inside the freshness window", so the seen set has to outlive the
+    process. Built empty in main() it only caught the 153 corpus rows that
+    repeat inside a single scrape day; the other 899 collapsing rows are the
+    same role reposted on a later night under a fresh job id, which
+    is_job_seen cannot recognise either. Seeded from the database, a repost
+    of a title already stored inside max_job_age_days is suppressed instead.
+
+    date_scraped is the window, not date_posted: it is set on every row, and
+    it is when the posting last competed for one of his daily slots.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    rows = conn.execute(
+        "SELECT title, company, location FROM jobs WHERE date_scraped >= ?", (cutoff,)
+    ).fetchall()
+    return {
+        job_scoring.duplicate_key({"title": t, "company": c, "location": loc})
+        for t, c, loc in rows
+    }
+
+
 def init_application_tracking(conn):
     """Create the application-state table used after a job becomes interesting."""
     conn.execute(
@@ -1687,9 +1711,13 @@ def main():
                 "pending_jobs": [],  # jobs fetched but not yet evaluated
             }
 
-    # Titles already stored this run. Inception posted one architect role three
-    # times in a single night; three rows would take three of the daily slots.
-    seen_titles = set()
+    # Titles already stored inside the freshness window, seeded from the
+    # database so the rule survives the process. Inception posted one
+    # architect role three times in a single night, and "cloud architect
+    # remote @ joveo ai" came back on nine consecutive nights with a fresh job
+    # id each time; without the seed each night's copy takes a daily slot.
+    seen_titles = load_recent_duplicate_keys(conn, CONFIG["max_job_age_days"])
+    log.info(f"Duplicate guard seeded with {len(seen_titles)} titles from the last {CONFIG['max_job_age_days']} days")
 
     def evaluate_job(job):
         """Evaluate a single job: fetch details, filter, score. Returns job if it passes, None otherwise."""

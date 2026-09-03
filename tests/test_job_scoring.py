@@ -549,3 +549,37 @@ def test_only_the_three_widened_families_can_be_rescued():
     for title in ("Cloud DevOps Engineer", "Software QA Engineer",
                   "Backend Data Engineer", "Cloud Security Architect"):
         assert job_scoring.blocked_title({"title": title}), title
+
+
+def test_the_duplicate_guard_is_seeded_from_the_database(tmp_path):
+    # The spec's rule is "inside the freshness window", not "inside this
+    # process". Built empty in main() it caught only the reposts that arrive
+    # in one run; "cloud architect remote @ joveo ai" came back on nine
+    # consecutive nights, each with a fresh job id, and each night sent.
+    import sqlite3
+
+    db = tmp_path / "jobs.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE jobs (title TEXT, company TEXT, location TEXT, date_scraped TEXT)")
+    now = datetime.now(timezone.utc)
+    conn.executemany(
+        "INSERT INTO jobs VALUES (?, ?, ?, ?)",
+        [
+            ("Senior Cloud Architect Remote", "Joveo AI", "Dubai, UAE", (now - timedelta(days=3)).isoformat()),
+            ("Technical Architect", "Inception", "Dubai, UAE", (now - timedelta(days=30)).isoformat()),
+        ],
+    )
+    conn.commit()
+
+    keys = scraper.load_recent_duplicate_keys(conn, 7)
+
+    repost = {"title": "Cloud Architect Remote", "company": "joveo ai", "location": "Abu Dhabi"}
+    assert job_scoring.duplicate_key(repost) in keys
+    # Outside the window it stops counting, so a role can be re-offered.
+    stale = {"title": "Technical Architect", "company": "Inception", "location": "Dubai, UAE"}
+    assert job_scoring.duplicate_key(stale) not in keys
+    assert job_scoring.knockout(
+        dict(repost, description="", min_experience=6),
+        allowed_locations=job_scoring.DEFAULT_MARKETS,
+        seen_keys=keys,
+    ) == "duplicate of a posting already seen"
