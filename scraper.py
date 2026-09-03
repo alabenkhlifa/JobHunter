@@ -1218,6 +1218,31 @@ NICE_TO_HAVE_HEADERS = re.compile(
 )
 
 
+# Two configured technologies are spelled the same as an ordinary English word,
+# and a whole-word match cannot tell them apart. Each entry lists the phrases in
+# which the word is NOT the technology; an occurrence inside one of them does
+# not count, and every other occurrence still does.
+#
+# Per occurrence, not per description, which is the whole point: a Go posting
+# that also says "go to market" still records Go from the sentence that names
+# the language.
+#
+# Measured, not guessed. "REST" was recorded for a building-architecture
+# posting whose only "rest" is "projects through the rest of the year"; the
+# corpus holds 19 such rows, plus 10 more from Qualcomm's "rest assured that"
+# boilerplate. "REST Assured" without "that" is the Java test library and is
+# left alone. The English "go" is the bigger one: of 657 whole-word hits, 205
+# are "go to (market)", 74 "go live", 30 "go beyond" and 15 "go-getter",
+# clearing 90 rows that record Go and never mention the language.
+ENGLISH_WORD_USES = {
+    "rest": re.compile(r"\bthe[\s-]+rest[\s-]+of\b|\brest[\s-]+assured[\s-]+that\b", re.IGNORECASE),
+    "go": re.compile(
+        r"\bgo(?=[\s-]+(?:to|live|beyond|further|through|into|getter|getters|hand|the)\b)",
+        re.IGNORECASE,
+    ),
+}
+
+
 def _find_tech_in_text(text):
     """Find all tech terms present in a text block."""
     found = []
@@ -1230,8 +1255,16 @@ def _find_tech_in_text(text):
         parts = re.split(r"[\s-]+", term.strip())
         term_pattern = r"[\s-]+".join(re.escape(part) for part in parts)
         pattern = rf"(?<!\w){term_pattern}(?!\w)"
-        if re.search(pattern, text, flags=re.IGNORECASE):
-            found.append(term)
+        prose = ENGLISH_WORD_USES.get(term)
+        if prose is None:
+            if re.search(pattern, text, flags=re.IGNORECASE):
+                found.append(term)
+            continue
+        prose_spans = [m.span() for m in prose.finditer(text)]
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            if not any(start <= match.start() < end for start, end in prose_spans):
+                found.append(term)
+                break
     return found
 
 

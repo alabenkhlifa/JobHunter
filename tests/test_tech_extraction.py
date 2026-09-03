@@ -69,3 +69,42 @@ def test_extract_tech_keywords_tracks_architecture_platform_requirements():
     }.issubset(required)
     assert {"ai model operations", "mlops", "llmops"}.issubset(nice_to_have)
     assert "rust" not in required
+
+
+def test_find_tech_ignores_rest_used_as_an_english_word():
+    # "projects through the rest of the year" recorded tech_required = 'rest'
+    # on a building-architecture posting. 19 corpus rows read the same way.
+    assert "rest" not in scraper._find_tech_in_text(
+        "A secured pipeline of projects through the rest of the year."
+    )
+    assert "rest" not in scraper._find_tech_in_text(
+        "Rest assured that we consider every applicant fairly."
+    )
+
+
+def test_find_tech_still_reads_rest_as_a_technology():
+    for text in ("Design and build REST APIs.", "Experience with REST services.",
+                 "You will own our REST endpoints.", "SOAP/REST integration patterns."):
+        assert "rest" in scraper._find_tech_in_text(text), text
+
+
+def test_find_tech_reads_rest_per_occurrence_not_per_description():
+    # One English use must not veto a real one in the same description.
+    found = scraper._find_tech_in_text(
+        "Through the rest of the year we will ship REST APIs in Java."
+    )
+    assert "rest" in found
+
+
+def test_find_tech_ignores_go_used_as_an_english_word():
+    # 205 of the 657 whole-word "go" hits in the corpus are "go to market".
+    for text in ("Own the go-to-market plan.", "Support go live readiness.",
+                 "We go beyond what customers expect.", "A go-getter attitude."):
+        assert "go" not in scraper._find_tech_in_text(text), text
+
+
+def test_find_tech_still_reads_go_as_a_language_next_to_the_english_word():
+    found = scraper._find_tech_in_text(
+        "Own the go-to-market plan; the services themselves are written in Go."
+    )
+    assert "go" in found
