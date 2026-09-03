@@ -85,9 +85,10 @@ def test_assess_company_recruiter_credibility_penalizes_agencies_and_aggregators
     assert "aggregated job-board source" in notes
 
 
-def test_score_job_includes_credibility_adjustment_in_breakdown():
+def test_score_job_scores_an_agency_posting_down_on_the_employer_dimension():
     job = {
         "title": "Lead Backend Engineer",
+        "location": "Dubai, United Arab Emirates",
         "tech_required": "Java AWS",
         "tech_nice_to_have": "",
         "company": "TALENTMATE",
@@ -95,6 +96,7 @@ def test_score_job_includes_credibility_adjustment_in_breakdown():
     }
 
     score, breakdown = scraper.score_job(job)
+    direct_score, _ = scraper.score_job({**job, "company": "ExampleCo"})
 
-    assert score < 0 or any("credibility(-3" in item for item in breakdown)
-    assert any("credibility(-3" in item for item in breakdown)
+    assert any(item.startswith("employer 0.30x") for item in breakdown)
+    assert score < direct_score

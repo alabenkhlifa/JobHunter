@@ -1,6 +1,6 @@
 ---
 name: job-hunter
-description: Automated job search agent for the Dubai, Abu Dhabi, Jeddah and Switzerland markets.
+description: Automated job search agent for the Dubai, Abu Dhabi, Jeddah, Riyadh and Switzerland markets.
   Scrapes LinkedIn and Foundit Gulf, scores matches against a
   Software Architect / Tech Lead / Senior Engineer backend profile, and notifies via Telegram.
 triggers:
@@ -15,8 +15,8 @@ triggers:
 
 ## Overview
 This skill automates job searching for Software Architect / Cloud Architect /
-Tech Lead / Senior Engineer backend roles in Dubai, Abu Dhabi, Jeddah and
-Switzerland. It scrapes LinkedIn (guest API) and
+Tech Lead / Senior Engineer backend roles in Dubai, Abu Dhabi, Jeddah, Riyadh
+and Switzerland. It scrapes LinkedIn (guest API) and
 Foundit Gulf (JSON API), stores keyword-qualified candidates, then a Hermes
 cron job reviews them with an LLM before suggesting offers.
 
@@ -108,8 +108,8 @@ A confirmed role-family variant is a complete candidate-approved presentation, n
 
 ## Scraping Strategy
 The scraper uses **breadth-first round-robin** across one bucket per
-scraper/region pair (8 today: LinkedIn and Foundit x Dubai, Abu Dhabi, Jeddah,
-Switzerland):
+scraper/region pair (10 today: LinkedIn and Foundit x Dubai, Abu Dhabi, Jeddah,
+Riyadh, Switzerland):
 - Collects up to **25 matching jobs per bucket** (`min_matching_jobs`)
 - Foundit is a Gulf board, so its Switzerland bucket returns nothing and exits
   after the first empty page
@@ -124,19 +124,25 @@ Switzerland):
 
 ### Regions
 Each region is a search string plus a whitelist of displayed locations
-(`allowed_locations`); anything else is dropped even if the board returns it.
-- **Dubai**, **Abu Dhabi**, **Jeddah** — searched by city
+(`allowed_locations`, read from `job_scoring.DEFAULT_MARKETS`); anything else
+is dropped even if the board returns it.
+- **Dubai**, **Abu Dhabi**, **Jeddah**, **Riyadh** — searched by city. The
+  boards also return Sharjah, a bare "United Arab Emirates", and other Saudi
+  cities such as Dammam for these searches; those are dropped, since they are
+  not markets he chose. Jeddah and Riyadh are the two Saudi cities he did
+  choose; the country itself is not a market
 - **Switzerland** — searched country-wide. Any displayed location naming the
   country passes, so Winterthur and Ticino are kept as well as Zurich; the city
   names in `allowed_locations` only catch postings that omit the country
 
 ## Scoring System
-Jobs are scored by matching keywords in title + company + full description:
-- **High (+3)**: architect, aws, azure, spring boot, microservices, tech lead,
-  team lead, java, kotlin, backend
-- **Medium (+1)**: docker, ci/cd, kubernetes, terraform, cloud, .net,
-  typescript, devops, infrastructure
-- **Threshold**: score >= 15 to qualify as a match (`score_threshold`)
+`job_scoring.evaluate` runs the knockouts first (blocked title families, junior
+titles, outside the markets, more than `max_experience` years, an explicit
+refusal to sponsor), then scores what survives 0-100 on five weighted
+dimensions: stack 35, role 30, seniority 15, employer 12, freshness 8.
+- **Threshold**: score >= 45 to qualify as a match (`score_threshold`). A
+  knocked-out job scores 0 and its breakdown names the reason
+- **Bands**: excellent 75+, good 60+, normal 45+; below 45 is never sent
 
 ## Filters (applied before scoring)
 1. **Excluded titles**: test engineer, qa, sdet, staff engineer, staff

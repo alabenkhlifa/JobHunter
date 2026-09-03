@@ -109,6 +109,50 @@ role fit respectively.
 Bands, used only for display: excellent ≥75 · good 60–74 · normal 45–59 ·
 below 45 is never sent.
 
+## The blocking question for Task 9
+
+Stack fit, the heaviest dimension at 35 of 100 points, does not measure what
+this table says it measures. `_ring_coverage` asks what fraction of each ring
+the posting names, so it rises with the **number of technologies a posting
+lists**, not with how central his stack is to the job. A posting that names
+twenty technologies covers more of every ring than one that names three,
+whatever those technologies are.
+
+Measured over all 4,580 corpus rows, by the count of terms in `tech_required`:
+
+| Terms listed | Rows | Mean stack fit |
+|---|---|---|
+| 0–3 | 3,301 | 0.04 |
+| 4–7 | 816 | 0.23 |
+| 8–11 | 265 | 0.38 |
+| 12–15 | 144 | 0.54 |
+| 16–19 | 34 | 0.73 |
+| 20–23 | 20 | 0.90 |
+
+The dimension is close to a monotone function of list length. `Full Stack
+Architect @ Xad Technologies` is the worked example: it lists 20 technologies
+— Go, C#, Node, GraphQL, Google Cloud and the rest, with Java one item among
+them — scores stack 0.95, and totals **78, band "excellent"**, where
+acceptance criterion 3 demands under 45.
+
+Task 6 measured the same thing from the other end: stack fit is the *weakest*
+single predictor at AUC 0.585, and removing the dimension outright raises
+overall AUC from 0.721 to 0.756.
+
+This is deliberately **not** fixed by hand. Reweighting or rewriting stack fit
+is exactly the question Task 9's refit exists to settle, and tuning it now
+against ten biased labels would replace one guess with another. Two
+consequences follow, and they are the reason this section is in the spec
+rather than in a ledger line:
+
+1. **The nightly digest must not ship on the current weights.** Stage 1 will
+   pass postings whose only qualification is a long technology list, and they
+   will reach a real person's Telegram ahead of the roles he wants.
+2. **Task 9 is not free to skip the dimension.** Its refit has to decide
+   whether stack fit is repaired (count coverage of the ring he is hired for,
+   not of every ring), reweighted, or dropped — and to report which, against
+   the ratings, not against this corpus.
+
 ## Stage 2: the AI review contract
 
 Input: every survivor scoring ≥45, capped at 40 per night. Each carries
@@ -233,9 +277,17 @@ The rubric is accepted when, on the 10 interested and 34 skipped jobs:
 2. At least 8 of the 10 interested jobs reach the stage-1 cutoff of 45
    and so are seen by the AI at all, against 2 of 10 that clear today's
    threshold of 15.
-3. `software engineer @ Kanz` and `Full Stack Architect @ Xad` score
-   below 45, and `DevOps Manager @ MODSOFT` is knocked out before
-   scoring.
+3. `DevOps Manager @ MODSOFT` is knocked out before scoring. **Met** —
+   the devops family block catches it.
+
+   This criterion also asked that `software engineer @ Kanz` and
+   `Full Stack Architect @ Xad` score below 45. **Neither is met.** Kanz
+   scores exactly 45, which is the cutoff, so it would be sent; Xad scores
+   78 and bands "excellent". Both fail for the reason set out in "The
+   blocking question for Task 9" above. The criterion is recorded as unmet
+   rather than quietly relaxed or met by hand-tuning stack fit on ten
+   biased labels: Task 9's refit is what has to clear it, and until it does
+   the rubric is not accepted and the digest does not ship.
 
 The labelled set is small and was produced under the old scorer, so it
 can confirm a rubric is broken but cannot prove one is good. Treat it as

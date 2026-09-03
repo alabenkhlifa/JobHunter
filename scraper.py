@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import job_scoring
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 CONFIG = {
@@ -39,40 +41,15 @@ CONFIG = {
         "Dubai": ["Dubai"],
         "Abu Dhabi": ["Abu Dhabi"],
         "Jeddah": ["Jeddah"],
+        "Riyadh": ["Riyadh"],
         # One country-wide query rather than a city list: LinkedIn resolves
         # "Switzerland" fine, and five city generators would multiply the
         # scrape time for the same postings.
         "Switzerland": ["Switzerland"],
     },
-    "allowed_locations": [
-        "dubai", "abu dhabi", "jeddah",
-        "switzerland", "schweiz", "suisse", "svizzera",
-        "zurich", "zürich", "geneva", "genève", "genf",
-        "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
-    ],
-    "scoring": {
-        "high": {
-            "weight": 3,
-            "terms": [
-                "architect", "aws", "azure",
-                "spring boot", "microservices", "tech lead", "team lead", "senior engineer", "senior software engineer", "senior backend engineer", "java", "kotlin", "backend",
-            ],
-        },
-        "medium": {
-            "weight": 1,
-            "terms": [
-                "docker", "ci/cd", "cicd", "kubernetes", "terraform",
-                "cloud", ".net", "typescript",
-            ],
-        },
-    },
-    "penalty_terms": {
-        "weight": -3,
-        "terms": [
-            "junior", "intern", "entry level", "entry-level",
-            "graduate", "fresh graduate", "trainee",
-        ],
-    },
+    # Defined once, in job_scoring, so the scraper filters on the same list
+    # the rubric knocks out on and tools/eval_scoring.py measures with.
+    "allowed_locations": list(job_scoring.DEFAULT_MARKETS),
     "exclude_terms": [
         "test engineer", "qa engineer", "quality assurance",
         "staff software engineer", "staff engineer", "manual test", "sdet",
@@ -134,7 +111,9 @@ CONFIG = {
     ],
     "max_experience": 8,
     "max_job_age_days": 7,
-    "score_threshold": 15,
+    # One number, the rubric's: a profile config may override it, but the
+    # default it starts from must not drift from job_scoring.SEND_CUTOFF.
+    "score_threshold": job_scoring.SEND_CUTOFF,
     # Per scraper/region bucket. Keep this high so one good match does not stop
     # the scrape early; the LLM review can rank/reject multiple good offers.
     "min_matching_jobs": 25,
@@ -257,6 +236,53 @@ def init_db():
 def is_job_seen(conn, job_id):
     row = conn.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone()
     return row is not None
+
+
+def load_recent_duplicate_keys(conn, max_age_days, min_score):
+    """Duplicate keys of every job sent inside the freshness window.
+
+    The spec's duplicate knockout is "same normalised title at the same
+    company inside the freshness window", so the seen set has to outlive the
+    process. Built empty in main() it only caught the 153 corpus rows that
+    repeat inside a single scrape day; the other 899 collapsing rows are the
+    same role reposted on a later night under a fresh job id, which
+    is_job_seen cannot recognise either. Seeded from the database, a repost
+    of a title already stored inside max_job_age_days is suppressed instead.
+
+    date_scraped is the window, not date_posted: it is set on every row, and
+    it is when the posting last competed for one of his daily slots.
+
+    Only rows at or above min_score seed the set. evaluate_job stores every
+    row it scores, knockouts included at 0, and a seed built from all of them
+    suppressed postings he never saw: `Solution Architect, SASE @ Check Point
+    Software` was stored on 2026-04-26 with a bare "United Arab Emirates"
+    location, knocked out on location at 0, and when the same role was posted
+    for Abu Dhabi two nights later — a 65 — it was skipped as a repost before
+    its description was even fetched. Deduplication exists to stop repeat
+    sends; a row that was never sent has nothing to suppress.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    rows = conn.execute(
+        "SELECT title, company, location FROM jobs WHERE date_scraped >= ? AND score >= ?",
+        (cutoff, min_score),
+    ).fetchall()
+    return {
+        job_scoring.duplicate_key({"title": t, "company": c, "location": loc})
+        for t, c, loc in rows
+    }
+
+
+def remember_if_sent(seen_titles, title_key, score, min_score):
+    """Record a title for the duplicate guard only once it has been sent.
+
+    The in-run add and load_recent_duplicate_keys must apply the same rule:
+    deduplication suppresses repeat sends, and nothing below the cutoff has a
+    send to repeat. Recording every scored key meant that within one night a
+    copy knocked out at 0 killed a later sendable copy of the same role before
+    its description was fetched - the seed's defect, with a one-night window.
+    """
+    if score >= min_score:
+        seen_titles.add(title_key)
 
 
 def init_application_tracking(conn):
@@ -1396,37 +1422,27 @@ def is_excluded(job):
 
 
 def score_job(job):
-    """Score a job based on required skills and title, with a flat +1 for nice-to-have matches."""
-    required_text = f"{job['title']} {job.get('tech_required', '')}".lower()
-    nice_text = job.get("tech_nice_to_have", "").lower()
-    title = job["title"].lower()
-    score = 0
-    breakdown = []
+    """Score a job 0-100 with the rubric in job_scoring.
 
-    for tier_name, tier in CONFIG["scoring"].items():
-        for term in tier["terms"]:
-            t = term.lower()
-            if t in required_text:
-                score += tier["weight"]
-                breakdown.append(f"{term}(+{tier['weight']})")
-            elif t in nice_text:
-                score += 1
-                breakdown.append(f"{term}(+1 nice)")
+    Signature and return shape are unchanged: every caller, save_job included,
+    still receives (score, breakdown-lines). The send gate stays where it was,
+    score against CONFIG["score_threshold"]; nothing here reads `passed` or
+    `band` to decide anything.
+    """
+    result = job_scoring.evaluate(
+        job,
+        allowed_locations=tuple(loc.lower() for loc in CONFIG.get("allowed_locations", ())),
+        max_experience=CONFIG.get("max_experience", 8),
+    )
+    if result["reason"]:
+        return 0, [f"knocked out: {result['reason']}"]
 
-    credibility_score, credibility_notes = assess_company_recruiter_credibility(job)
-    if credibility_score:
-        score += credibility_score
-        sign = "+" if credibility_score > 0 else ""
-        breakdown.append(f"credibility({sign}{credibility_score}: {'; '.join(credibility_notes)})")
-
-    # Apply penalty terms against title
-    penalty = CONFIG["penalty_terms"]
-    for term in penalty["terms"]:
-        if term.lower() in title:
-            score += penalty["weight"]
-            breakdown.append(f"{term}({penalty['weight']})")
-
-    return score, breakdown
+    breakdown = [
+        f"{name} {result['parts'][name]:.2f}x{job_scoring.WEIGHTS[name]}"
+        for name in job_scoring.WEIGHTS
+    ]
+    breakdown.append(f"band {result['band']}")
+    return result["total"], breakdown
 
 
 # ── Telegram ─────────────────────────────────────────────────────────────────
@@ -1718,9 +1734,21 @@ def main():
                 "pending_jobs": [],  # jobs fetched but not yet evaluated
             }
 
+    # Titles already stored inside the freshness window, seeded from the
+    # database so the rule survives the process. Inception posted one
+    # architect role three times in a single night, and "cloud architect
+    # remote @ joveo ai" came back on nine consecutive nights with a fresh job
+    # id each time; without the seed each night's copy takes a daily slot.
+    seen_titles = load_recent_duplicate_keys(conn, CONFIG["max_job_age_days"], CONFIG["score_threshold"])
+    log.info(f"Duplicate guard seeded with {len(seen_titles)} sent titles from the last {CONFIG['max_job_age_days']} days")
+
     def evaluate_job(job):
         """Evaluate a single job: fetch details, filter, score. Returns job if it passes, None otherwise."""
         if is_job_seen(conn, job["id"]):
+            return None
+        title_key = job_scoring.duplicate_key(job)
+        if title_key in seen_titles:
+            log.info(f"Skipped (repost of a title already stored): {job['title']} @ {job['company']}")
             return None
         if is_excluded(job):
             log.debug(f"Excluded: {job['title']}")
@@ -1778,6 +1806,7 @@ def main():
         score, breakdown = score_job(job)
         job["score"] = score
         job["score_breakdown"] = ", ".join(breakdown)
+        remember_if_sent(seen_titles, title_key, score, CONFIG["score_threshold"])
         save_job(conn, job)
         return job
 
