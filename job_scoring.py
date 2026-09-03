@@ -509,9 +509,10 @@ def role_fit(job):
 # He has 7+ years. A posting asking 5-8 is aimed at him; one asking 3 is aimed
 # lower and usually pays lower. Above 8 was already knocked out.
 #
-# Extracted min_experience takes the smallest year figure anywhere in the text,
-# so it understates: "5+ years backend, 2+ years Kubernetes" records 2. That
-# is why this dimension is worth only 15 of 100.
+# Extracted min_experience reads the headline figure, not the smallest one:
+# "5+ years backend, 2+ years Kubernetes" records 5. It used to record 2, and
+# that understatement is the reason this dimension is worth only 15 of 100.
+# The weight was fitted while it understated, so it is now conservative.
 SENIORITY_BANDS = ((5, 8, 1.0), (3, 4, 0.6), (0, 2, 0.3))
 UNSTATED_SENIORITY = 0.6
 

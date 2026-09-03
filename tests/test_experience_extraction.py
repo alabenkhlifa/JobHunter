@@ -55,11 +55,79 @@ def test_contract_length_is_not_a_requirement():
     assert scraper.extract_min_experience(text) == 6
 
 
-def test_takes_the_lowest_requirement_stated():
+def test_headline_bar_beats_a_leadership_sub_requirement():
+    text = (
+        "Experience: 5-8 years in technical support, with at least 2 years "
+        "in a leadership or senior role."
+    )
+
+    assert scraper.extract_min_experience(text) == 5
+
+
+def test_headline_bar_beats_a_technology_sub_requirement():
+    text = "5+ years backend development, 2+ years with Kubernetes"
+
+    assert scraper.extract_min_experience(text) == 5
+
+
+def test_range_low_end_is_the_bar_when_a_narrower_role_follows():
+    text = "8-12 years of experience, including 3 years in a lead role"
+
+    assert scraper.extract_min_experience(text) == 8
+
+
+def test_a_lone_stated_minimum_is_read_as_written():
+    assert scraper.extract_min_experience("Minimum 7 years of experience") == 7
+
+
+def test_takes_the_headline_requirement_not_the_narrower_one():
     text = "8+ years of total experience, with 4+ years in AI/ML Engineering roles"
 
-    assert scraper.extract_min_experience(text) == 4
+    assert scraper.extract_min_experience(text) == 8
+
+
+def test_preferred_years_do_not_raise_the_bar():
+    text = (
+        "Required Experience Minimum: 3 years of experience in an administrative "
+        "role. Preferred: 5+ years of experience supporting senior executives."
+    )
+
+    assert scraper.extract_min_experience(text) == 3
+
+
+def test_a_leading_company_boast_does_not_become_the_bar():
+    text = (
+        "10+ Years of Impact: Started with a simple idea. "
+        "Requirements: 6+ years of experience in software engineering."
+    )
+
+    assert scraper.extract_min_experience(text) == 6
 
 
 def test_unstated_stays_unstated():
     assert scraper.extract_min_experience("We are hiring a backend engineer in Dubai.") == -1
+
+
+def test_a_leading_company_record_is_not_a_requirement():
+    text = (
+        "With over 30 years of experience, Alnafitha IT has successfully completed "
+        "more than 4,000 projects."
+    )
+
+    assert scraper.extract_min_experience(text) == -1
+
+
+def test_an_organisations_own_years_are_not_a_requirement():
+    text = (
+        "CFI Financial Group is an award-winning trading provider, possessing more "
+        "than 25 years of experience with multiple offices around the world. "
+        "Requirements: 5+ years of Python engineering."
+    )
+
+    assert scraper.extract_min_experience(text) == 5
+
+
+def test_another_persons_years_are_not_a_requirement():
+    text = "The pod is led by a Senior Portfolio Manager with 15+ years of experience."
+
+    assert scraper.extract_min_experience(text) == -1

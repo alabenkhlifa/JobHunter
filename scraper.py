@@ -1394,6 +1394,51 @@ _HIRING_FOR = re.compile(
     re.I,
 )
 
+# The company's own record, or another person's, dressed in requirement
+# language: "over 30 years" and "more than 25 years" both read as minimum
+# lead-ins, and "of experience" anchors them, so nothing else here rejects
+# them. Under the old minimum rule a boast was harmless whenever a real
+# requirement sat below it; the headline rule reads forwards, and About Us
+# blurbs open descriptions, so the boast would become the posting's bar and
+# fire the over-8 knockout on a job he could get. Three shapes carry every
+# such line in the corpus.
+#
+# A years phrase that opens its sentence under "With" or "After" is the
+# company setting the scene: "With over 30 years of experience, Alnafitha IT
+# has completed 4,000 projects", "After more than 20 years of development,
+# Chery's network covers 80 countries". It costs one true requirement, an
+# "About You ... With over 8 years of experience ..., you possess" that no
+# cheap rule separates from "With over 20 years of experience in compressor
+# repairs, you will have the opportunity".
+_LEADING_BOAST = re.compile(
+    r"^\s*(?:with|after)\s+(?:over|more\s+than|nearly|almost|around|about)?\s*$", re.I
+)
+# "Bachelors Degree (± 16 years) Computer Science" - the length of the
+# schooling, not of a career. One posting in 4,575, kept because the shape
+# cannot mean anything else: a bar is never written "approximately".
+_EDUCATION_SPAN = re.compile(r"\b(?:degree|diploma)s?\b[\s(\[:\-]*\u00b1\s*$", re.I)
+# An organisation holding the years: "a fit-out company with over 25 years",
+# "an award-winning trading provider, possessing more than 25 years", "a
+# brokerage backed by 20+ years". Only nouns that can name nothing but an
+# organisation are listed: "business", "enterprise", "network" and "practice"
+# all appear inside real requirements ("enterprise networking with 5+ years",
+# "business stakeholders Must have 5+ years") and were dropped after reading
+# what they matched.
+_ORGANISATION_RECORD = re.compile(
+    r"\b(?:compan(?:y|ies)|firm|group|provider|brokerage|organi[sz]ations?|agency"
+    r"|conglomerate|consultancy|startup|studio|contractor|manufacturer|supplier"
+    r"|distributor|integrator|institution)\b"
+    r"[^.]{0,45}?\b(?:with|has|have|possessing|possess(?:es)?|boasting|boasts"
+    r"|backed\s+by|brings?|bringing)\s+"
+    r"(?:over|more\s+than|nearly|almost|around|about)?\s*$",
+    re.I,
+)
+# Somebody else's years: "The pod is led by a Senior Portfolio Manager with
+# 15+ years of experience".
+_SOMEONE_ELSES_RECORD = re.compile(
+    r"\b(?:led|headed|founded|owned|run|managed|backed)\s+by\b[^.]{0,60}$", re.I
+)
+
 _BENEFIT_CONTEXT = re.compile(
     r"vacation|paid\s+time\s+off|sabbatical|parental\s+leave|public\s+holidays?"
     r"|annual\s+leave|gratuity|days\s+off|leave\s+entitlement",
@@ -1438,28 +1483,42 @@ def _experience_context(text, start, end):
     return re.sub(r"\s+", " ", before), re.sub(r"\s+", " ", after)
 
 
-def _states_a_requirement(before, after):
-    """Does this years phrase describe what the candidate must bring?
+def _belongs_to_someone_else(before, after):
+    """Is this years phrase the company's, a benefit's or a contract's?
 
-    Widening the shapes we recognise is only safe with an anchor, because the
-    result is the minimum of every figure found: one stray "10+ Years of
-    Impact" from an About Us section would drag a senior posting under the
-    experience cap and rescue it from the knockout. Of the 4,575 descriptions
-    in data/jobs.db, the four anchors below cover every requirement phrasing
-    in the corpus, and each rejected shape above was read back to confirm it
-    was the company, a benefit or a contract talking, not the job.
+    Split out from the anchor test below because the two answer different
+    questions. This one disqualifies a figure outright. A figure that merely
+    lacks an anchor is not disqualified, only unproven, and a sentence that
+    proves itself elsewhere can still speak for it.
     """
     if _NOT_A_CANDIDATE.match(after) and not _EXPERIENCE_WORD.search(after[:60]):
-        return False
+        return True
     if _YEARS_AGO.match(after) or _ELAPSED_SPAN.search(before):
-        return False
+        return True
     if _BARE_FOR.search(before) and not _HIRING_FOR.search(before):
-        return False
+        return True
     if _ENGAGEMENT_BEFORE.search(before) or _ENGAGEMENT_AFTER.match(after):
-        return False
+        return True
+    if _LEADING_BOAST.match(before) or _EDUCATION_SPAN.search(before):
+        return True
+    if _ORGANISATION_RECORD.search(before) or _SOMEONE_ELSES_RECORD.search(before):
+        return True
     local = before[-100:] + after[:100]
-    if _BENEFIT_CONTEXT.search(local) or _EMPLOYER_TENURE.search(local):
-        return False
+    return bool(_BENEFIT_CONTEXT.search(local) or _EMPLOYER_TENURE.search(local))
+
+
+def _has_requirement_anchor(before, after):
+    """Does anything nearby say these years are a bar the candidate must clear?
+
+    Widening the shapes we recognise is only safe with an anchor, because the
+    result is the first figure that gets through: one stray "10+ Years of
+    Impact" from an About Us section, which is where such lines live, would
+    become the posting's stated bar. Of the 4,575 descriptions in
+    data/jobs.db, the four anchors below cover every requirement phrasing in
+    the corpus, and each shape `_belongs_to_someone_else` rejects was read
+    back to confirm it was the company, a benefit or a contract talking, not
+    the job.
+    """
     return bool(
         _EXPERIENCE_WORD.search(after[:75])
         or _EXPERIENCE_WORD.search(before[-60:])
@@ -1470,19 +1529,85 @@ def _states_a_requirement(before, after):
 
 
 def extract_min_experience(text):
-    """Extract minimum years of experience from job description. Returns -1 if not found."""
+    """The headline years of experience a posting asks for. -1 if unstated.
+
+    The headline is the FIRST figure of the first requirement sentence, not
+    the smallest figure anywhere. A posting states an overall bar and then
+    narrows it: "8+ years of IT experience with 5+ years in Salesforce
+    delivery", "5-8 years in technical support, with at least 2 years in a
+    leadership role". The qualifier is always the smaller number and always
+    comes second, so taking the minimum read the sub-requirement every time
+    and made every such posting look more junior than it is - understating
+    seniority_fit and letting genuinely over-senior roles slip the cap.
+
+    Measured over the 4,575 descriptions in data/jobs.db: 715 state two or
+    more figures and 581 of those state figures that differ. In 499 of the
+    581 the first figure is already the largest, i.e. every later figure only
+    narrows it. Reading forwards moves 529 stored rows, 527 of them upward.
+    The two that fall are a dual-level posting ("Mid-Level | 3-5 years |
+    Senior | 6+ years", now read at the mid-level bar it will hire at) and
+    the "About You ... With over 8 years" line the leading-boast rule costs.
+
+    The sentence, not the figure, is what carries the proof. "5+ years
+    backend development, 2+ years with Kubernetes" anchors only on the
+    Kubernetes clause, because a bare field of work after "years" is not one
+    of the shapes `_has_requirement_anchor` recognises. Once any figure in
+    the sentence is anchored the sentence is a requirement, so the bar is its
+    first figure. Walking back stops at a sentence boundary, at
+    `_EXPERIENCE_WINDOW` characters, and at any figure that
+    `_belongs_to_someone_else` - a tenure boast or a contract term sharing a
+    run-on sentence with a real requirement cannot be walked into.
+
+    Rules measured and rejected, both against the same corpus:
+
+    - The maximum. It adopts a figure the employer never set as the bar:
+      "Minimum: 3 years ... Preferred: 5+ years", "Required: 1 to 2 years
+      with Tealium ... 5+ years client-facing", degree ladders reading "3+
+      years with a Master's (5+ Bachelor's, 11+ Diploma)", and one posting
+      whose only other figure is the agency's own "over 28 years of
+      experience". It would fire the over-8 knockout on jobs he could get.
+    - Dropping figures introduced as sub-clauses ("with at least",
+      "including", "of which") and then taking the first of the rest. Correct
+      in principle and worth nothing here: a qualifier is never the first
+      figure of a description, so reading forwards already implies it.
+    - Preferring a later figure anchored to "overall" or "total" experience.
+      It fixes 9 rows whose first figure is a narrower bullet and breaks one
+      - "8+ years of C++ (10+ years total software engineering preferred)" -
+      by promoting a preferred figure over the required one, the same failure
+      the maximum has. Nine rows in 4,575 do not pay for a second rule that
+      needs its own preferred-clause guard.
+
+    Reading forwards raises the stakes on the exclusions above: under the
+    minimum a company boast was harmless whenever a real requirement sat
+    below it, but a boast that leads the text is now the answer. About Us
+    blurbs open descriptions, which is why every rejected shape was read back
+    against the corpus before this changed.
+    """
     if not text:
         return -1
     text = str(text).translate(_EXPERIENCE_FOLD)
-    years_found = []
+    candidates = []
     for match in _YEARS_PHRASE.finditer(text):
         value = int(match.group("low") or match.group("single"))
         if not (MIN_EXPERIENCE_YEARS <= value <= MAX_EXPERIENCE_YEARS):
             continue
         before, after = _experience_context(text, match.start(), match.end())
-        if _states_a_requirement(before, after):
-            years_found.append(value)
-    return min(years_found) if years_found else -1
+        if _belongs_to_someone_else(before, after):
+            continue
+        candidates.append((match.start(), value, _has_requirement_anchor(before, after)))
+
+    for index, (start, value, anchored) in enumerate(candidates):
+        if not anchored:
+            continue
+        headline, cursor = value, start
+        for earlier_start, earlier_value, _ in reversed(candidates[:index]):
+            if cursor - earlier_start > _EXPERIENCE_WINDOW:
+                break
+            if _EXPERIENCE_BOUNDARY.search(text, earlier_start, cursor):
+                break
+            headline, cursor = earlier_value, earlier_start
+        return headline
+    return -1
 
 
 SALARY_LOCATION_GROUPS = {
