@@ -121,3 +121,41 @@ def test_knockout_reads_a_curly_apostrophe_as_a_refusal():
 def test_knockout_rejects_interns_in_the_plural_too():
     assert job_scoring.knockout(job(title="Software Engineering Intern"), allowed_locations=UAE)
     assert job_scoring.knockout(job(title="Software Engineering Interns"), allowed_locations=UAE)
+
+
+def test_stack_fit_rewards_his_core_stack_being_required():
+    core = job(tech_required="java, kotlin, spring boot, microservices, aws")
+    thin = job(tech_required="php, wordpress")
+    assert job_scoring.stack_fit(core) > 0.8
+    assert job_scoring.stack_fit(thin) < 0.2
+
+
+def test_stack_fit_counts_nice_to_have_for_less_than_required():
+    required = job(tech_required="java, spring boot", tech_nice_to_have="")
+    optional = job(tech_required="", tech_nice_to_have="java, spring boot")
+    assert job_scoring.stack_fit(required) > job_scoring.stack_fit(optional) > 0
+
+
+def test_stack_fit_is_never_above_one():
+    everything = job(tech_required="java, kotlin, spring boot, spring, microservices, "
+                                   "aws, azure, terraform, kubernetes, docker, "
+                                   "postgresql, mongodb, redis, kafka, rest")
+    assert job_scoring.stack_fit(everything) <= 1.0
+
+
+def test_role_fit_ranks_the_families_the_way_he_does():
+    architect = job(title="Software Architect")
+    senior_backend = job(title="Senior Backend Engineer")
+    manager = job(title="Engineering Manager")
+    fullstack = job(title="Full Stack Architect")
+    generic = job(title="software engineer")
+    assert job_scoring.role_fit(architect) == 1.0
+    assert job_scoring.role_fit(senior_backend) == 0.8
+    assert job_scoring.role_fit(manager) == 0.5
+    assert job_scoring.role_fit(fullstack) == 0.4
+    assert job_scoring.role_fit(generic) == 0.3
+
+
+def test_role_fit_reads_full_stack_before_architect():
+    # "Full Stack Architect" contains "architect" but half the job is frontend.
+    assert job_scoring.role_fit(job(title="Full Stack Architect")) == 0.4

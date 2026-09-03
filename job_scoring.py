@@ -137,3 +137,65 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset())
         return "duplicate of a posting already seen"
 
     return None
+
+
+# His stack in three rings. Core is what he is hired for; cloud is the platform
+# he builds on; adjacent is credible but not differentiating.
+CORE_STACK = ("java", "kotlin", "spring boot", "spring", "microservices")
+CLOUD_STACK = ("aws", "azure", "terraform", "kubernetes", "docker")
+ADJACENT_STACK = (
+    "nestjs", "typescript", ".net", "c#", "postgresql", "mongodb", "redis",
+    "kafka", "rabbitmq", "rest", "graphql", "grpc", "event-driven", "ddd",
+)
+
+# A technology the posting requires counts fully; one it merely likes counts
+# less. The old scorer gave a flat +1 for any nice-to-have match at all.
+NICE_TO_HAVE_CREDIT = 0.4
+
+# Ordered: the first family whose pattern matches the normalised title wins, so
+# "full stack architect" resolves to full-stack rather than architect.
+ROLE_FAMILIES = (
+    (0.4, ("full stack", "fullstack", "full-stack")),
+    (1.0, ("architect", "tech lead", "technical lead", "software lead",
+           "lead software engineer", "lead backend", "backend lead")),
+    (0.8, ("backend engineer", "backend developer", "backend software engineer",
+           "software engineer backend", "platform architect")),
+    (0.5, ("engineering manager", "head of engineering", "vp engineering",
+           "director of engineering", "cto")),
+)
+GENERIC_ROLE_FIT = 0.3
+
+
+def _ring_coverage(terms, required, optional):
+    """Fraction of a ring the posting asks for, nice-to-have counting for less."""
+    if not terms:
+        return 0.0
+    total = 0.0
+    for term in terms:
+        if term in required:
+            total += 1.0
+        elif term in optional:
+            total += NICE_TO_HAVE_CREDIT
+    return min(1.0, total / len(terms))
+
+
+def stack_fit(job):
+    """How central his stack is to the posting, 0.0-1.0."""
+    required = str(job.get("tech_required") or "").lower()
+    optional = str(job.get("tech_nice_to_have") or "").lower()
+    return min(1.0, (
+        0.60 * _ring_coverage(CORE_STACK, required, optional)
+        + 0.30 * _ring_coverage(CLOUD_STACK, required, optional)
+        + 0.10 * _ring_coverage(ADJACENT_STACK, required, optional)
+    ) / 0.62)
+
+
+def role_fit(job):
+    """How close the title is to the work he wants, 0.0-1.0."""
+    title = normalise_title(job.get("title"))
+    raw = str(job.get("title") or "").lower()
+    for value, phrases in ROLE_FAMILIES:
+        for phrase in phrases:
+            if phrase in title or phrase in raw:
+                return value
+    return GENERIC_ROLE_FIT
