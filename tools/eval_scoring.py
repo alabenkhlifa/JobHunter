@@ -27,6 +27,21 @@ MARKETS = job_scoring.DEFAULT_MARKETS
 # score column, so the hand-set 99 one of them carries could only skew the
 # stored-score baseline, not this measurement.
 FAKE = ("JobHunter Test", "Example FinTech", "Example SaaS")
+FAKE_TITLE_PREFIXES = ("TEST RUN", "CTA BUTTON")
+
+
+def is_fixture(job):
+    """Whether a stored row was written by the test harness rather than scraped.
+
+    The one definition of the exclusion. fit_weights calls it too: a fixture
+    that the ratings sampler happened to draw would otherwise enter the refit,
+    carrying a hand-set score and a title nobody wrote as a real posting.
+
+    Case-insensitive on the title because the SQL this replaces used LIKE,
+    which is.
+    """
+    title = (job.get("title") or "").upper()
+    return job.get("company") in FAKE or title.startswith(FAKE_TITLE_PREFIXES)
 
 # The rubric's constants (agency names, stack rings, band floors) were derived
 # from the same data/jobs.db these labels live in. There is no held-out split,
@@ -52,15 +67,11 @@ def load_labels(db_path=DEFAULT_DB):
     """Return (interested, skipped) job dicts, excluding test fixtures."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    placeholders = ",".join("?" * len(FAKE))
-    sql = (
-        f"SELECT * FROM jobs WHERE status = ? AND company NOT IN ({placeholders}) "
-        "AND title NOT LIKE 'TEST RUN%' AND title NOT LIKE 'CTA Button%'"
-    )
-    interested = [dict(r) for r in conn.execute(sql, ("interested", *FAKE))]
-    skipped = [dict(r) for r in conn.execute(sql, ("skipped", *FAKE))]
+    sql = "SELECT * FROM jobs WHERE status IN ('interested', 'skipped')"
+    rows = [dict(r) for r in conn.execute(sql) if not is_fixture(dict(r))]
     conn.close()
-    return interested, skipped
+    return ([j for j in rows if j["status"] == "interested"],
+            [j for j in rows if j["status"] == "skipped"])
 
 
 # scraper.save_job writes recruiter_company and credibility_notes AFTER
