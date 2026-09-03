@@ -46,12 +46,9 @@ CONFIG = {
         # scrape time for the same postings.
         "Switzerland": ["Switzerland"],
     },
-    "allowed_locations": [
-        "dubai", "abu dhabi", "jeddah",
-        "switzerland", "schweiz", "suisse", "svizzera",
-        "zurich", "zürich", "geneva", "genève", "genf",
-        "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
-    ],
+    # Defined once, in job_scoring, so the scraper filters on the same list
+    # the rubric knocks out on and tools/eval_scoring.py measures with.
+    "allowed_locations": list(job_scoring.DEFAULT_MARKETS),
     "exclude_terms": [
         "test engineer", "qa engineer", "quality assurance",
         "staff software engineer", "staff engineer", "manual test", "sdet",

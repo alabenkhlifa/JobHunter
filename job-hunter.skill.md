@@ -124,8 +124,11 @@ Switzerland):
 
 ### Regions
 Each region is a search string plus a whitelist of displayed locations
-(`allowed_locations`); anything else is dropped even if the board returns it.
-- **Dubai**, **Abu Dhabi**, **Jeddah** — searched by city
+(`allowed_locations`, read from `job_scoring.DEFAULT_MARKETS`); anything else
+is dropped even if the board returns it.
+- **Dubai**, **Abu Dhabi**, **Jeddah** — searched by city. Sharjah, Riyadh and
+  a bare "Saudi" or "United Arab Emirates" pass the whitelist too, since the
+  boards return them for these searches
 - **Switzerland** — searched country-wide. Any displayed location naming the
   country passes, so Winterthur and Ticino are kept as well as Zurich; the city
   names in `allowed_locations` only catch postings that omit the country

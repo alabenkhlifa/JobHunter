@@ -409,3 +409,11 @@ def test_scraper_score_job_returns_zero_for_a_knocked_out_job():
     })
     assert score == 0
     assert any("devops" in line for line in breakdown)
+
+
+def test_the_scraper_reads_its_markets_from_job_scoring():
+    # One list, three readers: the rubric, the scraper's location filter, and
+    # the measurement tool. Swiss cities and the wider Gulf both belong to it.
+    assert list(scraper.CONFIG["allowed_locations"]) == list(job_scoring.DEFAULT_MARKETS)
+    for market in ("zurich", "lausanne", "riyadh", "sharjah", "saudi", "united arab emirates"):
+        assert market in job_scoring.DEFAULT_MARKETS, market

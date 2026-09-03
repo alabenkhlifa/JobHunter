@@ -103,6 +103,21 @@ def duplicate_key(job):
     return f"{normalise_title(title)}|{_words(job.get('company'))}"
 
 
+# The one list of markets he will move to, matched as substrings of the
+# displayed location. scraper.CONFIG["allowed_locations"] and
+# tools/eval_scoring.py both read it from here, so the number the tool
+# measures is the number the scraper ships. Cities are listed for the
+# postings that omit the country; Gulf entries cover the boards that return
+# Riyadh or Sharjah for a Jeddah or Dubai search.
+DEFAULT_MARKETS = (
+    "dubai", "abu dhabi", "sharjah", "united arab emirates",
+    "jeddah", "riyadh", "saudi",
+    "switzerland", "schweiz", "suisse", "svizzera",
+    "zurich", "zürich", "geneva", "genève", "genf",
+    "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
+)
+
+
 def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset()):
     """Return the reason this job is rejected outright, or None to keep it.
 

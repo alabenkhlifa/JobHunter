@@ -117,3 +117,18 @@ def test_report_says_it_is_an_in_sample_measurement(tmp_path, capsys):
     out = capsys.readouterr().out
     assert note in out
     assert "auc_freshness_neutral" in out
+
+
+def test_report_reads_the_markets_job_scoring_defines(tmp_path):
+    # The measured number must be the shipped number: a Swiss city without
+    # its country is inside the scraper's markets, so it must be inside the
+    # tool's too, rather than knocked out by a second list of its own.
+    path = _db(tmp_path, [
+        {"title": "Software Architect", "company": "Acme", "location": "Zug",
+         "status": "interested", "tech_required": "java, spring boot, aws"},
+        {"title": "Office Manager", "company": "Globex", "location": "Riyadh",
+         "status": "skipped"},
+    ])
+    result = eval_scoring.report(path)
+    assert result["knocked_out_positives"] == {}
+    assert result["above_cutoff"] == "1/1"

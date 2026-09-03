@@ -18,8 +18,9 @@ import job_scoring
 
 BASELINE_AUC = 0.565
 DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "jobs.db"
-MARKETS = ("dubai", "abu dhabi", "jeddah", "switzerland", "riyadh",
-           "saudi", "united arab emirates", "sharjah")
+# The scraper's list, not a copy of it: a second list here measured a
+# different scorer from the one that ships.
+MARKETS = job_scoring.DEFAULT_MARKETS
 
 # Rows written by the test harness, not by the scraper. Their labels are not
 # his judgement, so they say nothing about ranking. This tool never reads the
