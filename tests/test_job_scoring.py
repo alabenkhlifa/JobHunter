@@ -47,3 +47,58 @@ def test_blocked_title_catches_suffixed_forms_of_blocked_families():
 def test_blocked_title_says_which_rule_rejected_it():
     assert job_scoring.blocked_title({"title": "DevOps Manager"}) == "blocked role family: devops"
     assert job_scoring.blocked_title({"title": "Staff Engineer"}) == "blocked title: staff engineer"
+
+
+UAE = ("dubai", "abu dhabi", "jeddah", "switzerland")
+
+
+def job(**over):
+    base = {
+        "title": "Software Architect", "company": "Acme",
+        "location": "Dubai, United Arab Emirates", "description": "Java and Spring Boot.",
+        "min_experience": 6, "tech_required": "java, spring boot", "tech_nice_to_have": "",
+        "date_posted": "", "company_website": "https://acme.example", "recruiter_company": "",
+    }
+    base.update(over)
+    return base
+
+
+def test_knockout_rejects_a_location_outside_the_markets():
+    assert job_scoring.knockout(job(location="Cairo, Egypt"), allowed_locations=UAE)
+
+
+def test_knockout_rejects_junior_titles_outright():
+    assert job_scoring.knockout(job(title="Junior Software Architect"), allowed_locations=UAE)
+    assert job_scoring.knockout(job(title="Graduate Software Engineer"), allowed_locations=UAE)
+
+
+def test_knockout_matches_junior_words_whole_not_as_substrings():
+    assert job_scoring.knockout(job(title="Entry-Level Software Engineer"), allowed_locations=UAE)
+    assert job_scoring.knockout(job(title="International Solutions Architect"), allowed_locations=UAE) is None
+    assert job_scoring.knockout(job(title="Internal Tools Architect"), allowed_locations=UAE) is None
+
+
+def test_knockout_rejects_more_experience_than_he_has():
+    assert job_scoring.knockout(job(min_experience=12), allowed_locations=UAE)
+    assert job_scoring.knockout(job(min_experience=8), allowed_locations=UAE) is None
+
+
+def test_knockout_rejects_an_explicit_refusal_to_sponsor():
+    text = "We will not sponsor visas for this role."
+    assert job_scoring.knockout(job(description=text), allowed_locations=UAE)
+
+
+def test_knockout_rejects_a_duplicate_of_a_job_already_seen():
+    first = job(title="Senior Technical Architect", company="Inception")
+    key = job_scoring.duplicate_key(first)
+    assert job_scoring.knockout(first, allowed_locations=UAE, seen_keys=frozenset({key}))
+
+
+def test_duplicate_key_ignores_seniority_and_case():
+    a = job_scoring.duplicate_key(job(title="Senior Technical Architect", company="Inception"))
+    b = job_scoring.duplicate_key(job(title="  technical   architect ", company="INCEPTION"))
+    assert a == b
+
+
+def test_knockout_passes_a_job_he_wants():
+    assert job_scoring.knockout(job(), allowed_locations=UAE) is None

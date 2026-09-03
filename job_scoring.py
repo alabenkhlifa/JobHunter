@@ -68,3 +68,64 @@ def blocked_title(job):
         if pattern.search(normalised):
             return f"blocked role family: {family}"
     return None
+
+
+# Promoted from a -3 penalty to a knockout: as points it was defeatable by
+# buzzword count, so junior roles with a dense stack list still got through.
+JUNIOR_WORDS = (
+    "junior", "intern", "internship", "entry level", "entry-level",
+    "graduate", "fresh graduate", "trainee", "apprentice",
+)
+
+# The rare posting that says outright it will not sponsor. 2 of 4,575 postings
+# in the corpus match anything like this, so it is a safety net, not the gate.
+REFUSES_SPONSORSHIP = (
+    "no visa sponsorship", "will not sponsor", "won't sponsor",
+    "does not sponsor", "unable to sponsor", "not able to sponsor",
+    "no relocation", "local candidates only", "local hires only",
+)
+
+
+def _words(text):
+    """Lowercase text as space-joined tokens, so phrases match whole words only."""
+    return " ".join(w.rstrip(".") for w in _WORD.findall(str(text or "").lower()))
+
+
+def duplicate_key(job):
+    """Identity of a posting for deduplication: normalised title plus company."""
+    return f"{normalise_title(job.get('title'))}|{_words(job.get('company'))}"
+
+
+def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset()):
+    """Return the reason this job is rejected outright, or None to keep it.
+
+    Runs before any scoring. No number of matching keywords overturns one of
+    these, which is the whole point of separating them from the score.
+    """
+    reason = blocked_title(job)
+    if reason:
+        return reason
+
+    # Whole-word match: "intern" must not reject "International Architect".
+    title = f" {_words(job.get('title'))} "
+    for word in JUNIOR_WORDS:
+        if f" {word} " in title:
+            return f"too junior: {word}"
+
+    location = str(job.get("location") or "").lower()
+    if allowed_locations and not any(a in location for a in allowed_locations):
+        return f"outside the configured markets: {job.get('location') or 'unknown'}"
+
+    years = job.get("min_experience", -1)
+    if isinstance(years, int) and years > max_experience:
+        return f"wants {years}+ years, over the {max_experience} cap"
+
+    description = str(job.get("description") or "").lower()
+    for phrase in REFUSES_SPONSORSHIP:
+        if phrase in description:
+            return f"refuses sponsorship: {phrase}"
+
+    if duplicate_key(job) in seen_keys:
+        return "duplicate of a posting already seen"
+
+    return None
