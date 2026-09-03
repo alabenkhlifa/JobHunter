@@ -360,3 +360,25 @@ def test_evaluate_never_raises_on_a_malformed_row():
         result = job_scoring.evaluate(row, allowed_locations=UAE)
         assert set(result) == {"passed", "reason", "total", "band", "parts"}
         assert isinstance(result["total"], int)
+
+
+def test_sendable_is_false_for_a_knocked_out_job():
+    result = job_scoring.evaluate(job(title="DevOps Manager"), allowed_locations=UAE)
+    assert result["passed"] is False
+    assert job_scoring.sendable(result) is False
+
+
+def test_sendable_is_false_for_a_job_that_survives_but_scores_too_low():
+    weak = job(title="software engineer", tech_required="php", min_experience=2,
+               recruiter_company="Kanz Recruitment")
+    result = job_scoring.evaluate(weak, allowed_locations=UAE)
+    assert result["passed"] is True
+    assert result["total"] < job_scoring.SEND_CUTOFF
+    assert job_scoring.sendable(result) is False
+
+
+def test_sendable_is_true_only_at_or_above_the_cutoff():
+    strong = job(title="Backend Lead - Microservices Architect",
+                 tech_required="kotlin, spring boot, microservices, kubernetes, aws",
+                 min_experience=6)
+    assert job_scoring.sendable(job_scoring.evaluate(strong, allowed_locations=UAE)) is True

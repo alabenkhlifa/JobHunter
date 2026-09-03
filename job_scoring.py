@@ -372,8 +372,13 @@ def band(total):
 def evaluate(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(), now=None):
     """Knockouts, then the weighted dimensions. Always returns every part.
 
-    `passed` says the job survived the knockouts, not that it clears the
-    send cutoff: a job can pass and still land in the "below" band.
+    Neither `passed` nor `band` is the send gate; `sendable` is. `passed`
+    means the job survived the knockouts, not that it clears the cutoff, so
+    a passed job can still land in the "below" band. `band` is for display
+    only: a knocked-out job carries "knocked out", which is not in BANDS.
+
+    `now`, when given, must be timezone-aware: `freshness` subtracts it from
+    an aware posting date and raises TypeError for a naive one.
     """
     reason = knockout(
         job,
@@ -394,3 +399,12 @@ def evaluate(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(),
     }
     total = round(sum(parts[name] * WEIGHTS[name] for name in WEIGHTS))
     return {"passed": True, "reason": None, "total": total, "band": band(total), "parts": parts}
+
+
+def sendable(result):
+    """Whether an `evaluate` result reaches the user: total at or above the cutoff.
+
+    The one gate callers should use. A knocked-out job has total 0, so it
+    fails here too, without the caller reading `passed` or `band`.
+    """
+    return result["total"] >= SEND_CUTOFF
