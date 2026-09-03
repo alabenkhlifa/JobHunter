@@ -463,3 +463,18 @@ def test_duplicate_key_separates_the_same_role_in_two_countries():
     abu_dhabi = job(title="Technical Architect", company="Inception", location="Abu Dhabi")
     assert job_scoring.duplicate_key(dubai) != job_scoring.duplicate_key(riyadh)
     assert job_scoring.duplicate_key(dubai) == job_scoring.duplicate_key(abu_dhabi)
+
+
+# MARKET_COUNTRIES does double duty: it defines the allowed markets and it
+# classifies the country for duplicate_key. A term added to stop a key
+# fragmenting across an unchosen city (Khobar, Al Ain, Makkah) would widen
+# DEFAULT_MARKETS by construction and enrol him in a market he never chose.
+# The literal is written out, not derived, so this test is what stops a
+# dedup fix from widening the search.
+def test_default_markets_is_exactly_the_markets_he_chose():
+    assert job_scoring.DEFAULT_MARKETS == (
+        "dubai", "abu dhabi", "jeddah", "jiddah", "riyadh",
+        "switzerland", "schweiz", "suisse", "svizzera",
+        "zurich", "zürich", "geneva", "genève", "genf",
+        "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
+    )
