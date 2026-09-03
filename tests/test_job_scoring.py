@@ -382,3 +382,30 @@ def test_sendable_is_true_only_at_or_above_the_cutoff():
                  tech_required="kotlin, spring boot, microservices, kubernetes, aws",
                  min_experience=6)
     assert job_scoring.sendable(job_scoring.evaluate(strong, allowed_locations=UAE)) is True
+
+
+import scraper
+
+
+def test_scraper_score_job_delegates_to_the_rubric():
+    strong = {
+        "title": "Backend Lead - Microservices Architect", "company": "PureCS",
+        "location": "Dubai, United Arab Emirates",
+        "tech_required": "kotlin, spring boot, microservices, kubernetes, aws",
+        "tech_nice_to_have": "", "min_experience": 6, "description": "",
+        "company_website": "https://purecs.example", "recruiter_company": "",
+        "date_posted": "",
+    }
+    score, breakdown = scraper.score_job(strong)
+    assert score >= 75
+    assert any("stack" in line for line in breakdown)
+
+
+def test_scraper_score_job_returns_zero_for_a_knocked_out_job():
+    score, breakdown = scraper.score_job({
+        "title": "DevOps Manager", "company": "MODSOFT",
+        "location": "Dubai, United Arab Emirates", "tech_required": "aws, azure",
+        "tech_nice_to_have": "", "min_experience": 2, "description": "",
+    })
+    assert score == 0
+    assert any("devops" in line for line in breakdown)

@@ -22,6 +22,8 @@ from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import job_scoring
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 CONFIG = {
@@ -50,29 +52,6 @@ CONFIG = {
         "zurich", "zürich", "geneva", "genève", "genf",
         "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
     ],
-    "scoring": {
-        "high": {
-            "weight": 3,
-            "terms": [
-                "architect", "aws", "azure",
-                "spring boot", "microservices", "tech lead", "team lead", "senior engineer", "senior software engineer", "senior backend engineer", "java", "kotlin", "backend",
-            ],
-        },
-        "medium": {
-            "weight": 1,
-            "terms": [
-                "docker", "ci/cd", "cicd", "kubernetes", "terraform",
-                "cloud", ".net", "typescript",
-            ],
-        },
-    },
-    "penalty_terms": {
-        "weight": -3,
-        "terms": [
-            "junior", "intern", "entry level", "entry-level",
-            "graduate", "fresh graduate", "trainee",
-        ],
-    },
     "exclude_terms": [
         "test engineer", "qa engineer", "quality assurance",
         "staff software engineer", "staff engineer", "manual test", "sdet",
@@ -134,7 +113,7 @@ CONFIG = {
     ],
     "max_experience": 8,
     "max_job_age_days": 7,
-    "score_threshold": 15,
+    "score_threshold": 45,
     # Per scraper/region bucket. Keep this high so one good match does not stop
     # the scrape early; the LLM review can rank/reject multiple good offers.
     "min_matching_jobs": 25,
@@ -1396,37 +1375,27 @@ def is_excluded(job):
 
 
 def score_job(job):
-    """Score a job based on required skills and title, with a flat +1 for nice-to-have matches."""
-    required_text = f"{job['title']} {job.get('tech_required', '')}".lower()
-    nice_text = job.get("tech_nice_to_have", "").lower()
-    title = job["title"].lower()
-    score = 0
-    breakdown = []
+    """Score a job 0-100 with the rubric in job_scoring.
 
-    for tier_name, tier in CONFIG["scoring"].items():
-        for term in tier["terms"]:
-            t = term.lower()
-            if t in required_text:
-                score += tier["weight"]
-                breakdown.append(f"{term}(+{tier['weight']})")
-            elif t in nice_text:
-                score += 1
-                breakdown.append(f"{term}(+1 nice)")
+    Signature and return shape are unchanged: every caller, save_job included,
+    still receives (score, breakdown-lines). The send gate stays where it was,
+    score against CONFIG["score_threshold"]; nothing here reads `passed` or
+    `band` to decide anything.
+    """
+    result = job_scoring.evaluate(
+        job,
+        allowed_locations=tuple(loc.lower() for loc in CONFIG.get("allowed_locations", ())),
+        max_experience=CONFIG.get("max_experience", 8),
+    )
+    if result["reason"]:
+        return 0, [f"knocked out: {result['reason']}"]
 
-    credibility_score, credibility_notes = assess_company_recruiter_credibility(job)
-    if credibility_score:
-        score += credibility_score
-        sign = "+" if credibility_score > 0 else ""
-        breakdown.append(f"credibility({sign}{credibility_score}: {'; '.join(credibility_notes)})")
-
-    # Apply penalty terms against title
-    penalty = CONFIG["penalty_terms"]
-    for term in penalty["terms"]:
-        if term.lower() in title:
-            score += penalty["weight"]
-            breakdown.append(f"{term}({penalty['weight']})")
-
-    return score, breakdown
+    breakdown = [
+        f"{name} {result['parts'][name]:.2f}x{job_scoring.WEIGHTS[name]}"
+        for name in job_scoring.WEIGHTS
+    ]
+    breakdown.append(f"band {result['band']}")
+    return result["total"], breakdown
 
 
 # ── Telegram ─────────────────────────────────────────────────────────────────

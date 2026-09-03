@@ -131,12 +131,13 @@ Each region is a search string plus a whitelist of displayed locations
   names in `allowed_locations` only catch postings that omit the country
 
 ## Scoring System
-Jobs are scored by matching keywords in title + company + full description:
-- **High (+3)**: architect, aws, azure, spring boot, microservices, tech lead,
-  team lead, java, kotlin, backend
-- **Medium (+1)**: docker, ci/cd, kubernetes, terraform, cloud, .net,
-  typescript, devops, infrastructure
-- **Threshold**: score >= 15 to qualify as a match (`score_threshold`)
+`job_scoring.evaluate` runs the knockouts first (blocked title families, junior
+titles, outside the markets, more than `max_experience` years, an explicit
+refusal to sponsor), then scores what survives 0-100 on five weighted
+dimensions: stack 35, role 30, seniority 15, employer 12, freshness 8.
+- **Threshold**: score >= 45 to qualify as a match (`score_threshold`). A
+  knocked-out job scores 0 and its breakdown names the reason
+- **Bands**: excellent 75+, good 60+, normal 45+; below 45 is never sent
 
 ## Filters (applied before scoring)
 1. **Excluded titles**: test engineer, qa, sdet, staff engineer, staff
