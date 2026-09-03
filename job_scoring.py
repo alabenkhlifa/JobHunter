@@ -251,10 +251,40 @@ def role_fit(job):
 SENIORITY_BANDS = ((5, 8, 1.0), (3, 4, 0.6), (0, 2, 0.3))
 UNSTATED_SENIORITY = 0.6
 
-# credibility_notes is written only by scraper.py, from a fixed set of phrases.
-# "posted by agency/aggregator" and "posted via <company> aggregator" are the
-# two that name an agency employer; both carry "agency" or "aggregator".
-AGENCY_MARKERS = ("aggregator", "agency", "recruitment", "staffing", "consultancy")
+# credibility_notes is written only by scraper.py, from a fixed set of
+# phrases. "posted by agency/aggregator" and "posted via <company> aggregator"
+# are the two that name an agency employer; nothing it writes contains
+# "recruitment", "staffing" or "consultancy", so those would be dead entries.
+AGENCY_MARKERS = ("aggregator", "agency")
+
+# Names and words that mark an intermediary rather than the hiring company.
+# Derived from the company column of data/jobs.db on 2026-09-03 (4,580 rows,
+# 1,728 distinct names): each generic word was checked against every name it
+# matches there and hit only agencies, boards and outsourcers; each named entry
+# is an agency or aggregator the corpus carries, most with "our client" in
+# the descriptions. Matched as whole words, so "talent" flags "MCG Talent" and
+# "Talents Tide" but not a product name with the string inside it. No
+# "consulting", "consultancy" or "careers": Cognizant Consulting, Tata
+# Consultancy Services, BCG and NAFFCO Careers hire directly, so the
+# consulting-named agencies are listed by name instead.
+AGENCY_COMPANY_TERMS = (
+    "recruitment", "recruit", "staffing", "talent", "hr solutions",
+    "outsourcing", "manpower", "headhunting", "placement", "executive search",
+    "agency", "jobs",
+    "talentmate", "jobgether", "halian", "dicetek", "dautom",
+    "penta consulting", "nexus consulting", "yo it consulting",
+    "avensys consulting", "hyve technology consulting",
+    "accel human resource consultants", "agile consultants", "hired",
+)
+_AGENCY_PATTERNS = tuple(
+    re.compile(rf"\b{re.escape(term)}{_INFLECTION}\b") for term in AGENCY_COMPANY_TERMS
+)
+
+# In this corpus a company that is not an agency is the direct employer, so
+# the absence of every agency signal scores full marks. A middle "unknown"
+# tier would take 4.8 points off every posting and shift the cutoff.
+DIRECT_EMPLOYER = 1.0
+AGENCY_EMPLOYER = 0.3
 
 FRESHNESS_BANDS = ((0, 2, 1.0), (3, 4, 0.7), (5, 7, 0.4))
 UNDATED_FRESHNESS = 0.7
@@ -272,18 +302,23 @@ def seniority_fit(job):
 
 
 def employer_fit(job):
-    """Whether the employer is hiring directly, 0.0-1.0."""
+    """Whether the employer is hiring directly, 0.0-1.0.
+
+    company_website is not read: no scraper fills it today, and with two
+    tiers a website could only ever confirm what the absence of an agency
+    signal already says.
+    """
     company = str(job.get("company") or "").strip().lower()
     recruiter = str(job.get("recruiter_company") or "").strip().lower()
     notes = str(job.get("credibility_notes") or "").lower()
 
     if recruiter and recruiter != company:
-        return 0.3
+        return AGENCY_EMPLOYER
     if any(marker in notes for marker in AGENCY_MARKERS):
-        return 0.3
-    if str(job.get("company_website") or "").strip():
-        return 1.0
-    return 0.6
+        return AGENCY_EMPLOYER
+    if any(pattern.search(company) for pattern in _AGENCY_PATTERNS):
+        return AGENCY_EMPLOYER
+    return DIRECT_EMPLOYER
 
 
 def freshness(job, *, now=None):
@@ -291,13 +326,19 @@ def freshness(job, *, now=None):
     raw = str(job.get("date_posted") or "").strip()
     if not raw:
         return UNDATED_FRESHNESS
-    try:
-        posted = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return UNDATED_FRESHNESS
-    if posted.tzinfo is None:
-        posted = posted.replace(tzinfo=timezone.utc)
-    days = ((now or datetime.now(timezone.utc)) - posted).days
+    # 3 corpus rows carry the word instead of a date.
+    if raw.lower() == "today":
+        days = 0
+    else:
+        try:
+            posted = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return UNDATED_FRESHNESS
+        if posted.tzinfo is None:
+            posted = posted.replace(tzinfo=timezone.utc)
+        # A posting dated tomorrow is not stale: clock skew or a source's
+        # timezone put it in the future, so read it as posted today.
+        days = max(0, ((now or datetime.now(timezone.utc)) - posted).days)
     for low, high, value in FRESHNESS_BANDS:
         if low <= days <= high:
             return value

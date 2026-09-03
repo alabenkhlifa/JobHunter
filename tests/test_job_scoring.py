@@ -202,10 +202,29 @@ def test_seniority_fit_peaks_in_his_band():
 def test_employer_fit_prefers_a_direct_employer_over_an_agency():
     direct = job(company="Acme", company_website="https://acme.example", recruiter_company="")
     agency = job(company="Acme", recruiter_company="Dicetek LLC")
-    unknown = job(company="Acme", company_website="", recruiter_company="")
+    # No scraper fills company_website today, so its absence says nothing.
+    no_website = job(company="Acme", company_website="", recruiter_company="")
     assert job_scoring.employer_fit(direct) == 1.0
     assert job_scoring.employer_fit(agency) == 0.3
-    assert job_scoring.employer_fit(unknown) == 0.6
+    assert job_scoring.employer_fit(no_website) == 1.0
+
+
+def test_employer_fit_reads_a_corpus_agency_name_as_an_agency():
+    # credibility_notes is empty on 466 of the 502 agency-named corpus rows,
+    # so the company name itself has to carry the signal.
+    for name in ("TALENTMATE", "Jobgether", "Dicetek LLC", "Dautom",
+                 "Halian | Managed Services, Recruitment Agency & Contract Staffing",
+                 "North Star Staffing", "Penta Consulting", "MCG Talent",
+                 "Talents Tide", "TASC Outsourcing", "Jobs Ai"):
+        assert job_scoring.employer_fit(job(company=name, credibility_notes="")) == 0.3, name
+    for name in ("Acme", "Emirates NBD", "Cognizant Consulting",
+                 "Tata Consultancy Services", "NAFFCO Careers"):
+        assert job_scoring.employer_fit(job(company=name, credibility_notes="")) == 1.0, name
+
+
+def test_employer_fit_matches_agency_words_whole_not_as_substrings():
+    assert job_scoring.employer_fit(job(company="Talentica Software")) == 1.0
+    assert job_scoring.employer_fit(job(company="Fox Talent")) == 0.3
 
 
 def test_employer_fit_reads_an_aggregator_note_as_an_agency():
@@ -226,3 +245,19 @@ def test_freshness_decays_over_the_seven_day_window():
 
 def test_freshness_of_an_undated_posting_is_the_middle_band():
     assert job_scoring.freshness(job(date_posted="")) == 0.7
+
+
+def test_freshness_reads_the_literal_today_as_posted_today():
+    # 3 corpus rows carry the word instead of a date.
+    assert job_scoring.freshness(job(date_posted="today")) == 1.0
+
+
+def test_freshness_of_a_future_dated_posting_is_fresh_not_stale():
+    now = datetime(2026, 9, 3, tzinfo=timezone.utc)
+    tomorrow = job(date_posted=(now + timedelta(days=1)).isoformat())
+    assert job_scoring.freshness(tomorrow, now=now) == 1.0
+
+
+def test_freshness_of_an_unparseable_date_is_the_middle_band():
+    assert job_scoring.freshness(job(date_posted="2026-13-45")) == 0.7
+    assert job_scoring.freshness(job(date_posted=None)) == 0.7
