@@ -142,8 +142,13 @@ JUNIOR_WORDS = (
 REFUSES_SPONSORSHIP = (
     "no visa sponsorship", "will not sponsor", "won't sponsor",
     "does not sponsor", "unable to sponsor", "not able to sponsor",
+    "sponsorship is not available", "not offer sponsorship",
     "no relocation", "local candidates only", "local hires only",
 )
+# Deliberately absent: "without sponsorship". 12 of its 13 corpus hits are
+# Cloudflare's US export-control boilerplate ("...may be hired without
+# sponsorship"), not a visa refusal, so it would reject jobs on a phrase that
+# does not mean what the list is for.
 
 
 def _words(text):

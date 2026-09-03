@@ -583,3 +583,18 @@ def test_the_duplicate_guard_is_seeded_from_the_database(tmp_path):
         allowed_locations=job_scoring.DEFAULT_MARKETS,
         seen_keys=keys,
     ) == "duplicate of a posting already seen"
+
+
+def test_knockout_catches_the_sponsorship_refusals_the_corpus_carries():
+    # "Back End Developer @ Coders Connect" scored 60, band good, sendable.
+    for text in ("Please note a visa sponsorship is not available for this role.",
+                 "We do not offer sponsorship for this position."):
+        assert job_scoring.knockout(job(description=text), allowed_locations=UAE), text
+
+
+def test_the_sponsorship_list_does_not_read_export_control_boilerplate():
+    # 12 of the 13 corpus rows saying "without sponsorship" are Cloudflare's
+    # US export-control paragraph, not a visa refusal.
+    text = ("This role requires the ability to be hired without sponsorship "
+            "for a US export licence.")
+    assert job_scoring.knockout(job(description=text), allowed_locations=UAE) is None
