@@ -178,3 +178,14 @@ def test_role_fit_reads_architecture_ownership_as_architect_work():
     assert job_scoring.role_fit(job(title="Head of Architecture")) == 1.0
     assert job_scoring.role_fit(job(title="Cloud Solution Architecture")) == 1.0
     assert job_scoring.role_fit(job(title="Estimation Engineer - Architectural Opening Solutions")) == 0.3
+
+
+def test_role_fit_reads_every_backend_spelling():
+    for title in ("Backend Engineer", "Back-End Engineer", "Back End Developer"):
+        assert job_scoring.role_fit(job(title=title)) == 0.8, title
+
+
+def test_stack_fit_treats_k8s_as_kubernetes():
+    spelled = job(tech_required="java, spring boot, kubernetes")
+    short = job(tech_required="java, spring boot, k8s")
+    assert job_scoring.stack_fit(short) == job_scoring.stack_fit(spelled)

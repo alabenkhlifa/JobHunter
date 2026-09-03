@@ -148,6 +148,24 @@ ADJACENT_STACK = (
     "kafka", "rabbitmq", "rest", "graphql", "grpc", "event-driven", "ddd",
 )
 
+# Spellings the rings do not list, folded onto the term they mean before
+# coverage is counted. Listing "k8s" as a sixth cloud term would instead
+# dilute every posting's cloud fraction. Add aliases here, not to the rings.
+STACK_ALIASES = {"k8s": "kubernetes"}
+_ALIAS_PATTERNS = tuple(
+    (re.compile(rf"\b{re.escape(alias)}\b"), canonical)
+    for alias, canonical in STACK_ALIASES.items()
+)
+
+
+def _stack_text(value):
+    """A tech list lowercased, with each alias replaced by its ring term."""
+    text = str(value or "").lower()
+    for pattern, canonical in _ALIAS_PATTERNS:
+        text = pattern.sub(canonical, text)
+    return text
+
+
 # A technology the posting requires counts fully; one it merely likes counts
 # less. The old scorer gave a flat +1 for any nice-to-have match at all.
 NICE_TO_HAVE_CREDIT = 0.4
@@ -163,8 +181,14 @@ ROLE_FAMILIES = (
     (1.0, ("architect", "architecture", "tech lead", "technical lead",
            "software lead", "lead software engineer", "lead backend",
            "backend lead")),
-    (0.8, ("backend engineer", "backend developer", "backend software engineer",
-           "software engineer backend")),
+    # Every spelling, as the frontend block does: 14 corpus titles write
+    # "Back End" or "Back-End" and were read as generic engineers.
+    (0.8, ("backend engineer", "back-end engineer", "back end engineer",
+           "backend developer", "back-end developer", "back end developer",
+           "backend software engineer", "back-end software engineer",
+           "back end software engineer",
+           "software engineer backend", "software engineer back-end",
+           "software engineer back end")),
     (0.5, ("engineering manager", "head of engineering", "vp engineering",
            "director of engineering", "cto")),
 )
@@ -194,8 +218,8 @@ def _ring_coverage(terms, required, optional):
 
 def stack_fit(job):
     """How central his stack is to the posting, 0.0-1.0."""
-    required = str(job.get("tech_required") or "").lower()
-    optional = str(job.get("tech_nice_to_have") or "").lower()
+    required = _stack_text(job.get("tech_required"))
+    optional = _stack_text(job.get("tech_nice_to_have"))
     return min(1.0, (
         0.60 * _ring_coverage(CORE_STACK, required, optional)
         + 0.30 * _ring_coverage(CLOUD_STACK, required, optional)
