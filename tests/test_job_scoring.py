@@ -282,3 +282,81 @@ def test_freshness_of_a_future_dated_posting_is_fresh_not_stale():
 def test_freshness_of_an_unparseable_date_is_the_middle_band():
     assert job_scoring.freshness(job(date_posted="2026-13-45")) == 0.7
     assert job_scoring.freshness(job(date_posted=None)) == 0.7
+
+
+def test_weights_sum_to_one_hundred():
+    assert sum(job_scoring.WEIGHTS.values()) == 100
+
+
+def test_evaluate_returns_a_knocked_out_job_with_its_reason_and_no_score():
+    result = job_scoring.evaluate(job(title="DevOps Manager"), allowed_locations=UAE)
+    assert result["passed"] is False
+    assert "devops" in result["reason"]
+    assert result["total"] == 0
+
+
+def test_evaluate_scores_a_strong_match_into_the_excellent_band():
+    strong = job(
+        title="Backend Lead - Microservices Architect",
+        tech_required="kotlin, spring boot, microservices, kubernetes, aws",
+        min_experience=6, company_website="https://purecs.example",
+        date_posted=datetime.now(timezone.utc).isoformat(),
+    )
+    result = job_scoring.evaluate(strong, allowed_locations=UAE)
+    assert result["passed"] is True
+    assert result["total"] >= 75
+    assert result["band"] == "excellent"
+
+
+def test_evaluate_puts_a_generic_title_below_the_send_cutoff():
+    weak = job(title="software engineer", tech_required="php", min_experience=2,
+               company_website="", recruiter_company="Kanz Recruitment")
+    result = job_scoring.evaluate(weak, allowed_locations=UAE)
+    assert result["total"] < 45
+
+
+def test_evaluate_reports_every_dimension_so_a_score_can_be_explained():
+    result = job_scoring.evaluate(job(), allowed_locations=UAE)
+    assert set(result["parts"]) == set(job_scoring.WEIGHTS)
+
+
+def test_band_boundaries():
+    assert job_scoring.band(75) == "excellent"
+    assert job_scoring.band(74) == "good"
+    assert job_scoring.band(60) == "good"
+    assert job_scoring.band(59) == "normal"
+    assert job_scoring.band(45) == "normal"
+    assert job_scoring.band(44) == "below"
+
+
+def test_send_cutoff_is_the_floor_of_the_lowest_band():
+    assert job_scoring.SEND_CUTOFF == 45
+    assert min(floor for floor, _ in job_scoring.BANDS) == job_scoring.SEND_CUTOFF
+
+
+def test_evaluate_zeroes_every_part_of_a_knocked_out_job():
+    result = job_scoring.evaluate(job(title="DevOps Manager"), allowed_locations=UAE)
+    assert result["parts"] == {name: 0.0 for name in job_scoring.WEIGHTS}
+    assert result["reason"] == job_scoring.knockout(job(title="DevOps Manager"), allowed_locations=UAE)
+
+
+def test_evaluate_total_is_the_rounded_weighted_sum_of_its_parts():
+    result = job_scoring.evaluate(job(), allowed_locations=UAE)
+    expected = round(sum(result["parts"][n] * w for n, w in job_scoring.WEIGHTS.items()))
+    assert result["total"] == expected
+    assert 0 <= result["total"] <= 100
+
+
+def test_evaluate_never_raises_on_a_malformed_row():
+    # Missing keys, None values and an unparseable date all reach evaluate
+    # from real scrapes; none of them may take the whole run down.
+    for row in (
+        {},
+        {"title": None, "company": None, "location": "Dubai", "description": None,
+         "min_experience": None, "tech_required": None, "tech_nice_to_have": None,
+         "date_posted": "not a date", "recruiter_company": None},
+        job(min_experience="six", date_posted="2026-13-45"),
+    ):
+        result = job_scoring.evaluate(row, allowed_locations=UAE)
+        assert set(result) == {"passed", "reason", "total", "band", "parts"}
+        assert isinstance(result["total"], int)

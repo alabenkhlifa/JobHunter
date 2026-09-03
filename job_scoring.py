@@ -345,3 +345,52 @@ def freshness(job, *, now=None):
         if low <= days <= high:
             return value
     return 0.2
+
+
+# Config, not code: these are meant to be refitted against labelled ratings
+# once there are enough of them. Stack and role dominate by his own choice.
+WEIGHTS = {
+    "stack": 35,
+    "role": 30,
+    "seniority": 15,
+    "employer": 12,
+    "freshness": 8,
+}
+
+SEND_CUTOFF = 45
+BANDS = ((75, "excellent"), (60, "good"), (SEND_CUTOFF, "normal"))
+
+
+def band(total):
+    """The display band for a total. Below the cutoff is never sent."""
+    for floor, name in BANDS:
+        if total >= floor:
+            return name
+    return "below"
+
+
+def evaluate(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(), now=None):
+    """Knockouts, then the weighted dimensions. Always returns every part.
+
+    `passed` says the job survived the knockouts, not that it clears the
+    send cutoff: a job can pass and still land in the "below" band.
+    """
+    reason = knockout(
+        job,
+        allowed_locations=allowed_locations,
+        max_experience=max_experience,
+        seen_keys=seen_keys,
+    )
+    if reason:
+        empty = {name: 0.0 for name in WEIGHTS}
+        return {"passed": False, "reason": reason, "total": 0, "band": "knocked out", "parts": empty}
+
+    parts = {
+        "stack": stack_fit(job),
+        "role": role_fit(job),
+        "seniority": seniority_fit(job),
+        "employer": employer_fit(job),
+        "freshness": freshness(job, now=now),
+    }
+    total = round(sum(parts[name] * WEIGHTS[name] for name in WEIGHTS))
+    return {"passed": True, "reason": None, "total": total, "band": band(total), "parts": parts}
