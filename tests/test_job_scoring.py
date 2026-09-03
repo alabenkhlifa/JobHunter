@@ -427,3 +427,19 @@ def test_the_shipped_threshold_is_the_rubrics_send_cutoff():
     # starts from must be the one number the rubric defines.
     assert scraper.DEFAULT_CONFIG["score_threshold"] == job_scoring.SEND_CUTOFF
     assert scraper.CONFIG["score_threshold"] == job_scoring.SEND_CUTOFF
+
+
+def test_allowed_locations_cover_the_board_spellings_of_the_chosen_markets():
+    for location in ("Jiddah, Makkah, Saudi Arabia", "Jeddah, Saudi Arabia",
+                     "Dubai, United Arab Emirates", "Abu Dhabi", "Zurich, Switzerland"):
+        assert job_scoring.knockout({"title": "Software Architect", "location": location,
+                                     "description": "", "min_experience": 6},
+                                    allowed_locations=job_scoring.DEFAULT_MARKETS) is None, location
+
+
+def test_allowed_locations_still_exclude_the_markets_he_declined():
+    for location in ("Riyadh, Saudi Arabia", "Sharjah, United Arab Emirates",
+                     "United Arab Emirates", "Cairo, Egypt"):
+        assert job_scoring.knockout({"title": "Software Architect", "location": location,
+                                     "description": "", "min_experience": 6},
+                                    allowed_locations=job_scoring.DEFAULT_MARKETS), location

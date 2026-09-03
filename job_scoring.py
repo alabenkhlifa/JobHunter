@@ -109,9 +109,10 @@ def duplicate_key(job):
 # read it from here, so the number the tool measures is the number the
 # scraper ships. Riyadh, Sharjah and a bare "United Arab Emirates" are not
 # here on purpose: the boards return them for these searches, and he did not
-# pick them.
+# pick them. "jiddah" is not a fifth market: it is one board's spelling of
+# Jeddah, on 17 of the 4,580 corpus rows.
 DEFAULT_MARKETS = (
-    "dubai", "abu dhabi", "jeddah",
+    "dubai", "abu dhabi", "jeddah", "jiddah",
     "switzerland", "schweiz", "suisse", "svizzera",
     "zurich", "zürich", "geneva", "genève", "genf",
     "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
