@@ -155,6 +155,135 @@ REFUSES_SPONSORSHIP = (
 # does not mean what the list is for.
 
 
+# He is a software architect. The Gulf boards are full of building architects,
+# and the title alone cannot tell them apart: LITERAL_BLOCKS carries "senior
+# architect" for that reason, but "Senior Technical Architect" does not contain
+# it, so a design practice hiring for "large residential developments including
+# branded residences and luxury hospitality" scored 59 at full role marks.
+# 148 of the 988 corpus titles carrying "architect" are building-industry
+# postings, so this is the rule, not the exception.
+#
+# The description decides, because the title is what fails.
+#
+# Every term below was measured against the corpus: it must not appear in a
+# genuine software posting. The ones that did are named in the rejects note
+# after the list, so the next person adding a term reads why they were left
+# out before adding one of them back.
+BUILDING_MARKERS = (
+    # Drafting and visualisation tools no software team installs.
+    "revit", "autocad", "auto cad", "archicad", "navisworks", "sketchup", "lumion",
+    # Deliverables and disciplines of a design practice.
+    "architectural drawing", "shop drawing", "interior design",
+    "landscape architecture", "landscape architect", "masterplanning", "masterplan",
+    "curtain wall", "quantity surveyor", "built environment",
+    # The project types this corpus advertises them against.
+    "luxury villa", "residential development",
+    # Accreditation and codes: RIBA is the UK architects' body, Estidama is
+    # Abu Dhabi's building rating system.
+    "riba", "estidama", "building regulation",
+)
+# Considered and rejected, each because it fires on real software work:
+#   facade      the Facade pattern — no corpus row uses it that way yet, which
+#               is luck, not safety
+#   bim         3 of its 10 sole-marker rows are software-vendor jobs (Oracle
+#               and Autodesk construction products, an Eaton data-centre SA)
+#   3ds max     a Senior Character Rigger at a robotics company
+#   civil engineer / structural engineer
+#               41 sole-marker rows, one of them a lunar-lander test bench
+#   ifc         "issued for construction", the BIM file format, and the IFC
+#   bill of quantities, tender, contractor
+#               procurement words: 51-68% of their corpus rows are software
+#   mep, hvac   building services, and hvac alone would take a Schneider
+#               Electric IoT/BMS solution architect with it
+#   rhino       Mozilla Rhino and Rhino Mocks are both software
+#   autodesk, aia, rics, leed
+#               vendor and certification names that sit in software postings
+#   architectural design, design development, concept design, master planning,
+#   schematic design, setting out
+#               ordinary software-design and SAP/MRP English
+#   fit-out     ambulances and vehicles are fitted out too
+#   snagging, joinery
+#               AV installation work and a company name
+
+# Vocabulary that proves a posting is software work whatever else it mentions.
+# Deliberately not derived from CORE_STACK/CLOUD_STACK/ADJACENT_STACK: those
+# describe HIS stack, this must recognise ANY software job, and ADJACENT_STACK
+# holds "rest", which the building posting that started this matches on the
+# English "the rest of the year".
+#
+# This half is what makes the markers safe. A CAD vendor building CAD tools is
+# a real category and one he could take: the corpus holds a "Senior BIM / IFC
+# Software Engineer" that requires Revit knowledge, and it is spared because it
+# also asks for Python, GitLab and CI/CD. 19 marker-carrying rows are spared
+# this way.
+SOFTWARE_EVIDENCE = (
+    "java", "kotlin", "spring boot", "spring framework", "microservice",
+    "kubernetes", "docker", "terraform", "ansible",
+    "aws", "azure", "gcp", "google cloud",
+    "python", "typescript", "javascript", "node.js", "nodejs", "golang",
+    "c#", ".net", "php", "ruby", "react", "angular", "vue.js",
+    "django", "flask", "fastapi",
+    "postgresql", "mysql", "mongodb", "redis", "kafka", "rabbitmq",
+    "graphql", "grpc", "rest api", "restful",
+    "ci/cd", "devops", "git", "github", "gitlab", "jenkins", "sql", "api",
+    "software engineer", "software engineering", "software development",
+    "software developer", "software architect", "source code", "codebase",
+    "sdlc", "saas", "machine learning", "iot", "cybersecurity",
+    "enterprise architecture", "backend", "back-end", "frontend", "front-end",
+    "full stack", "full-stack", "linux", "unix", "unit test",
+    "object-oriented", "algorithm", "programming", "data pipeline", "etl",
+    "application development",
+)
+# Bare "software" is absent on purpose: "architectural software such as
+# AutoCAD" and "the Autodesk software suite" would spare the very postings
+# this is here to catch.
+
+
+def _phrase_pattern(term, suffix=""):
+    """A whole-word pattern for a phrase, hyphen and space reading the same.
+
+    The same treatment _find_tech_in_text gives a configured technology, so
+    "fit-out" and "fit out" or "auto cad" and "auto-cad" cannot diverge.
+    """
+    parts = re.split(r"[\s-]+", term.strip())
+    body = r"[\s-]+".join(re.escape(part) for part in parts)
+    return re.compile(rf"(?<!\w){body}{suffix}(?!\w)", re.IGNORECASE)
+
+
+# The markers carry an inflection because the corpus writes both numbers:
+# "luxury villas", "residential developments", "interior designer". The
+# evidence terms do not, because they are product names.
+#
+# Word boundaries matter most for the short ones. "bim" would otherwise read
+# out of "bim360" and "bimm"; it is not in the list, but the next short marker
+# someone adds will be, and this is what keeps it honest.
+_BUILDING_PATTERNS = tuple(
+    (marker, _phrase_pattern(marker, _INFLECTION)) for marker in BUILDING_MARKERS
+)
+_SOFTWARE_PATTERNS = tuple(_phrase_pattern(term) for term in SOFTWARE_EVIDENCE)
+
+
+def building_industry(job):
+    """Return a reason when the description is a building-architecture job, else None.
+
+    Two-sided on purpose. A marker alone is not enough, because a company that
+    sells software to architects writes the same words; the posting must also
+    show no software vocabulary at all. That is why this can never be defeated
+    by, and can never defeat, a genuine backend posting: one marker term is not
+    a knockout, one marker term with nothing technical anywhere in the
+    description is.
+    """
+    description = str(job.get("description") or "")
+    if not description:
+        return None
+    for marker, pattern in _BUILDING_PATTERNS:
+        if pattern.search(description):
+            if any(evidence.search(description) for evidence in _SOFTWARE_PATTERNS):
+                return None
+            return f"building industry, not software: {marker}"
+    return None
+
+
 def _words(text):
     """Lowercase text as space-joined tokens, so phrases match whole words only."""
     return " ".join(w.rstrip(".") for w in _WORD.findall(str(text or "").lower()))
@@ -264,6 +393,10 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset())
     for phrase in REFUSES_SPONSORSHIP:
         if phrase in description:
             return f"refuses sponsorship: {phrase}"
+
+    reason = building_industry(job)
+    if reason:
+        return reason
 
     if duplicate_key(job) in seen_keys:
         return "duplicate of a posting already seen"

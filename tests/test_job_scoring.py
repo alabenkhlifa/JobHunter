@@ -690,3 +690,86 @@ def test_the_cutoff_rounds_the_way_python_rounds():
     assert not job_scoring.sendable({"total": round(44.5)})
     assert job_scoring.sendable({"total": round(45.5)})
     assert job_scoring.sendable({"total": job_scoring.SEND_CUTOFF})
+
+
+# The posting that started this: "Senior Technical Architect" from a Dubai
+# design practice, scored 59 at role_fit 1.0 and read as a software architect.
+BUILDING_ARCHITECT = (
+    "An exciting opportunity for talented Architects in Dubai. I am partnered "
+    "with a design practice that has a secured pipeline of projects through "
+    "the rest of the year within large residential developments including "
+    "branded residences and luxury hospitality. Requirements: minimum 7 years "
+    "of experience in Architecture. Must have relevant project experience i.e. "
+    "large residential developments, branded hospitality/residences, luxury "
+    "villas etc."
+)
+
+
+def test_knockout_rejects_a_building_architect_posting():
+    posting = job(title="Senior Technical Architect", description=BUILDING_ARCHITECT)
+    assert job_scoring.knockout(posting, allowed_locations=UAE)
+    assert job_scoring.evaluate(posting, allowed_locations=UAE)["total"] == 0
+
+
+def test_the_building_knockout_names_the_marker_that_fired():
+    posting = job(title="Senior Technical Architect", description=BUILDING_ARCHITECT)
+    reason = job_scoring.building_industry(posting)
+    assert reason.startswith("building industry, not software: ")
+
+
+def test_the_building_knockout_leaves_a_software_architect_alone():
+    posting = job(
+        title="Senior Technical Architect",
+        description=(
+            "Own the architecture of our payments platform. You will design "
+            "microservices in Java and Spring Boot, run them on Kubernetes in "
+            "AWS, and lead the technical development of the residential "
+            "lending product from design development through to production."
+        ),
+    )
+    assert job_scoring.knockout(posting, allowed_locations=UAE) is None
+
+
+def test_the_building_knockout_does_not_read_the_facade_pattern_as_a_building():
+    # "facade" is an architecture word in both trades, so it is not a marker.
+    # A backend posting that names the Facade pattern must survive even with
+    # no other software word near it.
+    posting = job(
+        title="Software Architect",
+        description=(
+            "You will refactor a legacy integration layer behind a Facade, "
+            "apply the Adapter and Strategy patterns, and document the "
+            "resulting design for the team."
+        ),
+    )
+    assert job_scoring.knockout(posting, allowed_locations=UAE) is None
+
+
+def test_the_building_knockout_spares_a_cad_vendor_hiring_engineers():
+    # A real category, and one he could take: the corpus holds a "Senior BIM /
+    # IFC Software Engineer" that requires Revit knowledge. The software
+    # evidence is what saves it, not the absence of a marker.
+    posting = job(
+        title="Senior Software Engineer",
+        description=(
+            "Build geometric validation for Revit and AutoCAD models. Python, "
+            "GitLab CI/CD, and a strong grasp of computational geometry."
+        ),
+    )
+    assert job_scoring.building_industry(posting) is None
+    assert job_scoring.knockout(posting, allowed_locations=UAE) is None
+
+
+def test_the_building_markers_read_singular_and_plural():
+    for description in ("The studio delivers luxury villas across Dubai.",
+                        "The studio delivers a luxury villa in Dubai.",
+                        "Large residential development experience is required.",
+                        "Large residential developments experience is required."):
+        posting = job(title="Technical Architect", description=description)
+        assert job_scoring.building_industry(posting), description
+
+
+def test_the_building_knockout_survives_a_missing_description():
+    # evaluate must never raise, and half the corpus rows carry no description.
+    assert job_scoring.building_industry(job(description="")) is None
+    assert job_scoring.building_industry({"title": "Architect"}) is None
