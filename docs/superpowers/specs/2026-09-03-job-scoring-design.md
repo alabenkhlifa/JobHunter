@@ -170,6 +170,61 @@ card with Interested/Skip, reusing `format_job_message` and
 `job_inline_keyboard`. Two new callback types: `show:<job_id>` and
 `more:<date>`.
 
+## Sponsorship: the deal-breaker
+
+Relocation sponsorship is a hard requirement — he applies from Tunisia and
+cannot take a role that will not sponsor a work visa. It is therefore the one
+dimension allowed to reject a job the rest of the rubric loves.
+
+Measured across 4,575 postings with descriptions:
+
+| The posting | Count | Share |
+|---|---|---|
+| Offers sponsorship or relocation | 100 | 2.2% |
+| Rules it out | 2 | 0.0% |
+| Says nothing | 4,472 | **97.7%** |
+
+The rate is flat across every Gulf market (Dubai 2.4%, Abu Dhabi 2.8%, Riyadh
+1.5%, Jeddah 1.3%), so no phrase list can carry this requirement. The existing
+`local_presence_phrases` knockout matches two postings in the whole corpus.
+
+The silence is the finding, not a gap in the data. In the UAE and Saudi every
+foreign hire is on an employer-sponsored work visa by law, so a Gulf employer
+advertising publicly is sponsoring by default and has no more reason to say so
+than to say it pays a salary. Switzerland is the inverse: a non-EU/EFTA hire
+needs a quota-limited third-country permit, and employers who will not do it
+rarely say so — they simply do not reply.
+
+So sponsorship risk is mostly a **market** fact, inverted between his four
+markets, and only occasionally a posting fact. Three consequences:
+
+1. **It is not a stage-1 knockout.** Gating on text would discard the 97.7% that
+   are merely silent, and gating on explicit offers alone would leave roughly two
+   jobs a week across every market. The phrase list stays only for the rare
+   explicit refusal.
+
+2. **Stage 2 owns the judgment.** The AI already reads the full description, so
+   its JSON gains a required `sponsorship` field — `offered`, `implied`,
+   `doubtful`, or `excluded` — with the sentence or market fact it relied on.
+   `offered` and `implied` pass; `doubtful` and `excluded` are dropped before the
+   digest. An LLM catches "you must be eligible to work in Switzerland", which a
+   regex over a phrase list does not.
+
+3. **Switzerland stays, flagged.** Swiss postings still come through, but the AI
+   must state its sponsorship read for each one explicitly, and employers that
+   routinely hire third-country nationals get the benefit of the doubt. The risk
+   is shown rather than hidden, and it is his call per job.
+
+The digest shows the sponsorship read on every job, because a deal-breaker the
+reader cannot see is not being enforced, only assumed.
+
+## Labelling
+
+The 60-job labelling sample shows each posting's sponsorship position and the
+market prior beside it, so the ratings the weights are fitted to are made with
+the same information the scorer will have. All 60 in the drawn sample are
+silent, which is itself the expected result at a 2.2% disclosure rate.
+
 ## Acceptance
 
 The rubric is accepted when, on the 10 interested and 34 skipped jobs:
