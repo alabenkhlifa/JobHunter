@@ -18,7 +18,10 @@ This skill automates job searching for Software Architect / Cloud Architect /
 Tech Lead / Senior Engineer backend roles in Dubai, Abu Dhabi, Jeddah, Riyadh
 and Switzerland. It scrapes LinkedIn (guest API) and
 Foundit Gulf (JSON API), stores keyword-qualified candidates, then a Hermes
-cron job reviews them with an LLM before suggesting offers.
+cron job reviews them with an LLM that returns a structured verdict per job
+(`send`/`hold`/`reject`, a reason, a sponsorship read, and a rank); those
+verdicts are persisted, and a mechanical top-per-market selection decides
+which of them are actually sent.
 
 ## Architecture
 - **Scraper**: `scraper.py` — scraping + CLI utilities (get-job, send-doc, send-msg, mark-interested)
@@ -137,9 +140,11 @@ is dropped even if the board returns it.
 
 ## Scoring System
 `job_scoring.evaluate` runs the knockouts first (blocked title families, junior
-titles, outside the markets, more than `max_experience` years, an explicit
-refusal to sponsor), then scores what survives 0-100 on five weighted
-dimensions: stack 35, role 30, seniority 15, employer 12, freshness 8.
+titles, titles too senior — a `principal`/`expert`/`enterprise`/`staff`
+modifier standing before the role noun — outside the markets, more than
+`max_experience` years, an explicit refusal to sponsor), then scores what
+survives 0-100 on five weighted dimensions: stack 35, role 30, seniority 15,
+employer 12, freshness 8.
 - **Threshold**: score >= 45 to qualify as a match (`score_threshold`). A
   knocked-out job scores 0 and its breakdown names the reason
 - **Bands**: excellent 75+, good 60+, normal 45+; below 45 is never sent
@@ -173,11 +178,35 @@ For each candidate job, the scraper fetches the full description and extracts:
 3. For each new job passing hard filters and keyword score threshold:
    - Saves to SQLite database
    - Does **not** notify directly
-4. Hermes cron reviews unnotified candidates with an LLM against the local candidate profile,
-   feedback-adjusted score, and `feedback_learning_notes`; it rejects low-seniority/student/intern/junior roles, roles outside the configured regions,
-   local-only/no-relocation roles, and unrelated frontend/QA/data/ML/DevOps-only roles.
-5. Hermes sends at most the best 5 human-approved recommendations back to Telegram and marks
-   reviewed candidate IDs as `notified=1` to avoid repeats.
+4. Hermes cron reviews unnotified candidates with an LLM against the local
+   candidate profile, feedback-adjusted score, and `feedback_learning_notes`.
+   For each one it judges: whether the description reads as a real backend
+   architecture/tech-lead role or a title dressed as one, whether the company
+   looks real, and the sponsorship read (`offered`/`implied`/`doubtful`/
+   `excluded` — required on every job regardless of verdict, since sponsorship
+   is his one hard deal-breaker and a market-and-context judgment the
+   description alone answers, not a phrase match). It returns a JSON array of
+   `{job_id, verdict, reason, sponsorship, rank}` — verdict is
+   `send`/`hold`/`reject`, `reason` at most ten words, `rank` a positive
+   integer unique across the batch's `send` entries, 1 = best — on stdin to
+   `~/.hermes/scripts/jobhunter_review.py`, which persists every field
+   (`scraper.record_review`), computes which `send` verdicts actually get sent
+   (`job_scoring.select_sendable`), and sends exactly those, marking only them
+   `notified=1`.
+   `select_sendable` first drops any `send` whose sponsorship reads `doubtful`
+   or `excluded`, then gives each market (the city-level
+   `job_scoring.market_region`, so Dubai and Abu Dhabi count separately) its
+   top 3 by rank as a **floor**, not a ceiling: unused slots from thin markets
+   spill to the next-best-ranked jobs of any market, so a strong market can go
+   past 3, up to a global cap of 12. When the floors alone already reach 12,
+   the selection is truncated to the global top 12 by rank and no spillover
+   runs.
+5. Jobs not selected this round are not discarded: a `hold` verdict, a `send`
+   dropped on its sponsorship read, and a `send` that loses the cap all leave
+   the job `status='new'`, `notified=0`, so it re-competes against new
+   arrivals tomorrow — as does a candidate the agent never reviewed. Only an
+   explicit `reject` verdict sets `status='rejected'`, which is what removes
+   it from future nightly candidate batches.
 
 ### When user replies "interested" for a job:
 Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; scripts handle rendering, state tracking, and browser-page inspection.
