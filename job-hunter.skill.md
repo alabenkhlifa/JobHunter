@@ -24,7 +24,7 @@ verdicts are persisted, and a mechanical top-per-market selection decides
 which of them are actually sent.
 
 ## Architecture
-- **Scraper**: `scraper.py` — scraping + CLI utilities (get-job, send-doc, send-msg, mark-interested)
+- **Scraper**: `scraper.py` — scraping + CLI utilities (get-job, list-queued, send-doc, send-msg, mark-interested)
 - **Renderer**: `render_pdf.py` — dumb PDF renderer for resume and cover letter
 - **Resume Refiner**: `resume_refiner.py` plus the onboarding workflow below — builds a detailed, candidate-confirmed evidence bank before tailoring
 - **Auto-apply engine**: `jobhunter_auto_apply/` — approval-gated browser/ATS inspection, upload/submit wrappers, and encrypted ATS credential vault
@@ -174,11 +174,11 @@ For each candidate job, the scraper fetches the full description and extracts:
 ### When triggered by Hermes cron (scheduled):
 1. Run the collector script: `~/.hermes/scripts/jobhunter_collect_candidates.py`
 2. The collector runs: `.venv/bin/python3 scraper.py --collect-only`
-2. Scraper iterates every configured region bucket
-3. For each new job passing hard filters and keyword score threshold:
+3. Scraper iterates every configured region bucket
+4. For each new job passing hard filters and keyword score threshold:
    - Saves to SQLite database
    - Does **not** notify directly
-4. Hermes cron reviews unnotified candidates with an LLM against the local
+5. Hermes cron reviews unnotified candidates with an LLM against the local
    candidate profile, feedback-adjusted score, and `feedback_learning_notes`.
    For each one it judges: whether the description reads as a real backend
    architecture/tech-lead role or a title dressed as one, whether the company
@@ -191,8 +191,8 @@ For each candidate job, the scraper fetches the full description and extracts:
    integer unique across the batch's `send` entries, 1 = best — on stdin to
    `~/.hermes/scripts/jobhunter_review.py`, which persists every field
    (`scraper.record_review`), computes which `send` verdicts actually get sent
-   (`job_scoring.select_sendable`), and sends exactly those, marking only them
-   `notified=1`.
+   (`job_scoring.select_sendable`), and sends exactly those as one digest
+   (`scraper.send_digest`), marking only them `notified=1`.
    `select_sendable` first drops any `send` whose sponsorship reads `doubtful`
    or `excluded`, then gives each market (the city-level
    `job_scoring.market_region`, so Dubai and Abu Dhabi count separately) its
@@ -201,12 +201,36 @@ For each candidate job, the scraper fetches the full description and extracts:
    past 3, up to a global cap of 12. When the floors alone already reach 12,
    the selection is truncated to the global top 12 by rank and no spillover
    runs.
-5. Jobs not selected this round are not discarded: a `hold` verdict, a `send`
+6. Jobs not selected this round are not discarded: a `hold` verdict, a `send`
    dropped on its sponsorship read, and a `send` that loses the cap all leave
    the job `status='new'`, `notified=0`, so it re-competes against new
    arrivals tomorrow — as does a candidate the agent never reviewed. Only an
    explicit `reject` verdict sets `status='rejected'`, which is what removes
    it from future nightly candidate batches.
+7. That digest is ONE message for the whole night, not one message per job
+   (`scraper.format_digest_message` composes it). Entries are grouped under a
+   fixed market order — Dubai, Abu Dhabi, Jeddah, Riyadh, Switzerland
+   (`scraper.DIGEST_MARKET_ORDER`) — sorted by `ai_rank` inside each market,
+   then numbered 1..N in the order they are printed, reading top to bottom.
+   That number is a fresh display label, **not** `ai_rank`: `ai_rank` has gaps
+   (candidates that lost the cap) and does not respect market grouping, so a
+   job in an earlier market can be numbered 1 while carrying a worse rank than
+   a job printed below it. Every market gets a header line even when it has
+   nothing to send, suffixed `— nothing today`, so a quiet market reads as
+   quiet rather than as a failed run. The message also carries a live count of
+   what is still queued, with the top few queued scores.
+8. A bare numeric reply that follows the digest (e.g. "2") refers to that job
+   — resolved from your own memory of the digest you just sent, not from any
+   stored mapping. Look up that job's id, run `scraper.py --get-job <id>`, and
+   continue into the tailoring workflow below exactly as if the user had named
+   the job directly.
+9. A reply of "more" runs `scraper.py --list-queued` (`--limit N` widens it)
+   and is presented as a short follow-up text list — not a second digest, and
+   not numbered for further drill-down.
+10. The digest carries no buttons; every follow-up is an ordinary text reply.
+    The existing "interested" trigger is unchanged: once a specific job is in
+    view — from a numbered reply or from the user naming it — that word works
+    exactly as documented below.
 
 ### When user replies "interested" for a job:
 Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; scripts handle rendering, state tracking, and browser-page inspection.
@@ -319,6 +343,9 @@ python3 scraper.py --collect-only
 
 # Get job as JSON
 python3 scraper.py --get-job <job_id>
+
+# List the top queued (eligible but unsent) jobs as JSON — the "more" reply
+python3 scraper.py --list-queued [--limit N]
 
 # Send message via Telegram
 python3 scraper.py --send-msg "<html message>"
