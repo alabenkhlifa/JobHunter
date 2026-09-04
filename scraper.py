@@ -775,6 +775,7 @@ def record_review(conn, verdicts):
     score or score_breakdown. Returns the written send-verdict rows, each
     carrying the market select_sendable needs.
     """
+    conn.row_factory = sqlite3.Row
     threshold = CONFIG["score_threshold"]
     eligible_rows = conn.execute(
         "SELECT id, location FROM jobs WHERE notified = 0 AND status = 'new' AND score >= ?",

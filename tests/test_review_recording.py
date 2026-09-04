@@ -168,3 +168,21 @@ def test_record_review_never_touches_score():
     scraper.record_review(conn, [verdict("j1", "send")])
     row = conn.execute("SELECT score FROM jobs WHERE id = 'j1'").fetchone()
     assert row["score"] == 77
+
+
+def test_record_review_works_on_a_connection_without_a_row_factory():
+    # A plain init_db() connection arrives with no row_factory -- record_review
+    # must set its own rather than rely on the caller having configured one.
+    conn = make_conn([("j1", {})])
+    conn.row_factory = None
+
+    written = scraper.record_review(conn, [verdict("j1", "send", rank=3)])
+
+    assert len(written) == 1
+    assert written[0]["market"] == "dubai"
+    assert written[0]["ai_rank"] == 3
+    written_verdict, rank = conn.execute(
+        "SELECT ai_verdict, ai_rank FROM jobs WHERE id = 'j1'"
+    ).fetchone()
+    assert written_verdict == "send"
+    assert rank == 3
