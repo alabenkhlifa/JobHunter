@@ -2109,6 +2109,44 @@ def job_inline_keyboard(job):
     }
 
 
+def _queued_after_send(conn, sent_ids):
+    """Scores of eligible jobs not selected tonight -- what's still queued.
+
+    Excludes the just-selected ids explicitly rather than relying on
+    mark_notified having already run first -- order-independent by
+    construction, so a future reordering of send_digest's steps can't
+    silently double-count the jobs it just sent.
+    """
+    threshold = CONFIG["score_threshold"]
+    query = "SELECT score FROM jobs WHERE notified = 0 AND status = 'new' AND score >= ?"
+    params = [threshold]
+    if sent_ids:
+        placeholders = ",".join("?" * len(sent_ids))
+        query += f" AND id NOT IN ({placeholders})"
+        params.extend(sent_ids)
+    query += " ORDER BY score DESC"
+    return [row[0] for row in conn.execute(query, params).fetchall()]
+
+
+def send_digest(token, chat_id, conn, selected):
+    """Compose and send the one nightly digest, then mark selected jobs notified."""
+    sent = []
+    for row in selected:
+        job = dict(row)
+        job["market"] = job_scoring.market_region(job.get("location"))
+        sent.append(job)
+
+    sent_ids = [job["id"] for job in sent]
+    queued_scores = _queued_after_send(conn, sent_ids)
+    queued_count = len(queued_scores)
+    queued_top_scores = queued_scores[:3]
+
+    message = format_digest_message(sent, queued_count, queued_top_scores)
+    send_telegram(token, chat_id, message)
+    if sent_ids:
+        mark_notified(conn, sent_ids)
+
+
 def notify_new_jobs(token, chat_id, jobs):
     if not jobs:
         return

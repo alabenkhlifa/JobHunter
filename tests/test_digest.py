@@ -1,4 +1,6 @@
+import sqlite3
 from datetime import datetime, timezone
+from unittest import mock
 
 import scraper
 
@@ -112,3 +114,88 @@ def test_format_digest_message_shows_the_queued_line():
 def test_format_digest_message_omits_queued_line_when_nothing_queued():
     msg = scraper.format_digest_message([], 0, [])
     assert "more queued" not in msg
+
+
+CONFIG_BACKUP = dict(scraper.CONFIG)
+
+
+def make_conn(rows):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE jobs (
+            id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT,
+            score INTEGER, notified INTEGER DEFAULT 0, status TEXT DEFAULT 'new',
+            date_posted TEXT DEFAULT '', tech_required TEXT DEFAULT '',
+            recruiter_company TEXT DEFAULT '', credibility_notes TEXT DEFAULT '',
+            ai_verdict TEXT DEFAULT '', ai_verdict_reason TEXT DEFAULT '',
+            ai_sponsorship TEXT DEFAULT '', ai_rank INTEGER
+        )
+        """
+    )
+    for job_id, over in rows:
+        base = {"id": job_id, "title": "Backend Architect", "company": "Acme",
+                "location": "Dubai, United Arab Emirates", "score": 60,
+                "notified": 0, "status": "new", "ai_rank": None}
+        base.update(over)
+        conn.execute(
+            "INSERT INTO jobs (id, title, company, location, score, notified, status, ai_rank) "
+            "VALUES (:id, :title, :company, :location, :score, :notified, :status, :ai_rank)",
+            base,
+        )
+    conn.commit()
+    return conn
+
+
+def setup_module(module):
+    scraper.CONFIG["score_threshold"] = 45
+
+
+def teardown_module(module):
+    scraper.CONFIG.clear()
+    scraper.CONFIG.update(CONFIG_BACKUP)
+
+
+def test_send_digest_sends_exactly_one_message():
+    conn = make_conn([("sent1", {"score": 80, "ai_rank": 1}), ("sent2", {"score": 70, "ai_rank": 2})])
+    selected = [dict(conn.execute("SELECT * FROM jobs WHERE id = ?", (jid,)).fetchone())
+                for jid in ("sent1", "sent2")]
+    with mock.patch.object(scraper, "send_telegram") as fake_send:
+        fake_send.return_value = True
+        scraper.send_digest("tok", "chat", conn, selected)
+    assert fake_send.call_count == 1
+
+
+def test_send_digest_marks_only_the_selected_jobs_notified():
+    conn = make_conn([
+        ("sent1", {"score": 80, "ai_rank": 1}),
+        ("queued1", {"score": 60}),
+    ])
+    selected = [dict(conn.execute("SELECT * FROM jobs WHERE id = ?", ("sent1",)).fetchone())]
+    with mock.patch.object(scraper, "send_telegram") as fake_send:
+        fake_send.return_value = True
+        scraper.send_digest("tok", "chat", conn, selected)
+    sent_row = conn.execute("SELECT notified FROM jobs WHERE id='sent1'").fetchone()
+    queued_row = conn.execute("SELECT notified FROM jobs WHERE id='queued1'").fetchone()
+    assert sent_row["notified"] == 1
+    assert queued_row["notified"] == 0
+
+
+def test_send_digest_queued_count_excludes_the_selected_jobs_and_ineligible_ones():
+    conn = make_conn([
+        ("sent1", {"score": 80, "ai_rank": 1}),
+        ("queued1", {"score": 60}),
+        ("queued2", {"score": 50}),
+        ("below_threshold", {"score": 20}),
+        ("already_notified", {"score": 90, "notified": 1}),
+    ])
+    selected = [dict(conn.execute("SELECT * FROM jobs WHERE id = ?", ("sent1",)).fetchone())]
+    with mock.patch.object(scraper, "format_digest_message") as fake_format:
+        fake_format.return_value = "digest text"
+        with mock.patch.object(scraper, "send_telegram") as fake_send:
+            fake_send.return_value = True
+            scraper.send_digest("tok", "chat", conn, selected)
+    _, queued_count, queued_top_scores = fake_format.call_args[0]
+    assert queued_count == 2
+    assert queued_top_scores == [60, 50]
