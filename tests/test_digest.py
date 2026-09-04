@@ -199,3 +199,25 @@ def test_send_digest_queued_count_excludes_the_selected_jobs_and_ineligible_ones
     _, queued_count, queued_top_scores = fake_format.call_args[0]
     assert queued_count == 2
     assert queued_top_scores == [60, 50]
+
+
+def test_list_queued_jobs_respects_limit_and_excludes_notified():
+    conn = make_conn([
+        ("q1", {"score": 90}),
+        ("q2", {"score": 80}),
+        ("q3", {"score": 70}),
+        ("notified_already", {"score": 95, "notified": 1}),
+    ])
+    result = scraper.list_queued_jobs(conn, limit=2)
+    assert [r["score"] for r in result] == [90, 80]
+
+
+def test_list_queued_jobs_includes_market():
+    conn = make_conn([("q1", {"score": 90, "location": "Zurich, Switzerland"})])
+    result = scraper.list_queued_jobs(conn, limit=10)
+    assert result[0]["market"] == "switzerland"
+
+
+def test_list_queued_jobs_empty_queue_returns_empty_list():
+    conn = make_conn([("below_threshold", {"score": 20})])
+    assert scraper.list_queued_jobs(conn) == []

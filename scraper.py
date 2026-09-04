@@ -865,6 +865,24 @@ def get_job_by_id(conn, job_id):
     return dict(row)
 
 
+def list_queued_jobs(conn, limit=10):
+    """Top eligible-but-unsent jobs by score, for the 'more' conversational flow."""
+    threshold = CONFIG["score_threshold"]
+    rows = conn.execute(
+        "SELECT id, title, company, location, score FROM jobs "
+        "WHERE notified = 0 AND status = 'new' AND score >= ? "
+        "ORDER BY score DESC LIMIT ?",
+        (threshold, limit),
+    ).fetchall()
+    return [
+        {
+            "id": row[0], "title": row[1], "company": row[2],
+            "market": job_scoring.market_region(row[3]), "score": row[4],
+        }
+        for row in rows
+    ]
+
+
 def _dict_counts(rows):
     """Convert two-column SQLite count rows into a stable dict."""
     return {str(key): int(count) for key, count in rows}
@@ -2179,6 +2197,8 @@ def parse_args():
     parser.add_argument("--profile", metavar="NAME", help="Load profile from data/<NAME>/config.json")
     parser.add_argument("--collect-only", action="store_true", help="Scrape and store matches without sending notifications")
     parser.add_argument("--get-job", metavar="ID", help="Print job JSON to stdout")
+    parser.add_argument("--list-queued", action="store_true", help="Print top queued jobs as JSON")
+    parser.add_argument("--limit", type=int, default=10, metavar="N", help="Row limit for --list-queued")
     parser.add_argument("--send-doc", metavar="PATH", help="Send document via Telegram")
     parser.add_argument("--send-msg", metavar="TEXT", help="Send message via Telegram")
     parser.add_argument("--mark-interested", metavar="ID", help="Mark job as interested in DB")
@@ -2206,6 +2226,13 @@ def main():
             print(json.dumps({"error": f"Job not found: {args.get_job}"}), file=sys.stderr)
             sys.exit(1)
         print(json.dumps(job, indent=2))
+        return
+
+    if args.list_queued:
+        conn = init_db()
+        jobs = list_queued_jobs(conn, limit=args.limit)
+        conn.close()
+        print(json.dumps(jobs, indent=2))
         return
 
     if args.mark_interested:
