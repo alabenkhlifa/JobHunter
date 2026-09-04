@@ -31,9 +31,40 @@ ROLE_FAMILY_BLOCKS = (
 # Exact strings he asked to block. These stay literal: stripping "senior" from
 # "senior cloud architect" would turn it back into a title he wants.
 LITERAL_BLOCKS = (
-    "staff engineer", "staff software engineer", "senior architect",
-    "senior cloud architect", "senior lead software engineer",
+    "senior architect", "senior cloud architect", "senior lead software engineer",
 )
+
+# Individual-contributor titles above the level he wants, confirmed directly
+# with him rather than inferred: "too senior" was his most common skip reason
+# (10 of 25 ratings) and the rubric had no way to see it. Distinct from
+# SENIORITY_WORDS: those are management-track words normalise_title strips so
+# the underlying role family can judge them (Engineering Manager stays a
+# role_fit call, not a knockout, per the Task 1 ruling). These are
+# individual-contributor words with no such ambiguity -- he ruled them out
+# directly, regardless of company or role. "staff engineer" and "staff
+# software engineer" left LITERAL_BLOCKS above to be covered by this wider rule.
+#
+# Split by position, because two of the four carry a second sense. Opening a
+# title, "enterprise" and "expert" name a level: `Enterprise Architect`,
+# `Expert Solution Architect`. Trailing the role noun they name a segment, a
+# product or a skill -- `Snr Solution Architect, MENAT Enterprise` is an AWS
+# business unit, in Dubai, at full role fit, and he separately marked two other
+# Solutions Architect titles interested. Blocking those two words anywhere in
+# the title cost that posting, so they are anchored to the front.
+#
+# The anchor is deliberately blunt and under-blocks. Of the 30 full-fit
+# in-market corpus titles carrying either word, it blocks 20 and lets 10
+# through; one of those ten is the AWS posting it is meant to save, but six are
+# genuine over-senior roles that simply do not open with the word --
+# `Lead Enterprise Architect`, `AI Enterprise Architect`, `Cloud Enterprise
+# Architect`, `Technology Strategy/Enterprise Architect Consultant` among them.
+# Reaching those needs the modifier tested against the role noun it qualifies
+# rather than against the start of the string, which is a rule-shape change and
+# his call to make; this is the conservative half, and it never blocks a title
+# he wants. "principal" and "staff" have no trailing sense anywhere in the
+# corpus and stay unconditional.
+SENIOR_TITLE_MODIFIERS = ("principal", "staff")
+LEADING_SENIOR_TITLE_MODIFIERS = ("enterprise", "expert")
 
 _WORD = re.compile(r"[a-z0-9+#.-]+")
 
@@ -44,6 +75,14 @@ _INFLECTION = r"(?:s|es|er|ers|ing|js|\.js)?"
 _FAMILY_PATTERNS = tuple(
     (family, re.compile(rf"\b{re.escape(family)}{_INFLECTION}\b"))
     for family in ROLE_FAMILY_BLOCKS
+)
+_SENIOR_MODIFIER_PATTERNS = tuple(
+    (word, re.compile(rf"\b{re.escape(word)}{_INFLECTION}\b"))
+    for word in SENIOR_TITLE_MODIFIERS
+)
+_LEADING_SENIOR_MODIFIER_PATTERNS = tuple(
+    (word, re.compile(rf"^{re.escape(word)}{_INFLECTION}\b"))
+    for word in LEADING_SENIOR_TITLE_MODIFIERS
 )
 
 # Two family words name a technology at least as often as they name a role,
@@ -105,6 +144,13 @@ def blocked_title(job):
     for phrase in LITERAL_BLOCKS:
         if phrase in raw:
             return f"blocked title: {phrase}"
+    for word, pattern in _SENIOR_MODIFIER_PATTERNS:
+        if pattern.search(raw):
+            return f"blocked title: too senior ({word})"
+    # Anchored, so strip the incidental leading whitespace a scraped title carries.
+    for word, pattern in _LEADING_SENIOR_MODIFIER_PATTERNS:
+        if pattern.match(raw.strip()):
+            return f"blocked title: too senior ({word})"
 
     normalised = normalise_title(raw)
     rescuable = None  # computed once, and only if a rescuable family matches

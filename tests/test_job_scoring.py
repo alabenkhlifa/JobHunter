@@ -21,10 +21,37 @@ def test_blocked_title_keeps_the_titles_he_wants():
         assert job_scoring.blocked_title({"title": title}) is None, title
 
 
-def test_blocked_title_honours_the_four_literal_blocks():
-    for title in ("Staff Engineer", "Senior Architect", "Senior Cloud Architect",
+def test_blocked_title_honours_the_three_literal_blocks():
+    for title in ("Senior Architect", "Senior Cloud Architect",
                   "Senior Lead Software Engineer"):
         assert job_scoring.blocked_title({"title": title}), title
+
+
+def test_blocked_title_catches_over_senior_modifiers():
+    for title in ("Principal Technical Architect", "Expert Solution Architect",
+                  "Enterprise Data & Cloud Solutions Architect",
+                  "Staff Architect", "Staff Backend Engineer"):
+        assert job_scoring.blocked_title({"title": title}), title
+
+
+def test_blocked_title_names_the_seniority_modifier():
+    assert (job_scoring.blocked_title({"title": "Principal Architect"})
+            == "blocked title: too senior (principal)")
+
+
+def test_blocked_title_still_keeps_management_track_titles_he_might_want():
+    for title in ("Head of Engineering", "Lead Software Engineer", "Engineering Manager"):
+        assert job_scoring.blocked_title({"title": title}) is None, title
+
+
+def test_blocked_title_does_not_block_enterprise_or_expert_as_a_trailing_segment_name():
+    # Opening a title, both words name a level. Trailing the role noun they name
+    # a segment, a product or a skill: "MENAT Enterprise" is the AWS business
+    # unit hiring a Senior Solutions Architect in Dubai -- his own target title,
+    # in his primary market. The second is knocked out on location today; pin
+    # the title-level behaviour so it cannot regress if the market list widens.
+    assert job_scoring.blocked_title({"title": "Snr Solution Architect, MENAT Enterprise"}) is None
+    assert job_scoring.blocked_title({"title": "Senior Software Engineer, Wikimedia Enterprise"}) is None
 
 
 def test_blocked_title_is_not_fooled_by_a_hyphen():
@@ -48,7 +75,7 @@ def test_blocked_title_catches_suffixed_forms_of_blocked_families():
 
 def test_blocked_title_says_which_rule_rejected_it():
     assert job_scoring.blocked_title({"title": "DevOps Manager"}) == "blocked role family: devops"
-    assert job_scoring.blocked_title({"title": "Staff Engineer"}) == "blocked title: staff engineer"
+    assert job_scoring.blocked_title({"title": "Staff Engineer"}) == "blocked title: too senior (staff)"
 
 
 UAE = ("dubai", "abu dhabi", "jeddah", "switzerland")
