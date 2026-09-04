@@ -2020,7 +2020,11 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
     Every job-derived string is HTML-escaped: send_telegram posts with
     parse_mode=HTML, and this is one message for the whole night, so a
     single stray "<" or "&" in one title would cost the entire digest
-    rather than the one card it came from.
+    rather than the one card it came from. Each is read as
+    `.get(name) or ""`, never `.get(name, "")`: the jobs table has no
+    NOT NULL on title, company or ai_sponsorship, a get default fires
+    only on a MISSING key, and html.escape(None) raises -- which would
+    lose the whole digest by the same blast radius the escaping closes.
     """
     today = today or datetime.now(timezone.utc)
     by_market = {}
@@ -2047,10 +2051,12 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
             hiring_route = (
                 "\U0001f91d hires directly" if direct else "\U0001f575 via a recruiter"
             )
-            sponsorship = html.escape(job.get("ai_sponsorship", ""))
-            lines.append(f"{_digest_number(number)} {html.escape(job['title'])}")
+            sponsorship = html.escape(job.get("ai_sponsorship") or "")
+            title = html.escape(job.get("title") or "")
+            company = html.escape(job.get("company") or "")
+            lines.append(f"{_digest_number(number)} {title}")
             lines.append(
-                f"   ⭐ {job['score']} · \U0001f3e2 {html.escape(job['company'])} · "
+                f"   ⭐ {job['score']} · \U0001f3e2 {company} · "
                 f"{hiring_route} · \U0001f6c2 sponsorship {sponsorship}"
             )
             req = html.escape(job.get("tech_required") or "")

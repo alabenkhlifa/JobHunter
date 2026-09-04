@@ -37,6 +37,34 @@ def test_format_digest_message_numbers_by_display_order_not_ai_rank():
     assert dubai_idx < ch_idx
 
 
+def test_format_digest_message_sorts_within_a_market_by_ai_rank():
+    # Two jobs in the SAME market, supplied worst-rank-first: the digest must
+    # print them in ai_rank order regardless of the order they arrive in.
+    jobs = [
+        job(id="dx2", market="dubai", ai_rank=2, title="Runner Up"),
+        job(id="dx1", market="dubai", ai_rank=1, title="Top Pick"),
+    ]
+    msg = scraper.format_digest_message(jobs, 0, [])
+    lines = msg.splitlines()
+    top_idx = next(i for i, l in enumerate(lines) if "Top Pick" in l)
+    runner_idx = next(i for i, l in enumerate(lines) if "Runner Up" in l)
+    assert top_idx < runner_idx
+    assert lines[top_idx].startswith("1️⃣")
+    assert lines[runner_idx].startswith("2️⃣")
+
+
+def test_format_digest_message_survives_null_job_fields():
+    # The jobs table has no NOT NULL on title, company or ai_sponsorship, so a
+    # row can hold SQL NULL. dict.get's default only fires on a MISSING key,
+    # never on a present-but-None value -- and one None would take down the
+    # whole night's digest, not just the entry it came from.
+    nulled = job(title=None, company=None, ai_sponsorship=None,
+                 tech_required=None, ai_verdict_reason=None)
+    msg = scraper.format_digest_message([nulled], 0, [])
+    assert "1 sent" in msg
+    assert "None" not in msg
+
+
 def test_format_digest_message_shows_hiring_route_for_both_employer_tiers():
     direct_job = job(id="d1", company="Acme")
     agency_job = job(id="a1", company="Confidential Recruitment Agency")
