@@ -100,6 +100,23 @@ either, so this is a market-and-context judgment, not a phrase match.
 The exact prompt wording is a rollout concern (below), not a code artifact —
 it lives in the Hermes cron job's `prompt` field, outside this repo.
 
+## A new city-level classifier: `market_region`
+
+```python
+def market_region(location):
+    """Which of his five markets a displayed location falls in.
+
+    Matches the same way market_country and knockout do — "unknown" when
+    nothing places it, same fallback rule as market_country. Reuses
+    MARKET_COUNTRIES's already-verified terms rather than a second list.
+    """
+```
+
+Small term-to-region map for the UAE/KSA cities (each already an atomic term
+in `MARKET_COUNTRIES`), plus a fallback to the existing `ch` tuple —
+Switzerland is one market by the original design (a country-wide scrape
+query, not a city list), so it needs no sub-division.
+
 ## Mechanical selection: `select_sendable`
 
 New pure function in `job_scoring.py`, no DB access, matching the module's
@@ -116,17 +133,47 @@ def select_sendable(reviewed, *, per_market=3, cap=12):
 ```
 
 - Input: an iterable of dicts, each already carrying `ai_verdict`,
-  `ai_sponsorship`, `ai_rank`, and `market` (derived the same way
-  `job_scoring.market_country` already derives it from `location`).
+  `ai_sponsorship`, `ai_rank`, and `market` — a new `job_scoring.market_region`
+  function, **not** the existing `market_country`. `market_country` groups by
+  country for `duplicate_key`'s purposes (Dubai and Abu Dhabi both return
+  `"uae"`); the digest's markets are cities (the 2026-09-03 spec's own mockup
+  shows `🇦🇪 DUBAI` and `🇨🇭 SWITZERLAND` as separate market headers, and its
+  Goal statement gives Dubai and Abu Dhabi separate daily-supply figures), so
+  reusing `market_country` here would silently merge two of his five markets
+  into one for selection purposes. `market_region` reuses `MARKET_COUNTRIES`'s
+  already-verified spellings (including the Swiss city/language variants and
+  the `jiddah` transliteration) rather than duplicating them, it just maps
+  each UAE/KSA city term to its own city bucket instead of its country
+  bucket, and keeps Switzerland as one market (unchanged — a country-wide
+  bucket by original design, not a city split).
 - Filters to `ai_verdict == "send"` and `ai_sponsorship in ("offered", "implied")`
   first — a `send` verdict with a `doubtful`/`excluded` sponsorship read is
   dropped here, not sent, and not marked `rejected` either: sponsorship is
   mostly a market fact, not a per-posting one, so it isn't treated as a
   permanent rejection, it just doesn't clear this round.
 - Groups the survivors by market. Within each market, sorts by `ai_rank`
-  ascending and keeps the first `per_market`.
-- Spillover: whatever didn't make its market's top `per_market`, sorted by
-  `ai_rank` ascending across all markets, fills remaining slots up to `cap`.
+  ascending and keeps the first `per_market`: this is the **floor** — the
+  guaranteed slice each market gets before anything else is considered.
+- **Confirmed with the user directly** (the original 2026-09-03 spec's "spill
+  unused slots to other markets" is genuinely ambiguous about whether a
+  market can ever exceed `per_market`): yes, a thin or absent market's unused
+  capacity flows to whichever other market has more good candidates. If
+  Jeddah has one sendable job today, two of its three slots are unused and
+  become available to, say, Dubai's fourth-ranked candidate. In the extreme,
+  a single market with every other market empty can use the entire `cap`.
+- **The per-market floor can independently exceed the cap.** The original
+  2026-09-03 spec's `3 per market, spill to 12` arithmetic assumed 4 markets
+  (3×4=12); Task 7 later added Riyadh as a fifth, and 3×5=15 > 12. When the
+  floor alone (every market's own top `per_market`, nothing spilled in yet)
+  already reaches or exceeds `cap`, it is truncated to the global top `cap`
+  by `ai_rank` **before spillover is even considered** — a market cannot
+  exceed `per_market` in this branch, since there is no unused capacity
+  anywhere to spill. The two behaviors are mutually exclusive by
+  construction: spillover only ever runs when the floor is under `cap`,
+  which is exactly when at least one market left capacity unused.
+- Spillover, when it runs: whatever didn't make its market's top `per_market`
+  — from *any* market, including one already at its own floor — sorted by
+  `ai_rank` ascending, fills remaining slots up to `cap`.
 - Returns the selected jobs, in send order (their `ai_rank`).
 - Deterministic and total-order-safe: two jobs can't share a rank inside one
   market's top-N slice without an arbitrary tie-break, so `record_review`
@@ -182,7 +229,9 @@ def record_review(conn, verdicts):
   `ai_sponsorship`, `ai_rank` (send entries only; left `NULL` for hold/reject).
   Sets `status='rejected'` for `reject` entries.
 - Returns the written `send` rows (each carrying its market, derived via
-  `job_scoring.market_country(row["location"])`) for `select_sendable`.
+  `job_scoring.market_region(row["location"])` — see the note under
+  "Mechanical selection" on why this is a new function, not the existing
+  `market_country`) for `select_sendable`.
 
 ## `jobhunter_review.py`
 
@@ -248,10 +297,17 @@ happens once this round's implementation is built, tested, and reviewed.
 
 ## Acceptance
 
-- `select_sendable` is pure, DB-free, and unit-tested: empty input, exact
-  3-per-market, spillover order, the 12 cap, sponsorship filtering, verdict
-  filtering, and the "fewer than 3 in a market frees spillover capacity"
-  case.
+- `market_region` is unit-tested: each of the five markets (including the
+  `jiddah` transliteration and at least one non-Zurich Swiss city), a bare
+  country name (`"unknown"`, same as `market_country`), and an empty/garbage
+  location.
+- `select_sendable` is pure, DB-free, and unit-tested: empty input, sponsorship
+  filtering, verdict filtering, the floor holding when every represented
+  market uses its full share (no spillover room), a thin market freeing
+  spillover capacity for a richer one, a single market with every other one
+  empty using up to the full `cap` (the confirmed design), spillover order,
+  and the "5 markets each with 3+ sendable jobs truncates to the global top
+  12 before spillover ever runs, no market over 3" case.
 - `record_review` is tested against an in-memory sqlite fixture (matching
   `tests/test_application_tracking.py`'s existing pattern): valid batch
   writes correctly, unknown id is skipped and counted, invalid enum value is
