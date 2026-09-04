@@ -24,7 +24,7 @@ database at `data/jobs.db`.
 - Knockouts are boolean and run before any arithmetic. A knockout returns a reason string.
 - `job_scoring.py` must not import `scraper.py`. Dependency runs one way only.
 - Sponsorship is NOT a stage-1 knockout. The only sponsorship rule here is the existing explicit-refusal phrase list.
-- The four user-specified excluded titles stay literal substrings: `staff engineer`, `senior architect`, `senior cloud architect`, `senior lead software engineer`.
+- Three of the four originally user-specified excluded titles stay literal substrings: `senior architect`, `senior cloud architect`, `senior lead software engineer`. The fourth, `staff engineer`, is generalised by Task 10 into the broader `SENIOR_TITLE_MODIFIERS` word-boundary knockout (`principal`, `expert`, `enterprise`, `staff`) — it still blocks, by a wider rule.
 - Every existing test must still pass: `.venv/bin/python -m pytest -q tests` currently reports 183 passed.
 - Baseline to beat: AUC 0.565, with 2 of 10 interested jobs above threshold.
 
