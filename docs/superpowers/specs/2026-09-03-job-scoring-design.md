@@ -298,3 +298,58 @@ few hundred labels.
 
 Automatic submission. The user chose approval-gated suggestions: a bad
 auto-application goes out under a real name to a real employer.
+
+## Addendum, 2026-09-04: title-seniority knockout (Task 10)
+
+Found from the user rating 25 real postings (see the ledger): "too senior"
+was his single most common skip reason, 10 of 25, and the rubric has no
+concept of it. `normalise_title` strips "principal" and "head of" as
+seniority noise before scoring, and "expert" / "enterprise" were never
+seniority words at all — so `Principal Technical Architect` (84), `Expert
+Solution Architect` (73) and `Enterprise Data & Cloud Solutions Architect`
+(72) all score full role marks with no seniority signal reaching the rubric.
+
+Confirmed with the user directly, since this could not be inferred from the
+ratings alone:
+- The disqualifier is level, not the pre-sales nature some of these titles
+  also carry.
+- A Principal or Expert-titled role is off the table regardless of company —
+  this is a hard knockout, not a score penalty.
+- Hands-on coding is a nice-to-have, not a requirement — so role_fit's
+  existing architect (1.0) / backend engineer (0.8) ordering is untouched.
+  This is a distinct axis from seniority, not a contradiction of it.
+
+### New knockout: `SENIOR_TITLE_MODIFIERS`
+
+`("principal", "expert", "enterprise", "staff")`, matched whole-word against
+the raw lowercased title (same inflection-safe boundary matching as
+`ROLE_FAMILY_BLOCKS`), checked in `blocked_title()`. Any match knocks the
+title out with reason `"blocked title: too senior (<word>)"`.
+
+`staff` folds in and replaces the two existing `LITERAL_BLOCKS` entries
+(`"staff engineer"`, `"staff software engineer"`) — one general rule instead
+of two literal phrases doing the same job.
+
+Deliberately unchanged:
+- `SENIORITY_WORDS` and `normalise_title` — "Head of Engineering" and "Lead
+  Software Engineer" must stay unblocked. The Task 1 ruling that
+  engineering-manager judgment belongs to role_fit, not a knockout, stands:
+  he marked one EM interested and one skipped. "Head of" and "Lead" are
+  management-track words already handled that way; "Principal" / "Expert" /
+  "Enterprise" / "Staff" are individual-contributor over-seniority words with
+  no such ambiguity — he ruled them out directly.
+- `ROLE_FAMILIES` ordering (architect 1.0, backend engineer 0.8) — hands-on
+  coding is not a requirement, so this is not the ordering the "too senior"
+  finding was about.
+
+### Acceptance
+
+Before landing: measure the four-word list against the full corpus (all
+titles containing principal/expert/enterprise/staff) to confirm no false
+positive among titles he would actually want, the same evidence-driven check
+every other knockout in this file was measured against.
+
+Tests: each of the three worked examples above, plus `Staff Architect` and
+`Staff Backend Engineer`, are knocked out. A regression guard confirms `Head
+of Engineering`, `Lead Software Engineer` and `Engineering Manager` remain
+unblocked.

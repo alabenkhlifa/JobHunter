@@ -1220,6 +1220,185 @@ two thirds and is judged on the third it never saw."
 
 ---
 
+### Task 10: Title-seniority knockout
+
+**Spec:** `docs/superpowers/specs/2026-09-03-job-scoring-design.md`, addendum
+"Title-seniority knockout (Task 10)".
+
+**Files:**
+- Modify: `job_scoring.py` (`LITERAL_BLOCKS`, new `SENIOR_TITLE_MODIFIERS`, `blocked_title`)
+- Test: `tests/test_job_scoring.py`
+
+**Interfaces:**
+- Consumes: `_WORD`, `_INFLECTION`, `blocked_title(job)` (signature unchanged),
+  `LITERAL_BLOCKS`, all defined in Task 1.
+- Produces: `SENIOR_TITLE_MODIFIERS: tuple[str, ...]`. `blocked_title` gains a
+  new reason shape, `"blocked title: too senior (<word>)"`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add these tests to `tests/test_job_scoring.py`, and update the two existing
+tests that assert on `LITERAL_BLOCKS`' current shape (`staff engineer` is
+moving out of it):
+
+```python
+def test_blocked_title_catches_over_senior_modifiers():
+    for title in ("Principal Technical Architect", "Expert Solution Architect",
+                  "Enterprise Data & Cloud Solutions Architect",
+                  "Staff Architect", "Staff Backend Engineer"):
+        assert job_scoring.blocked_title({"title": title}), title
+
+
+def test_blocked_title_names_the_seniority_modifier():
+    assert (job_scoring.blocked_title({"title": "Principal Architect"})
+            == "blocked title: too senior (principal)")
+
+
+def test_blocked_title_still_keeps_management_track_titles_he_might_want():
+    for title in ("Head of Engineering", "Lead Software Engineer", "Engineering Manager"):
+        assert job_scoring.blocked_title({"title": title}) is None, title
+```
+
+Replace the existing `test_blocked_title_honours_the_four_literal_blocks`
+(it tests `Staff Engineer` alongside the three `LITERAL_BLOCKS` entries that
+are staying — `Staff Engineer` moves to the new modifier test above):
+
+```python
+def test_blocked_title_honours_the_three_literal_blocks():
+    for title in ("Senior Architect", "Senior Cloud Architect",
+                  "Senior Lead Software Engineer"):
+        assert job_scoring.blocked_title({"title": title}), title
+```
+
+And update the existing reason-string assertion in
+`test_blocked_title_says_which_rule_rejected_it` — `Staff Engineer` no longer
+matches a `LITERAL_BLOCKS` phrase, it matches the new modifier:
+
+```python
+def test_blocked_title_says_which_rule_rejected_it():
+    assert job_scoring.blocked_title({"title": "DevOps Manager"}) == "blocked role family: devops"
+    assert job_scoring.blocked_title({"title": "Staff Engineer"}) == "blocked title: too senior (staff)"
+```
+
+- [ ] **Step 2: Run tests to verify the new ones fail**
+
+Run: `.venv/bin/python -m pytest tests/test_job_scoring.py -v`
+Expected: the three new tests FAIL (`SENIOR_TITLE_MODIFIERS` / new reason
+shape don't exist yet); `test_blocked_title_honours_the_three_literal_blocks`
+passes already (its three titles are untouched); the updated
+`test_blocked_title_says_which_rule_rejected_it` FAILS on the `Staff Engineer`
+assertion.
+
+- [ ] **Step 3: Measure the word list against the real corpus**
+
+Run this before touching `job_scoring.py`, to catch a false positive before
+it ships rather than after:
+
+```bash
+.venv/bin/python - <<'PY'
+import re
+import sqlite3
+
+pattern = re.compile(r"\b(principal|expert|enterprise|staff)\b")
+conn = sqlite3.connect("data/jobs.db")
+titles = [row[0] for row in conn.execute("SELECT DISTINCT title FROM jobs")]
+hits = sorted({t for t in titles if pattern.search(str(t).lower())})
+for t in hits:
+    print(t)
+print(f"\n{len(hits)} distinct titles match")
+PY
+```
+
+Read every title in the output. If any looks like a role he would actually
+want (not just "senior-sounding" — a real false positive, the same bar every
+other knockout in this file was held to), STOP and report it rather than
+silently narrowing the word list. This is a corpus measurement, not a
+decision — a real conflict is a ruling for the user, same as every prior
+task's corpus findings in the ledger.
+
+- [ ] **Step 4: Write the implementation**
+
+In `job_scoring.py`, remove `"staff engineer"` and `"staff software engineer"`
+from `LITERAL_BLOCKS`:
+
+```python
+LITERAL_BLOCKS = (
+    "senior architect", "senior cloud architect", "senior lead software engineer",
+)
+```
+
+Add the new constant directly below `LITERAL_BLOCKS`, and a matching pattern
+tuple next to `_FAMILY_PATTERNS`:
+
+```python
+# Individual-contributor titles above the level he wants, confirmed directly
+# with him rather than inferred: "too senior" was his most common skip reason
+# (10 of 25 ratings) and the rubric had no way to see it. Distinct from
+# SENIORITY_WORDS: those are management-track words normalise_title strips so
+# the underlying role family can judge them (Engineering Manager stays a
+# role_fit call, not a knockout, per the Task 1 ruling). These four are
+# individual-contributor words with no such ambiguity -- he ruled them out
+# directly, regardless of company or role.
+SENIOR_TITLE_MODIFIERS = ("principal", "expert", "enterprise", "staff")
+
+_SENIOR_MODIFIER_PATTERNS = tuple(
+    (word, re.compile(rf"\b{re.escape(word)}{_INFLECTION}\b"))
+    for word in SENIOR_TITLE_MODIFIERS
+)
+```
+
+Wire it into `blocked_title`, checked on the raw lowercased title alongside
+`LITERAL_BLOCKS` and before the family-pattern loop:
+
+```python
+def blocked_title(job):
+    """Return a reason string when the title is one he never wants, else None."""
+    raw = str(job.get("title") or "").lower()
+    for phrase in LITERAL_BLOCKS:
+        if phrase in raw:
+            return f"blocked title: {phrase}"
+    for word, pattern in _SENIOR_MODIFIER_PATTERNS:
+        if pattern.search(raw):
+            return f"blocked title: too senior ({word})"
+
+    normalised = normalise_title(raw)
+    rescuable = None  # computed once, and only if a rescuable family matches
+    for family, pattern in _FAMILY_PATTERNS:
+        for match in pattern.finditer(normalised):
+            if family in RESCUABLE_FAMILIES and _QUALIFIED_BY.search(normalised[:match.start()]):
+                if rescuable is None:
+                    rescuable = _names_work_he_wants(raw, normalised)
+                if rescuable:
+                    continue  # a qualifier on the role, not the role itself
+            return f"blocked role family: {family}"
+    return None
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `.venv/bin/python -m pytest tests/test_job_scoring.py -v`
+Expected: PASS, all tests including the three new ones.
+
+- [ ] **Step 6: Run the full suite**
+
+Run: `.venv/bin/python -m pytest -q tests`
+Expected: PASS, no regressions. Report the before/after count.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add job_scoring.py tests/test_job_scoring.py
+git commit -m "Knock out Principal/Expert/Enterprise/Staff titles as too senior
+
+Confirmed directly with him: 'too senior' was his most common skip reason
+(10 of 25 ratings) and the rubric had no concept of it. These four are
+individual-contributor seniority words he ruled off the table regardless
+of company; management-track words (Head of, Lead) stay a role_fit
+judgment, unchanged."
+```
+
+---
+
 ## What this plan does not cover
 
 Sponsorship beyond the explicit-refusal knockout in Task 2. The spec puts the
