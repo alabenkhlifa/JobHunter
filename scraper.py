@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+import html
 import json
 import logging
 import os
@@ -2015,6 +2016,11 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
     itself: ai_rank has gaps (candidates that lost the cap) and doesn't
     respect market grouping, and a reply of "2" has to mean "the second
     job as printed," not "whatever ai_rank happens to be 2."
+
+    Every job-derived string is HTML-escaped: send_telegram posts with
+    parse_mode=HTML, and this is one message for the whole night, so a
+    single stray "<" or "&" in one title would cost the entire digest
+    rather than the one card it came from.
     """
     today = today or datetime.now(timezone.utc)
     by_market = {}
@@ -2041,13 +2047,13 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
             hiring_route = (
                 "\U0001f91d hires directly" if direct else "\U0001f575 via a recruiter"
             )
-            sponsorship = job.get("ai_sponsorship", "")
-            lines.append(f"{_digest_number(number)} {job['title']}")
+            sponsorship = html.escape(job.get("ai_sponsorship", ""))
+            lines.append(f"{_digest_number(number)} {html.escape(job['title'])}")
             lines.append(
-                f"   ⭐ {job['score']} · \U0001f3e2 {job['company']} · "
+                f"   ⭐ {job['score']} · \U0001f3e2 {html.escape(job['company'])} · "
                 f"{hiring_route} · \U0001f6c2 sponsorship {sponsorship}"
             )
-            req = job.get("tech_required") or ""
+            req = html.escape(job.get("tech_required") or "")
             age = job_age(job.get("date_posted", ""))
             line2 = []
             if req:
@@ -2056,7 +2062,7 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
                 line2.append(f"\U0001f5d3 {age}")
             if line2:
                 lines.append("   " + " · ".join(line2))
-            reason = job.get("ai_verdict_reason") or ""
+            reason = html.escape(job.get("ai_verdict_reason") or "")
             if reason:
                 lines.append(f"   \U0001f4ac {reason}")
             number += 1

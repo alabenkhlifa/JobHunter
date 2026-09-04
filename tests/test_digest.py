@@ -49,6 +49,32 @@ def test_format_digest_message_shows_sponsorship_read():
     assert "sponsorship offered" in msg
 
 
+def test_format_digest_message_escapes_html_in_job_text():
+    # send_telegram posts with parse_mode=HTML, and the digest is one message:
+    # a single stray "<" or "&" in any job would cost the whole night's send,
+    # not just the one card it came from.
+    msg = scraper.format_digest_message(
+        [
+            job(
+                title="Front <End> Dev",
+                company="AT&T",
+                tech_required="C++ & <script>",
+                ai_verdict_reason="pays > market",
+                ai_sponsorship="offered <confirmed>",
+            )
+        ],
+        0,
+        [],
+    )
+    assert "Front &lt;End&gt; Dev" in msg
+    assert "AT&amp;T" in msg
+    assert "C++ &amp; &lt;script&gt;" in msg
+    assert "pays &gt; market" in msg
+    assert "offered &lt;confirmed&gt;" in msg
+    assert "<" not in msg
+    assert ">" not in msg
+
+
 def test_format_digest_message_shows_the_queued_line():
     msg = scraper.format_digest_message([], 6, [71, 68, 66])
     assert "6 more queued" in msg
