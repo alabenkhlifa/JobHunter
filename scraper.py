@@ -1984,6 +1984,95 @@ def format_job_message(job):
     return "\n".join(lines)
 
 
+# The nightly digest's fixed market order and header labels. Lowercase to
+# match job_scoring.market_region's return values directly -- NOT
+# CONFIG["regions"]'s capitalized keys, a different casing convention for
+# a different purpose (scrape-time region search vs. display grouping).
+DIGEST_MARKET_ORDER = ("dubai", "abu dhabi", "jeddah", "riyadh", "switzerland")
+DIGEST_MARKET_LABELS = {
+    "dubai": "\U0001f1e6\U0001f1ea DUBAI",
+    "abu dhabi": "\U0001f1e6\U0001f1ea ABU DHABI",
+    "jeddah": "\U0001f1f8\U0001f1e6 JEDDAH",
+    "riyadh": "\U0001f1f8\U0001f1e6 RIYADH",
+    "switzerland": "\U0001f1e8\U0001f1ed SWITZERLAND",
+}
+_DIGEST_NUMBERS = ("1️⃣", "2️⃣", "3️⃣", "4️⃣",
+                   "5️⃣", "6️⃣", "7️⃣", "8️⃣",
+                   "9️⃣", "\U0001f51f")
+
+
+def _digest_number(n):
+    """The nth entry's label -- a keycap emoji up to 10, a plain number after."""
+    return _DIGEST_NUMBERS[n - 1] if 1 <= n <= len(_DIGEST_NUMBERS) else f"{n}."
+
+
+def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
+    """The one nightly message: sent jobs grouped by market, then the queue.
+
+    `sent` is unordered on input -- this function groups by market, sorts
+    each market's jobs by ai_rank, then numbers them 1..N in that final
+    display order. The number is a fresh sequential label, not ai_rank
+    itself: ai_rank has gaps (candidates that lost the cap) and doesn't
+    respect market grouping, and a reply of "2" has to mean "the second
+    job as printed," not "whatever ai_rank happens to be 2."
+    """
+    today = today or datetime.now(timezone.utc)
+    by_market = {}
+    for job in sent:
+        by_market.setdefault(job["market"], []).append(job)
+    for jobs in by_market.values():
+        jobs.sort(key=lambda j: j["ai_rank"])
+
+    lines = [
+        f"\U0001f3af {today.strftime('%-d %b')} · {len(sent)} sent · {queued_count} queued",
+        "",
+    ]
+
+    number = 1
+    for market in DIGEST_MARKET_ORDER:
+        jobs = by_market.get(market, [])
+        label = DIGEST_MARKET_LABELS[market]
+        if not jobs:
+            lines.append(f"{label} — nothing today")
+            continue
+        lines.append(label)
+        for job in jobs:
+            direct = job_scoring.employer_fit(job) == job_scoring.DIRECT_EMPLOYER
+            hiring_route = (
+                "\U0001f91d hires directly" if direct else "\U0001f575 via a recruiter"
+            )
+            sponsorship = job.get("ai_sponsorship", "")
+            lines.append(f"{_digest_number(number)} {job['title']}")
+            lines.append(
+                f"   ⭐ {job['score']} · \U0001f3e2 {job['company']} · "
+                f"{hiring_route} · \U0001f6c2 sponsorship {sponsorship}"
+            )
+            req = job.get("tech_required") or ""
+            age = job_age(job.get("date_posted", ""))
+            line2 = []
+            if req:
+                line2.append(f"\U0001f9e9 {req}")
+            if age:
+                line2.append(f"\U0001f5d3 {age}")
+            if line2:
+                lines.append("   " + " · ".join(line2))
+            reason = job.get("ai_verdict_reason") or ""
+            if reason:
+                lines.append(f"   \U0001f4ac {reason}")
+            number += 1
+        lines.append("")
+
+    if queued_count:
+        top = ", ".join(str(s) for s in queued_top_scores)
+        lines.append(f"↷ {queued_count} more queued (⭐ {top})")
+        lines.append("")
+
+    lines.append(
+        'Reply with a number to see the full listing, or "more" to see what\'s queued.'
+    )
+    return "\n".join(lines)
+
+
 def job_inline_keyboard(job):
     skip_reasons = [
         ("Wrong stack", "wrong_stack"),
