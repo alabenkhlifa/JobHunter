@@ -45,13 +45,31 @@ def test_blocked_title_still_keeps_management_track_titles_he_might_want():
 
 
 def test_blocked_title_does_not_block_enterprise_or_expert_as_a_trailing_segment_name():
-    # Opening a title, both words name a level. Trailing the role noun they name
-    # a segment, a product or a skill: "MENAT Enterprise" is the AWS business
+    # Before the role noun both words name a level. After it they name a
+    # segment, a product or a skill: "MENAT Enterprise" is the AWS business
     # unit hiring a Senior Solutions Architect in Dubai -- his own target title,
     # in his primary market. The second is knocked out on location today; pin
     # the title-level behaviour so it cannot regress if the market list widens.
     assert job_scoring.blocked_title({"title": "Snr Solution Architect, MENAT Enterprise"}) is None
     assert job_scoring.blocked_title({"title": "Senior Software Engineer, Wikimedia Enterprise"}) is None
+
+
+def test_blocked_title_catches_a_modifier_that_does_not_open_the_title():
+    # The modifier is measured against the role noun, not the start of the
+    # string. Anchoring it to the front let all four of these through, and every
+    # one is an Enterprise Architect posting in his own markets.
+    for title in ("Lead Enterprise Architect", "AI Enterprise Architect",
+                  "Cloud Enterprise Architect (6 Month Contract)",
+                  "Technology Strategy/Enterprise Architect Consultant"):
+        assert (job_scoring.blocked_title({"title": title})
+                == "blocked title: too senior (enterprise)"), title
+
+
+def test_blocked_title_blocks_on_the_word_alone_when_a_title_has_no_role_noun():
+    # Nothing to position against, so the word decides rather than the title
+    # slipping through unjudged.
+    assert (job_scoring.blocked_title({"title": "Principal - Digital Delivery"})
+            == "blocked title: too senior (principal)")
 
 
 def test_blocked_title_is_not_fooled_by_a_hyphen():

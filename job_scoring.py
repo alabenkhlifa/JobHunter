@@ -44,27 +44,19 @@ LITERAL_BLOCKS = (
 # directly, regardless of company or role. "staff engineer" and "staff
 # software engineer" left LITERAL_BLOCKS above to be covered by this wider rule.
 #
-# Split by position, because two of the four carry a second sense. Opening a
-# title, "enterprise" and "expert" name a level: `Enterprise Architect`,
-# `Expert Solution Architect`. Trailing the role noun they name a segment, a
-# product or a skill -- `Snr Solution Architect, MENAT Enterprise` is an AWS
-# business unit, in Dubai, at full role fit, and he separately marked two other
-# Solutions Architect titles interested. Blocking those two words anywhere in
-# the title cost that posting, so they are anchored to the front.
-#
-# The anchor is deliberately blunt and under-blocks. Of the 30 full-fit
-# in-market corpus titles carrying either word, it blocks 20 and lets 10
-# through; one of those ten is the AWS posting it is meant to save, but six are
-# genuine over-senior roles that simply do not open with the word --
-# `Lead Enterprise Architect`, `AI Enterprise Architect`, `Cloud Enterprise
-# Architect`, `Technology Strategy/Enterprise Architect Consultant` among them.
-# Reaching those needs the modifier tested against the role noun it qualifies
-# rather than against the start of the string, which is a rule-shape change and
-# his call to make; this is the conservative half, and it never blocks a title
-# he wants. "principal" and "staff" have no trailing sense anywhere in the
-# corpus and stay unconditional.
-SENIOR_TITLE_MODIFIERS = ("principal", "staff")
-LEADING_SENIOR_TITLE_MODIFIERS = ("enterprise", "expert")
+# The word only names a LEVEL when it comes before the role noun it qualifies:
+# `Enterprise Architect`, `Expert Solution Architect`, `Lead Enterprise
+# Architect`. After the role noun it names something else in every corpus
+# occurrence -- an AWS business segment (`Snr Solution Architect, MENAT
+# Enterprise`, Dubai, at full role fit and a title he is targeting; he
+# separately marked two other Solutions Architect titles interested), a product
+# name (`Senior Software Engineer, Wikimedia Enterprise`), a required skill
+# (`... /Claude Code Expert`). A bare substring match cannot tell those apart
+# and cost the AWS posting; anchoring to the start of the string could not
+# either, and additionally missed `Lead Enterprise Architect` and `AI
+# Enterprise Architect`. Comparing position against the nearest role noun
+# separates both cases.
+SENIOR_TITLE_MODIFIERS = ("principal", "expert", "enterprise", "staff")
 
 _WORD = re.compile(r"[a-z0-9+#.-]+")
 
@@ -76,13 +68,15 @@ _FAMILY_PATTERNS = tuple(
     (family, re.compile(rf"\b{re.escape(family)}{_INFLECTION}\b"))
     for family in ROLE_FAMILY_BLOCKS
 )
+# The nouns a seniority modifier qualifies. Deliberately short: it locates the
+# role word, it does not classify the role, and a longer list would start
+# matching words that are not the head of the title.
+_ROLE_NOUN = re.compile(
+    r"\b(architect(?:ure)?|engineer|developer|consultant|specialist|analyst|designer)\b"
+)
 _SENIOR_MODIFIER_PATTERNS = tuple(
     (word, re.compile(rf"\b{re.escape(word)}{_INFLECTION}\b"))
     for word in SENIOR_TITLE_MODIFIERS
-)
-_LEADING_SENIOR_MODIFIER_PATTERNS = tuple(
-    (word, re.compile(rf"^{re.escape(word)}{_INFLECTION}\b"))
-    for word in LEADING_SENIOR_TITLE_MODIFIERS
 )
 
 # Two family words name a technology at least as often as they name a role,
@@ -144,12 +138,14 @@ def blocked_title(job):
     for phrase in LITERAL_BLOCKS:
         if phrase in raw:
             return f"blocked title: {phrase}"
+    # No role noun means nothing to be positioned against, so fall back to
+    # blocking on the word alone rather than letting an unparseable title
+    # through: `Principal - Digital Delivery` carries no role noun at all.
+    role_noun_match = _ROLE_NOUN.search(raw)
+    role_noun_pos = role_noun_match.start() if role_noun_match else len(raw)
     for word, pattern in _SENIOR_MODIFIER_PATTERNS:
-        if pattern.search(raw):
-            return f"blocked title: too senior ({word})"
-    # Anchored, so strip the incidental leading whitespace a scraped title carries.
-    for word, pattern in _LEADING_SENIOR_MODIFIER_PATTERNS:
-        if pattern.match(raw.strip()):
+        match = pattern.search(raw)
+        if match and match.start() < role_noun_pos:
             return f"blocked title: too senior ({word})"
 
     normalised = normalise_title(raw)
