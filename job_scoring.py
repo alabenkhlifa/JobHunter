@@ -395,6 +395,33 @@ def market_country(location):
     return "unknown"
 
 
+# Which of his five markets a location falls in, for stage-2 selection --
+# NOT market_country, which groups Dubai and Abu Dhabi together as "uae"
+# for duplicate_key's purposes. The digest's markets are cities: the
+# 2026-09-03 spec's own mockup shows Dubai and Switzerland as separate
+# market headers. Switzerland stays one market, unsplit -- a country-wide
+# scrape query by original design, not a city list.
+_REGION_OF_TERM = {
+    "dubai": "dubai", "abu dhabi": "abu dhabi",
+    "jeddah": "jeddah", "jiddah": "jeddah", "riyadh": "riyadh",
+}
+
+
+def market_region(location):
+    """Which of his five markets a displayed location falls in.
+
+    Matches the same way market_country and knockout do. "unknown" when
+    nothing places it -- same fallback rule as market_country.
+    """
+    location = str(location or "").lower()
+    for term, region in _REGION_OF_TERM.items():
+        if term in location:
+            return region
+    if any(term in location for term in MARKET_COUNTRIES["ch"]):
+        return "switzerland"
+    return "unknown"
+
+
 def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset()):
     """Return the reason this job is rejected outright, or None to keep it.
 
@@ -444,6 +471,51 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset())
         return "duplicate of a posting already seen"
 
     return None
+
+
+# Stage 2 (the AI review) hands back a verdict/sponsorship/rank per job;
+# everything after that is mechanical and lives here, not in the model.
+# `per_market` is each market's own FLOOR, not a hard ceiling: confirmed
+# directly with him, a thin or absent market's unused capacity flows to
+# whichever other market has more good candidates -- a single market with
+# every other one empty can use the whole `cap`. The exception is when the
+# floor ALONE (every market's own top `per_market`, before any spillover)
+# already reaches `cap` -- a 5th market (Riyadh, added after the original
+# spec's 3x4=12 arithmetic was written) means that can now happen on its
+# own, with 15 candidates each fully inside their own market's top 3. There
+# is no unused capacity anywhere in that case, so it truncates to the global
+# top `cap` by rank and spillover never runs -- the only situation where no
+# market can exceed `per_market`.
+def select_sendable(reviewed, *, per_market=3, cap=12):
+    """Which reviewed jobs actually get sent, from the agent's verdicts."""
+    sendable = [
+        job for job in reviewed
+        if job.get("ai_verdict") == "send"
+        and job.get("ai_sponsorship") in ("offered", "implied")
+    ]
+
+    by_market = {}
+    for job in sendable:
+        by_market.setdefault(job["market"], []).append(job)
+
+    floor, leftover = [], []
+    for jobs in by_market.values():
+        jobs = sorted(jobs, key=lambda j: j["ai_rank"])
+        floor.extend(jobs[:per_market])
+        leftover.extend(jobs[per_market:])
+
+    floor.sort(key=lambda j: j["ai_rank"])
+    if len(floor) >= cap:
+        return floor[:cap]
+
+    leftover.sort(key=lambda j: j["ai_rank"])
+    selected = floor
+    for job in leftover:
+        if len(selected) >= cap:
+            break
+        selected.append(job)
+    selected.sort(key=lambda j: j["ai_rank"])
+    return selected
 
 
 # His stack in three rings. Core is what he is hired for; cloud is the platform
