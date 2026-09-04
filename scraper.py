@@ -239,7 +239,11 @@ def init_db():
             recruiter_company TEXT DEFAULT '',
             recruiter_profile_url TEXT DEFAULT '',
             company_website TEXT DEFAULT '',
-            credibility_notes TEXT DEFAULT ''
+            credibility_notes TEXT DEFAULT '',
+            ai_verdict TEXT DEFAULT '',
+            ai_verdict_reason TEXT DEFAULT '',
+            ai_sponsorship TEXT DEFAULT '',
+            ai_rank INTEGER
         )
     """)
     init_application_tracking(conn)
@@ -252,6 +256,10 @@ def init_db():
         "ALTER TABLE jobs ADD COLUMN recruiter_profile_url TEXT DEFAULT ''",
         "ALTER TABLE jobs ADD COLUMN company_website TEXT DEFAULT ''",
         "ALTER TABLE jobs ADD COLUMN credibility_notes TEXT DEFAULT ''",
+        "ALTER TABLE jobs ADD COLUMN ai_verdict TEXT DEFAULT ''",
+        "ALTER TABLE jobs ADD COLUMN ai_verdict_reason TEXT DEFAULT ''",
+        "ALTER TABLE jobs ADD COLUMN ai_sponsorship TEXT DEFAULT ''",
+        "ALTER TABLE jobs ADD COLUMN ai_rank INTEGER",
     ]:
         try:
             conn.execute(ddl)
@@ -752,6 +760,70 @@ def mark_notified(conn, job_ids):
         "UPDATE jobs SET notified = 1 WHERE id = ?", [(jid,) for jid in job_ids]
     )
     conn.commit()
+
+
+_AI_VERDICTS = ("send", "hold", "reject")
+_AI_SPONSORSHIP = ("offered", "implied", "doubtful", "excluded")
+
+
+def record_review(conn, verdicts):
+    """Persist the agent's verdicts, validated against today's real candidates.
+
+    Re-queries eligible candidates itself rather than trusting the batch of
+    ids it's handed -- an id that isn't notified=0/status='new'/score above
+    threshold today is not applied. Writes only the four ai_* columns; never
+    score or score_breakdown. Returns the written send-verdict rows, each
+    carrying the market select_sendable needs.
+    """
+    threshold = CONFIG["score_threshold"]
+    eligible_rows = conn.execute(
+        "SELECT id, location FROM jobs WHERE notified = 0 AND status = 'new' AND score >= ?",
+        (threshold,),
+    ).fetchall()
+    eligible = {row["id"]: row["location"] for row in eligible_rows}
+
+    seen_ids = set()
+    seen_ranks = set()
+    for entry in verdicts:
+        job_id = entry.get("job_id")
+        if job_id in seen_ids:
+            return []
+        seen_ids.add(job_id)
+        if entry.get("verdict") == "send":
+            rank = entry.get("rank")
+            if rank in seen_ranks:
+                return []
+            seen_ranks.add(rank)
+
+    written = []
+    for entry in verdicts:
+        job_id = entry.get("job_id")
+        verdict = entry.get("verdict")
+        sponsorship = entry.get("sponsorship")
+        if job_id not in eligible:
+            continue
+        if verdict not in _AI_VERDICTS or sponsorship not in _AI_SPONSORSHIP:
+            continue
+
+        reason = " ".join(str(entry.get("reason") or "").split()[:10])
+        status_update = ", status = 'rejected'" if verdict == "reject" else ""
+        rank = entry.get("rank") if verdict == "send" else None
+        conn.execute(
+            f"UPDATE jobs SET ai_verdict = ?, ai_verdict_reason = ?, "
+            f"ai_sponsorship = ?, ai_rank = ?{status_update} WHERE id = ?",
+            (verdict, reason, sponsorship, rank, job_id),
+        )
+        if verdict == "send":
+            written.append({
+                "id": job_id,
+                "market": job_scoring.market_region(eligible[job_id]),
+                "ai_verdict": verdict,
+                "ai_verdict_reason": reason,
+                "ai_sponsorship": sponsorship,
+                "ai_rank": rank,
+            })
+    conn.commit()
+    return written
 
 
 def mark_interested(conn, job_id):
