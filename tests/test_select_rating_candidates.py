@@ -64,16 +64,34 @@ def test_a_job_can_appear_in_both_batches_if_it_qualifies_for_both():
     assert result["batch_b"][0]["id"] == "both"
 
 
-def test_target_size_caps_the_unique_total_across_both_batches():
-    # Both batches are really populated -- the top 25 clear batch A's 75 gate,
-    # and every row carries the liked role_fit at or above the sendable
-    # threshold, so batch B draws from all 50 -- and the assertion is on the
-    # UNION, because target_size budgets the unique set the rater sees, not
-    # each batch on its own. The two batches rank the same rows by the same
-    # score, so the cap holds across both.
+def test_target_size_caps_each_batch_independently():
+    # 50 rows, all of them eligible for both batches: every score clears batch
+    # A's 75 gate and every row carries the liked role_fit above the sendable
+    # threshold. So the cap actually binds on both -- 50 candidates, 10 slots.
+    #
+    # The assertion is per batch, because that is what the code guarantees.
+    # target_size is NOT a budget on the union: two genuinely disjoint batches
+    # come out at 2 x target_size. The 30-40 unique total the script reaches on
+    # the real corpus comes from that corpus's own A/B overlap and the
+    # posting-level dedup in main(), not from this cap.
     rows = [job(id=f"hi{i}", score=100 - i, role_fit=0.8) for i in range(50)]
     result = src.select_candidates(rows, already_rated_ids=set(), liked_role_fits={0.8},
                                     target_size=10)
-    assert result["batch_a"] and result["batch_b"]
-    unique = {j["id"] for j in result["batch_a"]} | {j["id"] for j in result["batch_b"]}
-    assert len(unique) <= 10
+    assert len(result["batch_a"]) == 10
+    assert len(result["batch_b"]) == 10
+
+
+def test_dedupe_keeps_the_highest_scoring_copy_of_a_cross_posted_job():
+    # The same posting on two boards under two ids: identical title, company
+    # and country, so job_scoring.duplicate_key collapses them. Rating it twice
+    # would also hand the eventual weight refit that job's label twice.
+    rows = [
+        job(id="foundit-1", title="Backend Engineer", company="Acme",
+            location="Dubai, UAE", score=70),
+        job(id="li-1", title="Backend Engineer", company="Acme",
+            location="Dubai, United Arab Emirates", score=82),
+        job(id="li-2", title="Data Engineer", company="Acme",
+            location="Dubai, UAE", score=75),
+    ]
+    kept = src.dedupe_by_posting(rows)
+    assert {j["id"] for j in kept} == {"li-1", "li-2"}

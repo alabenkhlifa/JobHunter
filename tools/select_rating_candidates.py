@@ -11,6 +11,11 @@ A job can appear in both batches if it qualifies for both -- these are
 independent selections, not a partition. Deterministic: each batch is
 ordered by score descending, no random sampling, so a second run (e.g.
 after a scoring change) produces a comparable list.
+
+The pool the batches draw from excludes test-harness rows, jobs that already
+carry a verdict from the interested/skipped label set (a second, disagreeing
+label source), dead postings, and duplicate copies of the same posting
+cross-listed on two boards.
 """
 import json
 import sqlite3
@@ -19,31 +24,54 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "tools"))
+import eval_scoring
+import job_scoring
 
-def freshness_neutral_total(result, job_scoring):
-    """The total with freshness pinned to its undated value.
+# Statuses that already carry a verdict from a different labelling mechanism
+# than the rating artifact this batch feeds. 'interested' and 'skipped' are
+# exactly what eval_scoring.load_labels reads as its own labelled set, so
+# rating one of those again would put two label sources on the same job, free
+# to disagree. 'unavailable' is a posting confirmed dead: asking him to rate a
+# job that no longer exists spends a rating slot on nothing.
+#
+# 'archived' and 'notified' are deliberately NOT here. Neither is a judgement
+# of the job -- they record what the pipeline did with it -- so those rows are
+# still unrated and still eligible.
+ALREADY_JUDGED_STATUSES = ("interested", "skipped", "unavailable")
 
-    Same move as eval_scoring._freshness_neutral_total, for the same reason.
-    Every row in this corpus was posted at least two months ago, so live
-    freshness never reaches a real band: it is 0.7 when the row has no date
-    and 0.2 when it has one, however stale. Ranking on the raw total would
-    hand every undated posting a flat 4-point head start for having a
-    missing field, not a better match. Knocked-out jobs stay at 0.
+
+def dedupe_by_posting(rows):
+    """One row per real posting, keeping the highest-scoring copy.
+
+    The same posting is cross-posted to LinkedIn and Foundit under two ids, so
+    a straight id-level selection asks him to rate the same job twice and, when
+    the ratings come back, hands the weight refit that job's label twice --
+    double-weighted against every posting that appeared on one board only.
+    job_scoring.duplicate_key is the scraper's own identity for a posting,
+    called rather than restated. Scanning score-descending and keeping the
+    first hit per key keeps the copy that would have ranked, so dedup never
+    changes what tops a batch.
     """
-    if not result["passed"]:
-        return 0
-    parts = dict(result["parts"], freshness=job_scoring.UNDATED_FRESHNESS)
-    return round(sum(parts[name] * job_scoring.WEIGHTS[name] for name in job_scoring.WEIGHTS))
+    best = {}
+    for row in sorted(rows, key=lambda r: r["score"], reverse=True):
+        best.setdefault(job_scoring.duplicate_key(row), row)
+    return list(best.values())
 
 
 def select_candidates(rows, already_rated_ids, liked_role_fits, *,
                       excellent_threshold=75, sendable_threshold=45,
-                      # The target is 30-40 unique jobs across BOTH batches, not
-                      # per batch. Each batch is its own independent selection
-                      # (a job can be in both), so the cap is applied to each and
-                      # the union comes out at or below 2 x target_size -- 18
-                      # each is half of the range's midpoint, and the overlap
-                      # between A and B pulls the union back inside 30-40.
+                      # Per-batch cap. Each batch is its own independent
+                      # selection (a job can be in both), so this bounds each
+                      # batch at target_size and the union at 2 x target_size --
+                      # for an arbitrary corpus with disjoint batches the union
+                      # really is 2 x target_size. The 30-40 unique total this
+                      # script lands on is an empirical property of THIS corpus:
+                      # 18 each plus the overlap between A and B plus the
+                      # posting-level dedup in main() happen to land there. It
+                      # is not a guarantee the algorithm provides, and the plan's
+                      # "take what exists, don't pad" applies if it comes in low.
                       target_size=18):
     unrated = [r for r in rows if r["id"] not in already_rated_ids]
 
@@ -62,17 +90,10 @@ def select_candidates(rows, already_rated_ids, liked_role_fits, *,
 
 
 def main():
-    sys.path.insert(0, str(REPO))
-    import job_scoring
-
     conn = sqlite3.connect(REPO / "data" / "jobs.db")
     conn.row_factory = sqlite3.Row
-    # `test-%` ids are rows the Telegram/CTA test harness wrote, not postings.
-    # They must never reach the rating artifact -- one of them carries a
-    # hand-set score high enough to top batch A on its own.
-    rows = conn.execute(
-        "SELECT * FROM jobs WHERE id NOT LIKE 'test-%'"
-    ).fetchall()
+    rows = conn.execute("SELECT * FROM jobs").fetchall()
+    conn.close()
 
     # Score live rather than read the stored `score` column. The column holds
     # whatever the rubric said on the day the row was written, and the rubric
@@ -82,10 +103,22 @@ def main():
     # and no `now=` override. That is what fit_weights and eval_scoring.report
     # do for the same reason: the rating and refit data must reflect the
     # scorer that ships today. The one departure is freshness, which is
-    # neutralised for ranking -- see freshness_neutral_total.
+    # neutralised for ranking -- eval_scoring._freshness_neutral_total, called
+    # rather than copied, so ranking here cannot drift from the measurement.
     scored = []
     for row in rows:
         job = dict(row)
+        # eval_scoring's exclusion, called rather than restated. Harness rows
+        # are not postings anyone published, and one carries a hand-set score
+        # high enough to top batch A on its own.
+        if eval_scoring.is_fixture(job):
+            continue
+        if (job.get("status") or "") in ALREADY_JUDGED_STATUSES:
+            continue
+        # Blanked the way eval_scoring and fit_weights blank them: the scraper
+        # fills recruiter_company and credibility_notes after score_job runs,
+        # so a stored row carries fields production never sees while scoring.
+        job = eval_scoring.as_scored_live(job)
         result = job_scoring.evaluate(
             job, allowed_locations=job_scoring.DEFAULT_MARKETS
         )
@@ -94,7 +127,7 @@ def main():
             "title": job["title"],
             "company": job["company"],
             "location": job["location"],
-            "score": freshness_neutral_total(result, job_scoring),
+            "score": eval_scoring._freshness_neutral_total(result),
             "tech_required": job["tech_required"],
             "tech_nice_to_have": job["tech_nice_to_have"],
             "min_experience": job["min_experience"],
@@ -117,7 +150,8 @@ def main():
     }
     liked_role_fits = {0.8, 0.4}
 
-    result = select_candidates(scored, already_rated_ids, liked_role_fits)
+    result = select_candidates(dedupe_by_posting(scored), already_rated_ids,
+                               liked_role_fits)
     print(json.dumps(result, indent=2, default=str))
 
 
