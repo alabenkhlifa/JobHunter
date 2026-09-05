@@ -238,6 +238,38 @@ def test_stack_fit_treats_k8s_as_kubernetes():
     assert job_scoring.stack_fit(short) == job_scoring.stack_fit(spelled)
 
 
+def test_ai_stack_ring_credits_a_canonical_term():
+    job_without_ai = {"tech_required": "java, spring boot", "tech_nice_to_have": ""}
+    job_with_ai = {"tech_required": "java, spring boot, llm, rag", "tech_nice_to_have": ""}
+    assert job_scoring.stack_fit(job_with_ai) > job_scoring.stack_fit(job_without_ai)
+
+
+def test_ai_stack_ring_resolves_aliases_to_the_same_canonical_term():
+    literal = {"tech_required": "java, generative ai", "tech_nice_to_have": ""}
+    aliased = {"tech_required": "java, genai", "tech_nice_to_have": ""}
+    assert job_scoring.stack_fit(literal) == job_scoring.stack_fit(aliased)
+
+
+def test_ai_stack_ring_folds_named_agent_frameworks_onto_one_canonical_term():
+    langchain = {"tech_required": "python, langchain", "tech_nice_to_have": ""}
+    crewai = {"tech_required": "python, crewai", "tech_nice_to_have": ""}
+    assert job_scoring.stack_fit(langchain) == job_scoring.stack_fit(crewai)
+
+
+def test_stack_fit_unaffected_when_no_ai_terms_present():
+    # The addition must not change scores for postings the AI ring has
+    # nothing to say about -- proves this is additive, not a regression.
+    # A job listing only "java" (not a richer stack) is deliberate: a
+    # richer required list saturates stack_fit at 1.0 via the CORE_STACK/
+    # substring-matching quirk already known in this file ("spring"
+    # matches inside "spring boot"), which would make this test pass
+    # trivially regardless of whether the AI ring is wired correctly.
+    # Verified against the real, unmodified job_scoring.py before this
+    # task existed: stack_fit({"tech_required": "java", ...}) == 0.1935483870967742.
+    job = {"tech_required": "java", "tech_nice_to_have": ""}
+    assert job_scoring.stack_fit(job) == 0.1935483870967742
+
+
 def test_seniority_fit_peaks_in_his_band():
     assert job_scoring.seniority_fit(job(min_experience=6)) == 1.0
     assert job_scoring.seniority_fit(job(min_experience=3)) == 0.6

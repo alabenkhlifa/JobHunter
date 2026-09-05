@@ -527,10 +527,41 @@ ADJACENT_STACK = (
     "kafka", "rabbitmq", "rest", "graphql", "grpc", "event-driven", "ddd",
 )
 
+# The AI stack: confirmed with him as its OWN ring, not folded into
+# ADJACENT_STACK, because 504 corpus postings mention AI/LLM work with a
+# mean stack_fit of 0.17 despite his master profile listing RAG, LLM
+# integration, and agentic development as real skills -- none of the other
+# three rings contain a single AI-shaped term. Kept small (~10 terms,
+# matching CORE_STACK's own scale) rather than the ~40-term extraction
+# vocabulary in scraper.py's CONFIG["tech_terms"]: _ring_coverage divides
+# by ring length, so a 40-term ring would make one real match count for
+# almost nothing -- the exact dilution problem a separate ring exists to
+# avoid.
+AI_STACK = (
+    "generative ai", "llm", "rag", "prompt engineering", "agentic",
+    "ai agent", "ai framework", "vector database", "embeddings", "mcp",
+)
+
 # Spellings the rings do not list, folded onto the term they mean before
 # coverage is counted. Listing "k8s" as a sixth cloud term would instead
 # dilute every posting's cloud fraction. Add aliases here, not to the rings.
-STACK_ALIASES = {"k8s": "kubernetes"}
+STACK_ALIASES = {
+    "k8s": "kubernetes",
+    "genai": "generative ai", "gen ai": "generative ai",
+    "llms": "llm", "large language model": "llm", "large language models": "llm",
+    "retrieval-augmented generation": "rag",
+    "ai agents": "ai agent", "multi-agent": "ai agent",
+    "vector databases": "vector database",
+    "model context protocol": "mcp",
+    # Six named agentic frameworks fold onto one canonical term: his skill
+    # is agentic development in general, not any one framework brand, and
+    # giving each its own ring slot would both bloat the ring past its
+    # ~12-term budget and let one posting score multiple times on what is
+    # really one signal.
+    "langchain": "ai framework", "langgraph": "ai framework",
+    "llamaindex": "ai framework", "semantic kernel": "ai framework",
+    "crewai": "ai framework", "autogen": "ai framework",
+}
 _ALIAS_PATTERNS = tuple(
     (re.compile(rf"\b{re.escape(alias)}\b"), canonical)
     for alias, canonical in STACK_ALIASES.items()
@@ -603,6 +634,7 @@ def stack_fit(job):
         0.60 * _ring_coverage(CORE_STACK, required, optional)
         + 0.30 * _ring_coverage(CLOUD_STACK, required, optional)
         + 0.10 * _ring_coverage(ADJACENT_STACK, required, optional)
+        + 0.05 * _ring_coverage(AI_STACK, required, optional)
     ) / 0.62)
 
 
