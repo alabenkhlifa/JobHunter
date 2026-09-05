@@ -45,16 +45,39 @@ def main():
 
     conn = sqlite3.connect(REPO / "data" / "jobs.db")
     conn.row_factory = sqlite3.Row
+    # `test-%` ids are rows the Telegram/CTA test harness wrote, not postings.
+    # They must never reach the rating artifact -- one of them carries a
+    # hand-set score high enough to top batch A on its own.
     rows = conn.execute(
-        "SELECT id, title, company, location, score, tech_required, "
-        "tech_nice_to_have, min_experience FROM jobs"
+        "SELECT * FROM jobs WHERE id NOT LIKE 'test-%'"
     ).fetchall()
+
+    # Score live rather than read the stored `score` column. The column holds
+    # whatever the rubric said on the day the row was written, and the rubric
+    # has changed since (the AI stack ring, the tech backfill); ranking on it
+    # would rank by scrape date as much as by fit. Same call shape as
+    # scraper.score_job -- the scraper's markets, the default max_experience,
+    # and no `now=` override, so freshness is live. That is what fit_weights
+    # and eval_scoring.report do for the same reason: the rating and refit
+    # data must reflect the scorer that ships today.
     scored = []
     for row in rows:
         job = dict(row)
-        job["role_fit"] = job_scoring.role_fit(job)
-        job["stack_fit"] = job_scoring.stack_fit(job)
-        scored.append(job)
+        result = job_scoring.evaluate(
+            job, allowed_locations=job_scoring.DEFAULT_MARKETS
+        )
+        scored.append({
+            "id": job["id"],
+            "title": job["title"],
+            "company": job["company"],
+            "location": job["location"],
+            "score": result["total"],
+            "tech_required": job["tech_required"],
+            "tech_nice_to_have": job["tech_nice_to_have"],
+            "min_experience": job["min_experience"],
+            "role_fit": job_scoring.role_fit(job),
+            "stack_fit": job_scoring.stack_fit(job),
+        })
 
     # The 25 postings rated in the first round, and the role_fit values of the
     # two he rated good ("Software Backend Engineer" -> 0.8, "Full Stack
