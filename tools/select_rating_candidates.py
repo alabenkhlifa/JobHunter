@@ -20,9 +20,31 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 
+def freshness_neutral_total(result, job_scoring):
+    """The total with freshness pinned to its undated value.
+
+    Same move as eval_scoring._freshness_neutral_total, for the same reason.
+    Every row in this corpus was posted at least two months ago, so live
+    freshness never reaches a real band: it is 0.7 when the row has no date
+    and 0.2 when it has one, however stale. Ranking on the raw total would
+    hand every undated posting a flat 4-point head start for having a
+    missing field, not a better match. Knocked-out jobs stay at 0.
+    """
+    if not result["passed"]:
+        return 0
+    parts = dict(result["parts"], freshness=job_scoring.UNDATED_FRESHNESS)
+    return round(sum(parts[name] * job_scoring.WEIGHTS[name] for name in job_scoring.WEIGHTS))
+
+
 def select_candidates(rows, already_rated_ids, liked_role_fits, *,
                       excellent_threshold=75, sendable_threshold=45,
-                      target_size=35):
+                      # The target is 30-40 unique jobs across BOTH batches, not
+                      # per batch. Each batch is its own independent selection
+                      # (a job can be in both), so the cap is applied to each and
+                      # the union comes out at or below 2 x target_size -- 18
+                      # each is half of the range's midpoint, and the overlap
+                      # between A and B pulls the union back inside 30-40.
+                      target_size=18):
     unrated = [r for r in rows if r["id"] not in already_rated_ids]
 
     batch_a = sorted(
@@ -57,9 +79,10 @@ def main():
     # has changed since (the AI stack ring, the tech backfill); ranking on it
     # would rank by scrape date as much as by fit. Same call shape as
     # scraper.score_job -- the scraper's markets, the default max_experience,
-    # and no `now=` override, so freshness is live. That is what fit_weights
-    # and eval_scoring.report do for the same reason: the rating and refit
-    # data must reflect the scorer that ships today.
+    # and no `now=` override. That is what fit_weights and eval_scoring.report
+    # do for the same reason: the rating and refit data must reflect the
+    # scorer that ships today. The one departure is freshness, which is
+    # neutralised for ranking -- see freshness_neutral_total.
     scored = []
     for row in rows:
         job = dict(row)
@@ -71,7 +94,7 @@ def main():
             "title": job["title"],
             "company": job["company"],
             "location": job["location"],
-            "score": result["total"],
+            "score": freshness_neutral_total(result, job_scoring),
             "tech_required": job["tech_required"],
             "tech_nice_to_have": job["tech_nice_to_have"],
             "min_experience": job["min_experience"],

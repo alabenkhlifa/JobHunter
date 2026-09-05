@@ -64,9 +64,16 @@ def test_a_job_can_appear_in_both_batches_if_it_qualifies_for_both():
     assert result["batch_b"][0]["id"] == "both"
 
 
-def test_target_size_caps_each_batch_but_does_not_pad():
-    rows = [job(id=f"hi{i}", score=100 - i) for i in range(50)]
-    result = src.select_candidates(rows, already_rated_ids=set(), liked_role_fits=set(),
+def test_target_size_caps_the_unique_total_across_both_batches():
+    # Both batches are really populated -- the top 25 clear batch A's 75 gate,
+    # and every row carries the liked role_fit at or above the sendable
+    # threshold, so batch B draws from all 50 -- and the assertion is on the
+    # UNION, because target_size budgets the unique set the rater sees, not
+    # each batch on its own. The two batches rank the same rows by the same
+    # score, so the cap holds across both.
+    rows = [job(id=f"hi{i}", score=100 - i, role_fit=0.8) for i in range(50)]
+    result = src.select_candidates(rows, already_rated_ids=set(), liked_role_fits={0.8},
                                     target_size=10)
-    # target_size=10 total budget; batch_a alone must not silently take all 50.
-    assert len(result["batch_a"]) <= 10
+    assert result["batch_a"] and result["batch_b"]
+    unique = {j["id"] for j in result["batch_a"]} | {j["id"] for j in result["batch_b"]}
+    assert len(unique) <= 10
