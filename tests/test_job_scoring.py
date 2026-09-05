@@ -758,6 +758,28 @@ def test_the_cloud_ring_holds_exactly_five_terms():
     assert "k8s" not in job_scoring.CLOUD_STACK
 
 
+def test_the_ai_stack_ring_holds_exactly_ten_terms():
+    # Same reasoning as the cloud ring: it is a coverage fraction, so an
+    # eleventh term dilutes every other posting's AI score. That is why
+    # genai, llms, langchain, crewai and the rest of the sixteen AI-related
+    # spellings in STACK_ALIASES are aliases, not terms, and this pin is
+    # what stops the next one being added as a ring member instead.
+    assert len(job_scoring.AI_STACK) == 10
+    assert job_scoring.STACK_ALIASES["genai"] == "generative ai"
+    assert job_scoring.STACK_ALIASES["llms"] == "llm"
+    assert job_scoring.STACK_ALIASES["langchain"] == "ai framework"
+    assert job_scoring.STACK_ALIASES["crewai"] == "ai framework"
+    assert job_scoring.STACK_ALIASES["model context protocol"] == "mcp"
+    for alias in (
+        "genai", "gen ai", "llms", "large language model",
+        "large language models", "retrieval-augmented generation",
+        "ai agents", "multi-agent", "vector databases",
+        "model context protocol", "langchain", "langgraph",
+        "llamaindex", "semantic kernel", "crewai", "autogen",
+    ):
+        assert alias not in job_scoring.AI_STACK, alias
+
+
 def test_the_cutoff_rounds_the_way_python_rounds():
     # round() is banker's rounding: 44.5 goes DOWN to 44 and is not sent,
     # 45.5 goes UP to 46 and is. Task 9's refit must round the same way or
