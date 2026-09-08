@@ -382,6 +382,143 @@ def test_apply_resume_variant_preserves_exact_content_order_and_omits_metadata()
     assert variant["resume"]["experience"][0]["bullets"][0] == "Second fact stays first."
 
 
+def test_resume_variant_preserves_certification_links_in_public_projection():
+    variant = _variant(
+        resume={
+            "headline": "Confirmed Java Backend Engineer",
+            "certifications": ["Spring Certified Professional", "Claude Certified Architect"],
+            "certification_links": {
+                "Spring Certified Professional": "https://credentials.example/spring",
+            },
+        }
+    )
+    profile = _v2_profile(resume_variants=[variant])
+
+    selected = select_resume_variant(profile, "Java Spring services")
+    result = apply_resume_variant(profile, selected)
+
+    assert result["certification_links"] == {
+        "Spring Certified Professional": "https://credentials.example/spring",
+    }
+
+
+@pytest.mark.parametrize("in_variant", [False, True], ids=["master", "variant"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://", "https:///credential", "https://not a host/credential",
+        "https://credentials.example/line\nbreak",
+        "https://credentials.example/\tcredential",
+        "https://credentials.example/\x00credential",
+        "https://credentials.example/\x7fcredential",
+        "https://credentials.example:0/spring",
+        'https://credentials.example/\\spring',
+        "https://credentials.example:invalid/spring",
+        "https://credentials.example:65536/spring",
+        "https://[invalid]/spring", "https://bad..example/spring",
+        "https://-bad.example/spring", "https://bad_host.example/spring",
+        "http://credentials.example/spring", "", None, 42,
+    ],
+)
+def test_certification_links_reject_invalid_urls_without_echoing_them(url, in_variant):
+    fields = {
+        "certifications": ["Spring Certificate"],
+        "certification_links": {"Spring Certificate": url},
+    }
+    profile = (
+        _v2_profile(resume_variants=[_variant(resume=fields)])
+        if in_variant else _v2_profile(**fields)
+    )
+
+    with pytest.raises(ProfileValidationError, match="HTTPS URLs") as caught:
+        validate_profile(profile)
+
+    assert "Spring Certificate" not in str(caught.value)
+    assert "credentials.example" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://credentials.example/spring?view=public#certificate",
+        "HTTPS://credentials.example/spring",
+        "https://credentials.example:8443/spring",
+        "https://127.0.0.1/spring",
+        "https://[2001:db8::1]/spring",
+        "https://credentials.example/with%20space",
+    ],
+)
+def test_certification_links_preserve_valid_urls_and_order(url):
+    fields = {
+        "certifications": ["Spring Certificate", "Unlinked Certificate"],
+        "certification_links": {"Spring Certificate": url},
+    }
+    profile = _v2_profile(**fields, resume_variants=[_variant(resume=fields)])
+
+    validate_profile(profile)
+    master_resume = project_public_resume(profile)
+    variant_resume = apply_resume_variant(profile, select_resume_variant(profile, "Java"))
+
+    for resume in (master_resume, variant_resume):
+        assert resume["certifications"] == fields["certifications"]
+        assert resume["certification_links"] == fields["certification_links"]
+        resume["certification_links"]["Spring Certificate"] = "https://changed.example"
+    assert profile["certification_links"]["Spring Certificate"] == url
+    assert profile["resume_variants"][0]["resume"]["certification_links"]["Spring Certificate"] == url
+
+
+@pytest.mark.parametrize("in_variant", [False, True], ids=["master", "variant"])
+@pytest.mark.parametrize("certifications", [[{}], [[]], [None], [42], [""], [" "], "Spring", None])
+def test_malformed_certifications_raise_profile_validation_error(certifications, in_variant):
+    fields = {"certifications": certifications, "certification_links": {}}
+    profile = (
+        _v2_profile(resume_variants=[_variant(resume=fields)])
+        if in_variant else _v2_profile(**fields)
+    )
+
+    with pytest.raises(ProfileValidationError, match="certifications"):
+        validate_profile(profile)
+
+
+@pytest.mark.parametrize("links", [None, [], "https://credentials.example/spring"])
+def test_certification_links_require_a_mapping(links):
+    with pytest.raises(ProfileValidationError, match="must be an object"):
+        validate_profile(_v2_profile(certifications=["Spring"], certification_links=links))
+
+
+def test_certification_links_reject_unknown_certifications():
+    with pytest.raises(ProfileValidationError, match="unknown certification"):
+        validate_profile(
+            _v2_profile(
+                certifications=["Spring"],
+                certification_links={"Unknown": "https://credentials.example/spring"},
+            )
+        )
+
+
+def test_omitted_certifications_remove_links_and_allow_cover_letter_generation():
+    variant = _variant(
+        omit_sections=["certifications"],
+        resume={
+            "certifications": ["Spring Certificate"],
+            "certification_links": {
+                "Spring Certificate": "https://credentials.example/spring",
+            },
+        },
+    )
+    profile = _v2_profile(resume_variants=[variant])
+    original = copy.deepcopy(profile)
+
+    resume, selected = flow._resume_for_job(profile, _backend_job())
+    letter = flow._cover_letter(resume, _backend_job(), preserve_experience_order=True)
+
+    assert selected["id"] == variant["id"]
+    assert "certifications" not in resume
+    assert "certification_links" not in resume
+    assert letter["name"] == profile["name"]
+    assert profile == original
+
+
 def test_resume_variant_does_not_inherit_unspecified_master_sections():
     variant = _variant(resume={"headline": "Confirmed Java Backend Engineer"})
     profile = _v2_profile(

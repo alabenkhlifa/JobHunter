@@ -18,6 +18,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 
 CONFIRMATION_VALUES = frozenset({"candidate-confirmed", "draft", "unconfirmed"})
@@ -34,6 +35,7 @@ _RESUME_FIELDS = (
     "location",
     "summary",
     "certifications",
+    "certification_links",
     "skills",
     "experience",
     "education",
@@ -47,6 +49,7 @@ _VARIANT_RESUME_FIELDS = (
     "headline",
     "summary",
     "certifications",
+    "certification_links",
     "skills",
     "experience",
     "education",
@@ -97,6 +100,43 @@ def _validate_string_list(value: Any, path: str, *, non_empty: bool = False) -> 
         raise ProfileValidationError(f"{path} must contain only non-empty strings")
 
 
+def _is_https_url(value: Any) -> bool:
+    if not isinstance(value, str) or any(
+        char.isspace() or ord(char) < 32 or ord(char) == 127 or char == '\\'
+        for char in value
+    ):
+        return False
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        if parsed.scheme != "https" or not hostname:
+            return False
+        # Accessing port also rejects non-numeric and out-of-range values.
+        if parsed.port == 0:
+            return False
+        if ":" in hostname:
+            # urlsplit validates bracketed IPv6 addresses.
+            return True
+        hostname = hostname.removesuffix(".").encode("idna").decode("ascii")
+    except (ValueError, UnicodeError):
+        return False
+    return len(hostname) <= 253 and all(
+        re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
+        for label in hostname.split(".")
+    )
+
+
+def _validate_certification_links(value: Any, certifications: Any, path: str) -> None:
+    if not isinstance(value, dict):
+        raise ProfileValidationError(f"{path} must be an object")
+    certification_names = set(certifications) if isinstance(certifications, list) else set()
+    for certification, url in value.items():
+        if not isinstance(certification, str) or certification not in certification_names:
+            raise ProfileValidationError(f"{path} contains an unknown certification")
+        if not _is_https_url(url):
+            raise ProfileValidationError(f"{path} must contain HTTPS URLs")
+
+
 def _validate_variant_resume(resume: Any, *, index: int) -> None:
     path = f"resume_variants[{index}].resume"
     if not isinstance(resume, dict):
@@ -109,6 +149,12 @@ def _validate_variant_resume(resume: Any, *, index: int) -> None:
             raise ProfileValidationError(f"{path}.{field} must be a string")
     if "certifications" in resume:
         _validate_string_list(resume["certifications"], f"{path}.certifications")
+    if "certification_links" in resume:
+        _validate_certification_links(
+            resume["certification_links"],
+            resume.get("certifications"),
+            f"{path}.certification_links",
+        )
     if "skills" in resume:
         skills = resume["skills"]
         if not isinstance(skills, dict):
@@ -247,6 +293,14 @@ def validate_profile(profile: Any) -> None:
         raise ProfileValidationError("Candidate profile must be a JSON object")
     if not isinstance(profile.get("name"), str) or not profile["name"].strip():
         raise ProfileValidationError("Candidate profile is missing the required name field")
+    if "certifications" in profile:
+        _validate_string_list(profile["certifications"], "certifications")
+    if "certification_links" in profile:
+        _validate_certification_links(
+            profile["certification_links"],
+            profile.get("certifications"),
+            "certification_links",
+        )
 
     experiences = profile.get("experience", [])
     if not isinstance(experiences, list):
@@ -431,6 +485,8 @@ def apply_resume_variant(profile: dict[str, Any], variant: dict[str, Any]) -> di
     result.update(_sanitized_variant_resume(variant["resume"]))
     for section in variant.get("omit_sections") or []:
         result.pop(section, None)
+        if section == "certifications":
+            result.pop("certification_links", None)
     return result
 
 

@@ -154,15 +154,15 @@ class ResumePDF(SanitizedPDF):
         if p.get("certifications"):
             self.section_header("Certifications")
             self.set_font("Helvetica", "", 9)
-            self.set_text_color(*TEXT)
-            self.multi_cell(
-                0,
-                4.5,
-                "  |  ".join(p["certifications"]),
-                new_x="LMARGIN",
-                new_y="NEXT",
-                align="L",
-            )
+            certification_links = p.get("certification_links", {})
+            for index, certification in enumerate(p["certifications"]):
+                if index:
+                    self.set_text_color(*TEXT)
+                    self.write(4.5, "  |  ")
+                link = certification_links.get(certification)
+                self.set_text_color(*(ACCENT if link else TEXT))
+                self.write(4.5, certification, link=link or "")
+            self.ln(4.5)
             self.ln(3)
 
         # ── Experience ──

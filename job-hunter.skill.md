@@ -290,6 +290,7 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
 
    What you CAN adjust (minor refinements only):
    - **Skills ordering**: reorder the skill categories so the most relevant one for this job appears first
+   - **Certification presentation**: reorder candidate-confirmed certifications for role relevance. When exact candidate-confirmed verification URLs exist, preserve certification names as strings and provide renderer-safe HTTPS links through a `certification_links` mapping keyed by the exact certification name; never invent a credential URL.
    - **Summary paragraph**: rewrite to emphasize aspects relevant to this job, but keep it grounded in the real experience from the master profile
    - **Experience bullets**: select or minimally reword existing bullets and candidate-confirmed public evidence to emphasize relevant keywords; every core fact must remain unchanged
    - **Experience order**: optionally reorder experience entries to lead with the most relevant one
