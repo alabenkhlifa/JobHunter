@@ -173,13 +173,20 @@ For each candidate job, the scraper fetches the full description and extracts:
 
 ### When triggered by Hermes cron (scheduled):
 1. Run the collector script: `~/.hermes/scripts/jobhunter_collect_candidates.py`
-2. The collector runs: `.venv/bin/python3 scraper.py --collect-only`
+2. The daily collector runs: `.venv/bin/python3 scraper.py --collect-only --max-pages 7`.
+   This caps search pages per keyword and location on each source. Manual runs
+   retain the profile default (ten pages), or accept an explicit `--max-pages`.
 3. Scraper iterates every configured region bucket
 4. For each new job passing hard filters and keyword score threshold:
    - Saves to SQLite database
    - Does **not** notify directly
 5. Hermes cron reviews unnotified candidates with an LLM against the local
    candidate profile, feedback-adjusted score, and `feedback_learning_notes`.
+   Read each complete `description`, including requirements and benefits near
+   the end. Apply `review_constraints.max_experience` to mandatory experience
+   requirements even when extracted metadata is missing or outdated. Check
+   work authorization, relocation, language and specialist requirements in
+   the full text; distinguish explicit evidence from a sponsorship inference.
    For each one it judges: whether the description reads as a real backend
    architecture/tech-lead role or a title dressed as one, whether the company
    looks real, and the sponsorship read (`offered`/`implied`/`doubtful`/
@@ -192,7 +199,15 @@ For each candidate job, the scraper fetches the full description and extracts:
    `~/.hermes/scripts/jobhunter_review.py`, which persists every field
    (`scraper.record_review`), computes which `send` verdicts actually get sent
    (`job_scoring.select_sendable`), and sends exactly those as one digest
-   (`scraper.send_digest`), marking only them `notified=1`.
+   (`scraper.send_digest`), marking only them `notified=1` after Telegram
+   acknowledges delivery. A failed or unconfirmed send exits non-zero and
+   leaves those jobs pending. Report delivery failure; never claim that the
+   selected jobs were sent unless the review script completes successfully.
+   When collection succeeds and the review script confirms at least one job
+   sent, finish with exactly `[SILENT]` and nothing else: the digest is already
+   in Telegram, so Hermes must not send a second success message. If zero jobs
+   were sent, report that briefly. Never suppress collection, review, or
+   delivery errors; report them even if a partial digest reached Telegram.
    `select_sendable` first drops any `send` whose sponsorship reads `doubtful`
    or `excluded`, then gives each market (the city-level
    `job_scoring.market_region`, so Dubai and Abu Dhabi count separately) its
@@ -203,22 +218,29 @@ For each candidate job, the scraper fetches the full description and extracts:
    runs.
 6. Jobs not selected this round are not discarded: a `hold` verdict, a `send`
    dropped on its sponsorship read, and a `send` that loses the cap all leave
-   the job `status='new'`, `notified=0`, so it re-competes against new
-   arrivals tomorrow — as does a candidate the agent never reviewed. Only an
-   explicit `reject` verdict sets `status='rejected'`, which is what removes
-   it from future nightly candidate batches.
+   the job `status='new'`, `notified=0`, so it re-competes while it still
+   meets the current freshness and hard filters. These are checked before
+   ranking and again when persisting reviews. Freshness uses the posting date,
+   falling back to collection time for undated postings; jobs with no usable
+   date are excluded. Filtering does not change their stored status. Only an
+   explicit `reject` verdict sets `status='rejected'`.
 7. That digest is ONE message for the whole night, not one message per job
    (`scraper.format_digest_message` composes it). Entries are grouped under a
    fixed market order — Dubai, Abu Dhabi, Jeddah, Riyadh, Switzerland
-   (`scraper.DIGEST_MARKET_ORDER`) — sorted by `ai_rank` inside each market,
+   (`scraper.DIGEST_MARKET_ORDER`) — sorted by score descending inside each
+   market, breaking ties by `ai_rank` then job ID,
    then numbered 1..N in the order they are printed, reading top to bottom.
    That number is a fresh display label, **not** `ai_rank`: `ai_rank` has gaps
    (candidates that lost the cap) and does not respect market grouping, so a
    job in an earlier market can be numbered 1 while carrying a worse rank than
-   a job printed below it. Every market gets a header line even when it has
-   nothing to send, suffixed `— nothing today`, so a quiet market reads as
-   quiet rather than as a failed run. The message also carries a live count of
-   what is still queued, with the top few queued scores.
+   a job printed below it. Each entry has a linked, bold title, a bold company and
+   posting-age line, then a score and visa-status line. Titles and company
+   names are shortened for phone screens; full text stays in the listing.
+   Long technology lists and review explanations belong in the details, not
+   the digest. Empty markets share one bold `⚠️ No matches` line. Scores use
+   🔥 for 80+, ⭐ for 70–79, and 👍 below 70. Visa labels are bold: an inferred
+   sponsorship read displays `❓ Visa unconfirmed`; an explicit offer displays
+   `✅ Visa offered`. The live queue count appears once in the summary.
 8. A bare numeric reply that follows the digest (e.g. "2") refers to that job
    — resolved from your own memory of the digest you just sent, not from any
    stored mapping. Look up that job's id, run `scraper.py --get-job <id>`, and

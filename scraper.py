@@ -16,6 +16,7 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -767,22 +768,72 @@ _AI_VERDICTS = ("send", "hold", "reject")
 _AI_SPONSORSHIP = ("offered", "implied", "doubtful", "excluded")
 
 
+def prepare_review_candidate(job, *, now=None):
+    """Recheck stored jobs against current hard filters without changing the DB."""
+    candidate = dict(job)
+    candidate["title"] = candidate.get("title") or ""
+    candidate["description"] = candidate.get("description") or ""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    dated = None
+    for field in ("date_posted", "date_scraped"):
+        try:
+            dated = datetime.fromisoformat(str(candidate.get(field) or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dated.tzinfo is None:
+            dated = dated.replace(tzinfo=timezone.utc)
+        break
+    if dated is None:
+        return candidate, "no usable posting or collection date"
+    # Match collection's calendar-age boundary: eight days is too old for 7.
+    if (now - dated).days > CONFIG["max_job_age_days"]:
+        return candidate, "outside the job freshness window"
+
+    years = extract_min_experience(candidate["description"])
+    if years >= 0:
+        candidate["min_experience"] = years
+    if is_excluded(candidate):
+        return candidate, "excluded role"
+    if requires_local_presence(candidate["description"]):
+        return candidate, "requires existing local presence or work authorization"
+    reason = job_scoring.knockout(
+        candidate,
+        allowed_locations=tuple(loc.lower() for loc in CONFIG.get("allowed_locations", ())),
+        max_experience=CONFIG["max_experience"],
+    )
+    return candidate, reason
+
+
+def get_review_candidates(conn, *, now=None):
+    """All currently eligible candidates; callers rank before applying a cap."""
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE notified = 0 AND status = 'new' AND score >= ?",
+        (CONFIG["score_threshold"],),
+    ).fetchall()
+    now = now or datetime.now(timezone.utc)
+    candidates = []
+    for row in rows:
+        candidate, reason = prepare_review_candidate(dict(row), now=now)
+        if reason is None:
+            candidates.append(candidate)
+    return candidates
+
+
 def record_review(conn, verdicts):
     """Persist the agent's verdicts, validated against today's real candidates.
 
     Re-queries eligible candidates itself rather than trusting the batch of
-    ids it's handed -- an id that isn't notified=0/status='new'/score above
-    threshold today is not applied. Writes only the four ai_* columns; never
+    ids it's handed -- notification state, score, freshness and current hard
+    filters must still pass. Writes only the four ai_* columns; never
     score or score_breakdown. Returns the written send-verdict rows, each
     carrying the market select_sendable needs.
     """
     conn.row_factory = sqlite3.Row
-    threshold = CONFIG["score_threshold"]
-    eligible_rows = conn.execute(
-        "SELECT id, location FROM jobs WHERE notified = 0 AND status = 'new' AND score >= ?",
-        (threshold,),
-    ).fetchall()
-    eligible = {row["id"]: row["location"] for row in eligible_rows}
+    eligible = {row["id"]: row["location"] for row in get_review_candidates(conn)}
 
     seen_ids = set()
     seen_ranks = set()
@@ -867,17 +918,12 @@ def get_job_by_id(conn, job_id):
 
 def list_queued_jobs(conn, limit=10):
     """Top eligible-but-unsent jobs by score, for the 'more' conversational flow."""
-    threshold = CONFIG["score_threshold"]
-    rows = conn.execute(
-        "SELECT id, title, company, location, score FROM jobs "
-        "WHERE notified = 0 AND status = 'new' AND score >= ? "
-        "ORDER BY score DESC LIMIT ?",
-        (threshold, limit),
-    ).fetchall()
+    rows = sorted(get_review_candidates(conn), key=lambda row: (-row["score"], row["id"]))
+    rows = rows if limit < 0 else rows[:limit]
     return [
         {
-            "id": row[0], "title": row[1], "company": row[2],
-            "market": job_scoring.market_region(row[3]), "score": row[4],
+            "id": row["id"], "title": row["title"], "company": row["company"],
+            "market": job_scoring.market_region(row["location"]), "score": row["score"],
         }
         for row in rows
     ]
@@ -1589,7 +1635,7 @@ _REQUIREMENT_LEAD_IN = re.compile(
 # architecture", "8+ Years working in a related IT Engineering".
 _ROLE_ATTACHMENT = re.compile(
     r"^\s*'?s?\s*(?:,\s*)?(?:ideally\s+|primarily\s+|preferably\s+|mainly\s+)?"
-    r"(?:of|in|as|with|within|on|working|leading|building|designing|managing|developing)\b",
+    r"(?:of|in|as|with|within|on|working|leading|building|designing|managing|developing|architecting)\b",
     re.I,
 )
 _TRAILING_REQUIREMENT = re.compile(
@@ -1900,11 +1946,16 @@ def send_telegram(token, chat_id, text, reply_markup=None):
     try:
         resp = requests.post(url, json=payload, timeout=15)
         if resp.status_code != 200:
-            log.warning(f"Telegram API returned {resp.status_code}: {resp.text}")
+            log.warning(f"Telegram API returned HTTP {resp.status_code}")
+            return False
+        acknowledgement = resp.json()
+        if not isinstance(acknowledgement, dict) or acknowledgement.get("ok") is not True:
+            log.warning("Telegram API did not acknowledge the message")
             return False
         return True
-    except requests.RequestException as e:
-        log.warning(f"Telegram send failed: {e}")
+    except (requests.RequestException, ValueError) as e:
+        # Request exception text can include the bot token in the URL.
+        log.warning(f"Telegram send failed ({type(e).__name__})")
         return False
 
 
@@ -2015,91 +2066,94 @@ DIGEST_MARKET_LABELS = {
     "riyadh": "\U0001f1f8\U0001f1e6 RIYADH",
     "switzerland": "\U0001f1e8\U0001f1ed SWITZERLAND",
 }
-_DIGEST_NUMBERS = ("1️⃣", "2️⃣", "3️⃣", "4️⃣",
-                   "5️⃣", "6️⃣", "7️⃣", "8️⃣",
-                   "9️⃣", "\U0001f51f")
 
 
-def _digest_number(n):
-    """The nth entry's label -- a keycap emoji up to 10, a plain number after."""
-    return _DIGEST_NUMBERS[n - 1] if 1 <= n <= len(_DIGEST_NUMBERS) else f"{n}."
+def _digest_text(value, limit):
+    """One bounded display line, escaped only after shortening raw text."""
+    value = " ".join(str(value if value is not None else "").split())
+    if len(value) > limit:
+        value = value[:limit - 1].rstrip() + "…"
+    return html.escape(value)
+
+
+def _digest_age(date_posted, today):
+    """Exact compact posting age; unknown dates are left out."""
+    try:
+        posted = datetime.fromisoformat(str(date_posted or "").replace("Z", "+00:00"))
+        if posted.tzinfo is None:
+            posted = posted.replace(tzinfo=timezone.utc)
+        days = max(0, (today - posted).days)
+    except (ValueError, TypeError):
+        return ""
+    return "today" if days == 0 else f"{days}d ago"
 
 
 def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
-    """The one nightly message: sent jobs grouped by market, then the queue.
+    """Compact Telegram HTML, with display-order numbering and linked titles.
 
-    `sent` is unordered on input -- this function groups by market, sorts
-    each market's jobs by ai_rank, then numbers them 1..N in that final
-    display order. The number is a fresh sequential label, not ai_rank
-    itself: ai_rank has gaps (candidates that lost the cap) and doesn't
-    respect market grouping, and a reply of "2" has to mean "the second
-    job as printed," not "whatever ai_rank happens to be 2."
-
-    Every job-derived string is HTML-escaped: send_telegram posts with
-    parse_mode=HTML, and this is one message for the whole night, so a
-    single stray "<" or "&" in one title would cost the entire digest
-    rather than the one card it came from. Each is read as
-    `.get(name) or ""`, never `.get(name, "")`: the jobs table has no
-    NOT NULL on title, company or ai_sponsorship, a get default fires
-    only on a MISSING key, and html.escape(None) raises -- which would
-    lose the whole digest by the same blast radius the escaping closes.
+    Bound visible fields so twelve jobs fit in one Telegram message. Keep
+    detailed tech stacks and review reasons in the full listing. The existing
+    queued_top_scores argument remains compatible with callers; the compact
+    digest shows the queue count once instead of repeating it in a footer.
     """
     today = today or datetime.now(timezone.utc)
+    if today.tzinfo is None:
+        today = today.replace(tzinfo=timezone.utc)
     by_market = {}
     for job in sent:
         by_market.setdefault(job["market"], []).append(job)
     for jobs in by_market.values():
-        jobs.sort(key=lambda j: j["ai_rank"])
+        jobs.sort(key=lambda j: (
+            -(j.get("score") or 0), j.get("ai_rank") or float("inf"), j.get("id") or "",
+        ))
 
     lines = [
-        f"\U0001f3af {today.strftime('%-d %b')} · {len(sent)} sent · {queued_count} queued",
+        f"<b>Job matches · {today.strftime('%-d %b')}</b>",
+        f"{len(sent)} sent · {queued_count} queued",
         "",
     ]
-
+    visa_labels = {
+        "offered": "✅ Visa offered",
+        "implied": "❓ Visa unconfirmed",
+        "doubtful": "⚠️ Visa doubtful",
+        "excluded": "🚫 No sponsorship",
+    }
     number = 1
+    empty_markets = []
     for market in DIGEST_MARKET_ORDER:
         jobs = by_market.get(market, [])
-        label = DIGEST_MARKET_LABELS[market]
         if not jobs:
-            lines.append(f"{label} — nothing today")
+            empty_markets.append(market.title())
             continue
-        lines.append(label)
+        lines.append(f"<b>{DIGEST_MARKET_LABELS[market]}</b>")
         for job in jobs:
-            direct = job_scoring.employer_fit(job) == job_scoring.DIRECT_EMPLOYER
-            hiring_route = (
-                "\U0001f91d hires directly" if direct else "\U0001f575 via a recruiter"
-            )
-            sponsorship = html.escape(job.get("ai_sponsorship") or "")
-            title = html.escape(job.get("title") or "")
-            company = html.escape(job.get("company") or "")
-            lines.append(f"{_digest_number(number)} {title}")
-            lines.append(
-                f"   ⭐ {job['score']} · \U0001f3e2 {company} · "
-                f"{hiring_route} · \U0001f6c2 sponsorship {sponsorship}"
-            )
-            req = html.escape(job.get("tech_required") or "")
-            age = job_age(job.get("date_posted", ""))
-            line2 = []
-            if req:
-                line2.append(f"\U0001f9e9 {req}")
-            if age:
-                line2.append(f"\U0001f5d3 {age}")
-            if line2:
-                lines.append("   " + " · ".join(line2))
-            reason = html.escape(job.get("ai_verdict_reason") or "")
-            if reason:
-                lines.append(f"   \U0001f4ac {reason}")
+            title = _digest_text(job.get("title") or "Untitled role", 64)
+            url = str(job.get("url") or "").strip()
+            try:
+                parsed = urlsplit(url)
+                valid_url = parsed.scheme.lower() in ("http", "https") and bool(parsed.netloc)
+            except ValueError:
+                valid_url = False
+            if valid_url:
+                title = f'<a href="{html.escape(url, quote=True)}">{title}</a>'
+            lines.append(f"<b>{number}. {title}</b>")
+            company = _digest_text(job.get("company") or "Company not listed", 32)
+            age = _digest_age(job.get("date_posted"), today)
+            lines.append(f"<b>{company}</b>" + (f" · {age}" if age else ""))
+            score = _digest_text(job.get("score"), 3)
+            raw_score = job.get("score") or 0
+            score_icon = "🔥" if raw_score >= 80 else "⭐" if raw_score >= 70 else "👍"
+            visa = visa_labels.get(job.get("ai_sponsorship"), "❓ Visa unknown")
+            details = f"{score_icon} {score}/100 · <b>{visa}</b>"
+            if job_scoring.employer_fit(job) != job_scoring.DIRECT_EMPLOYER:
+                details += " · recruiter"
+            lines.extend([details, ""])
             number += 1
-        lines.append("")
 
-    if queued_count:
-        top = ", ".join(str(s) for s in queued_top_scores)
-        lines.append(f"↷ {queued_count} more queued (⭐ {top})")
+    if empty_markets:
+        lines.append("<b>⚠️ No matches: " + ", ".join(empty_markets) + "</b>")
         lines.append("")
-
-    lines.append(
-        'Reply with a number to see the full listing, or "more" to see what\'s queued.'
-    )
+    lines.append('Tap a title for the listing. Reply with its number for details, or "more" for the queue.')
     return "\n".join(lines)
 
 
@@ -2135,15 +2189,11 @@ def _queued_after_send(conn, sent_ids):
     construction, so a future reordering of send_digest's steps can't
     silently double-count the jobs it just sent.
     """
-    threshold = CONFIG["score_threshold"]
-    query = "SELECT score FROM jobs WHERE notified = 0 AND status = 'new' AND score >= ?"
-    params = [threshold]
-    if sent_ids:
-        placeholders = ",".join("?" * len(sent_ids))
-        query += f" AND id NOT IN ({placeholders})"
-        params.extend(sent_ids)
-    query += " ORDER BY score DESC"
-    return [row[0] for row in conn.execute(query, params).fetchall()]
+    excluded = set(sent_ids)
+    return sorted(
+        (row["score"] for row in get_review_candidates(conn) if row["id"] not in excluded),
+        reverse=True,
+    )
 
 
 def send_digest(token, chat_id, conn, selected):
@@ -2160,28 +2210,33 @@ def send_digest(token, chat_id, conn, selected):
     queued_top_scores = queued_scores[:3]
 
     message = format_digest_message(sent, queued_count, queued_top_scores)
-    send_telegram(token, chat_id, message)
+    if not send_telegram(token, chat_id, message):
+        raise RuntimeError("Telegram did not confirm digest delivery; jobs remain pending")
     if sent_ids:
         mark_notified(conn, sent_ids)
 
 
 def notify_new_jobs(token, chat_id, jobs):
+    """Send individual cards and return only positively acknowledged job IDs."""
     if not jobs:
-        return
+        return []
 
     sorted_jobs = sorted(jobs, key=lambda j: j["score"], reverse=True)
 
     send_telegram(token, chat_id, f"<b>\U0001f4bc {len(sorted_jobs)} new matching job(s) found!</b>")
     time.sleep(1)
 
+    confirmed_ids = []
     for job in sorted_jobs:
         msg = format_job_message(job)
         keyboard = job_inline_keyboard(job)
         if send_telegram(token, chat_id, msg, reply_markup=keyboard):
+            confirmed_ids.append(job["id"])
             log.info(f"Sent: {job['title']} @ {job['company']}")
         else:
             log.warning(f"Failed to send: {job['title']}")
         time.sleep(1)
+    return confirmed_ids
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -2196,6 +2251,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Job scraper and utilities")
     parser.add_argument("--profile", metavar="NAME", help="Load profile from data/<NAME>/config.json")
     parser.add_argument("--collect-only", action="store_true", help="Scrape and store matches without sending notifications")
+    parser.add_argument("--max-pages", type=int, metavar="N", help="Maximum search pages per keyword and location (overrides profile)")
     parser.add_argument("--get-job", metavar="ID", help="Print job JSON to stdout")
     parser.add_argument("--list-queued", action="store_true", help="Print top queued jobs as JSON")
     parser.add_argument("--limit", type=int, default=10, metavar="N", help="Row limit for --list-queued")
@@ -2206,7 +2262,10 @@ def parse_args():
     parser.add_argument("--archive-stale-days", type=int, metavar="DAYS", help="Archive unnotified new jobs older than DAYS")
     parser.add_argument("--dry-run", action="store_true", help="Preview write actions such as --archive-stale-days")
     parser.add_argument("caption", nargs="?", default=None, help="Optional caption for --send-doc")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_pages is not None and args.max_pages < 1:
+        parser.error("--max-pages must be >= 1")
+    return args
 
 
 def main():
@@ -2216,6 +2275,8 @@ def main():
     # Load profile config (None = default/backward compat)
     global CONFIG
     CONFIG = load_profile_config(args.profile)
+    if args.max_pages is not None:
+        CONFIG["max_pages"] = args.max_pages
 
     # ── CLI utility commands (no logging setup needed) ────────────────────────
     if args.get_job:
@@ -2448,8 +2509,12 @@ def main():
     elif new_jobs:
         log.info(f"Found {len(new_jobs)} new matching job(s)")
         if notifications_enabled:
-            notify_new_jobs(token, chat_id, new_jobs)
-            mark_notified(conn, [j["id"] for j in new_jobs])
+            confirmed_ids = notify_new_jobs(token, chat_id, new_jobs)
+            if confirmed_ids:
+                mark_notified(conn, confirmed_ids)
+            if len(confirmed_ids) != len(new_jobs):
+                conn.close()
+                raise RuntimeError("Telegram did not confirm all deliveries; unsent jobs remain pending")
         else:
             log.info("Telegram disabled — printing results to console")
             for job in sorted(new_jobs, key=lambda j: j["score"], reverse=True):

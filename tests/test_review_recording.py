@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timezone
 
 import scraper
 
@@ -22,7 +23,11 @@ def make_conn(rows):
             ai_verdict TEXT DEFAULT '',
             ai_verdict_reason TEXT DEFAULT '',
             ai_sponsorship TEXT DEFAULT '',
-            ai_rank INTEGER
+            ai_rank INTEGER,
+            date_posted TEXT DEFAULT '',
+            date_scraped TEXT,
+            description TEXT DEFAULT '',
+            min_experience INTEGER DEFAULT -1
         )
         """
     )
@@ -31,11 +36,13 @@ def make_conn(rows):
             "id": job_id, "title": "Backend Architect", "company": "Acme",
             "location": "Dubai, United Arab Emirates", "score": 60,
             "notified": 0, "status": "new",
+            "date_posted": "", "date_scraped": datetime.now(timezone.utc).isoformat(),
+            "description": "", "min_experience": -1,
         }
         base.update(over)
         conn.execute(
-            "INSERT INTO jobs (id, title, company, location, score, notified, status) "
-            "VALUES (:id, :title, :company, :location, :score, :notified, :status)",
+            "INSERT INTO jobs (id, title, company, location, score, notified, status, date_posted, date_scraped, description, min_experience) "
+            "VALUES (:id, :title, :company, :location, :score, :notified, :status, :date_posted, :date_scraped, :description, :min_experience)",
             base,
         )
     conn.commit()
