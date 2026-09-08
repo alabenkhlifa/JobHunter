@@ -76,17 +76,33 @@ NOT_APPLIED_NOTE = (
 SEEDS = (11, 23, 37, 53, 71)
 
 
-def grid(step=5):
-    """Every weighting on `step` boundaries that sums to 100."""
-    values = range(0, 101, step)
+def grid(step=5, *, fixed=None, min_value=0):
+    """Every weighting on `step` boundaries that sums to 100.
+
+    `fixed` pins named dimensions (e.g. `{"freshness": 8}`) at an exact
+    value and removes them from the search -- their share is spent before
+    the free dimensions divide the rest. `min_value` floors every free
+    dimension: 0 (the default, and the only way `test_the_default_grid_can_
+    drop_stack_fit_or_shrink_it_to_ten` can hold) lets a dimension vanish
+    from the score entirely; a positive floor means the search can argue
+    for "less" of a dimension but never "none" of it. Both are opt-in --
+    plain `grid(step)` is byte-for-byte the original unconstrained search.
+    """
+    fixed = fixed or {}
+    free = [name for name in DIMENSIONS if name not in fixed]
+    if not free:
+        raise ValueError("grid: fixed cannot pin every dimension, at least one must stay free")
+    budget = 100 - sum(fixed.values())
+    values = range(min_value, budget + 1, step)
     out = []
-    for stack, role, seniority, employer in itertools.product(values, repeat=4):
-        freshness = 100 - (stack + role + seniority + employer)
-        if 0 <= freshness <= 100:
-            out.append({
-                "stack": stack, "role": role, "seniority": seniority,
-                "employer": employer, "freshness": freshness,
-            })
+    for combo in itertools.product(values, repeat=len(free) - 1):
+        last = budget - sum(combo)
+        if not (min_value <= last <= budget):
+            continue
+        weights = dict(fixed)
+        weights.update(zip(free[:-1], combo))
+        weights[free[-1]] = last
+        out.append(weights)
     return out
 
 
@@ -173,16 +189,19 @@ def _distance(weights):
     return sum(abs(weights[name] - job_scoring.WEIGHTS[name]) for name in DIMENSIONS)
 
 
-def _search(positives, negatives, *, step):
+def _search(positives, negatives, *, step, fixed=None, min_value=0):
     """The best-scoring weighting on this split, and its AUC.
 
     Ties are common -- sixty labels cannot separate ten thousand candidates --
     so a tie goes to the weighting nearest the hand-set one. Without that the
     winner is whichever the iteration order reached first, and the tool would
     report a wild weighting as if the labels had chosen it.
+
+    `fixed`/`min_value` pass straight through to `grid` -- see there for what
+    each does and why both default to off.
     """
     best, best_auc = dict(job_scoring.WEIGHTS), -1.0
-    for weights in grid(step=step):
+    for weights in grid(step=step, fixed=fixed, min_value=min_value):
         score = _auc(positives, negatives, weights)
         if score > best_auc or (score == best_auc and _distance(weights) < _distance(best)):
             best, best_auc = weights, score
@@ -213,11 +232,12 @@ def _require_both_classes(counts):
             )
 
 
-def fit(labels, *, step=5, holdout=0.33, seed=11, freshness_neutral=True):
+def fit(labels, *, step=5, holdout=0.33, seed=11, freshness_neutral=True,
+        fixed=None, min_value=0):
     """Search the grid on a training split, report on a held-out split.
 
     Raises ValueError when either split lacks a class; see
-    `_require_both_classes`.
+    `_require_both_classes`. `fixed`/`min_value` pass through to `grid`.
     """
     train, test = _split(labels, holdout=holdout, seed=seed)
     train_pos, train_neg = _by_class(train, freshness_neutral=freshness_neutral)
@@ -227,7 +247,7 @@ def fit(labels, *, step=5, holdout=0.33, seed=11, freshness_neutral=True):
         "held-out": (len(test_pos), len(test_neg)),
     })
 
-    best, best_auc = _search(train_pos, train_neg, step=step)
+    best, best_auc = _search(train_pos, train_neg, step=step, fixed=fixed, min_value=min_value)
     held = _auc(test_pos, test_neg, best)
     return {"weights": best, "train_auc": round(best_auc, 3), "test_auc": round(held, 3)}
 
@@ -246,15 +266,25 @@ def _label_set_note(labels):
     return LABEL_SET_NOTE
 
 
-def _on_grid(step):
+def _on_grid(step, *, fixed=None, min_value=0):
     """Whether the hand-set weighting is itself a candidate at this step.
 
-    It is not, at the default step: it carries 12 and 8, which are not
-    multiples of 5. So the search can never return "your guess was right"
-    verbatim, and a reader must not infer agreement or disagreement from the
-    fitted row alone -- the side-by-side rows are the comparison.
+    It is not, at the default step and no constraints: it carries 12 and 8,
+    which are not multiples of 5. So the search can never return "your guess
+    was right" verbatim, and a reader must not infer agreement or
+    disagreement from the fitted row alone -- the side-by-side rows are the
+    comparison. Mirrors `grid`'s own construction: every free dimension but
+    the last must sit on a step boundary at or above the floor; the last one
+    is a remainder, so only the floor binds it.
     """
-    return all(job_scoring.WEIGHTS[name] % step == 0 for name in DIMENSIONS)
+    fixed = fixed or {}
+    if any(job_scoring.WEIGHTS[name] != value for name, value in fixed.items()):
+        return False
+    free = [name for name in DIMENSIONS if name not in fixed]
+    if any(job_scoring.WEIGHTS[name] < min_value or job_scoring.WEIGHTS[name] % step != 0
+           for name in free[:-1]):
+        return False
+    return job_scoring.WEIGHTS[free[-1]] >= min_value
 
 
 def _median(values):
@@ -265,7 +295,8 @@ def _median(values):
     return round((ordered[middle - 1] + ordered[middle]) / 2, 3)
 
 
-def report(labels, *, step=5, holdout=0.33, seeds=SEEDS, freshness_neutral=True, source=""):
+def report(labels, *, step=5, holdout=0.33, seeds=SEEDS, freshness_neutral=True, source="",
+           fixed=None, min_value=0):
     """The fit, plus what is needed to judge whether to believe it.
 
     The fitted weighting alone says nothing. It has to be read against the
@@ -273,6 +304,10 @@ def report(labels, *, step=5, holdout=0.33, seeds=SEEDS, freshness_neutral=True,
     against each dimension measured on its own (which dimension carries the
     ranking, and which is dead weight?), and across several shuffles (is the
     held-out figure a property of the labels or of the seed?).
+
+    `fixed`/`min_value` pass through to `grid` via `fit`/`_search` -- see
+    `grid` for what each does. Both default to off, so a plain call is the
+    original, fully free search.
     """
     seeds = tuple(seeds)
     per_seed = []
@@ -281,7 +316,7 @@ def report(labels, *, step=5, holdout=0.33, seeds=SEEDS, freshness_neutral=True,
         train_pos, train_neg = _by_class(train, freshness_neutral=freshness_neutral)
         test_pos, test_neg = _by_class(test, freshness_neutral=freshness_neutral)
         fitted = fit(labels, step=step, holdout=holdout, seed=seed,
-                     freshness_neutral=freshness_neutral)
+                     freshness_neutral=freshness_neutral, fixed=fixed, min_value=min_value)
         per_seed.append({
             "seed": seed,
             "weights": fitted["weights"],
@@ -325,7 +360,11 @@ def report(labels, *, step=5, holdout=0.33, seeds=SEEDS, freshness_neutral=True,
                       "dimensions" if freshness_neutral
                       else "read from the stored posting dates"),
         "step": step,
-        "candidates": len(grid(step=step)),
+        "candidates": len(grid(step=step, fixed=fixed, min_value=min_value)),
+        "search_constraints": (
+            f"fixed {fixed}, every free dimension floored at {min_value}"
+            if fixed or min_value else "none -- fully free search"
+        ),
         "seeds": seeds,
         "per_seed": per_seed,
         "fitted_test_auc": across("test_auc"),
@@ -335,7 +374,7 @@ def report(labels, *, step=5, holdout=0.33, seeds=SEEDS, freshness_neutral=True,
                    max(row["weights"][name] for row in per_seed))
             for name in DIMENSIONS
         },
-        "hand_set_on_grid": _on_grid(step),
+        "hand_set_on_grid": _on_grid(step, fixed=fixed, min_value=min_value),
         "hand_set": {
             "weights": dict(job_scoring.WEIGHTS),
             "train_auc": first["hand_set_train_auc"],
@@ -452,6 +491,7 @@ def _format(summary):
         f"{'knocked out':22} {summary['n_knocked_out']}  (scored 0, as in production)",
         f"{'freshness':22} {summary['freshness']}",
         f"{'candidates':22} {summary['candidates']}  weightings at step {summary['step']}",
+        f"{'search constraints':22} {summary['search_constraints']}",
         "",
         _row("", {name: name[:9] for name in DIMENSIONS}, "train_auc", "test_auc"),
         _row(f"hand-set", summary["hand_set"]["weights"],

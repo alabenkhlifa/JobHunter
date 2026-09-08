@@ -54,6 +54,51 @@ def test_the_default_grid_can_drop_stack_fit_or_shrink_it_to_ten():
     assert len(weightings) == 10626
 
 
+def test_grid_can_fix_a_dimension_and_floor_the_rest():
+    # Freshness held constant means the search cannot buy AUC by exploiting
+    # its own pinning artifact; a floor on the free dimensions means it can
+    # argue for "less" of one but never "none" -- verifying both at once
+    # since fixing freshness without a floor still lets another dimension
+    # collapse to 0.
+    weightings = fit_weights.grid(step=10, fixed={"freshness": 8}, min_value=5)
+    assert weightings
+    for w in weightings:
+        assert w["freshness"] == 8
+        assert all(w[name] >= 5 for name in ("stack", "role", "seniority", "employer"))
+        assert sum(w.values()) == 100
+
+
+def test_grid_without_fixed_or_floor_matches_the_original_search_exactly():
+    # The blocking question (does stack deserve 35 of 100) needs the default,
+    # unconstrained grid intact -- fixed/min_value must be opt-in, not a
+    # change to what a plain fit_weights.grid(step=N) call returns.
+    assert fit_weights.grid(step=20) == fit_weights.grid(step=20, fixed=None, min_value=0)
+
+
+def test_grid_refuses_when_every_dimension_is_fixed():
+    try:
+        fit_weights.grid(fixed=dict(job_scoring.WEIGHTS))
+        raise AssertionError("expected a refusal")
+    except ValueError as exc:
+        assert "free" in str(exc)
+
+
+def test_fit_can_fix_freshness_and_floor_the_rest():
+    result = fit_weights.fit(_labels(), step=25, fixed={"freshness": 8}, min_value=5)
+    assert result["weights"]["freshness"] == 8
+    assert all(result["weights"][name] >= 5
+               for name in ("stack", "role", "seniority", "employer"))
+
+
+def test_report_can_fix_freshness_and_floor_the_rest():
+    summary = fit_weights.report(_labels(), step=50, source="x.json",
+                                  fixed={"freshness": 8}, min_value=5)
+    assert summary["fitted"]["weights"]["freshness"] == 8
+    assert all(summary["fitted"]["weights"][name] >= 5
+               for name in ("stack", "role", "seniority", "employer"))
+    assert all(row["weights"]["freshness"] == 8 for row in summary["per_seed"])
+
+
 def test_the_dimensions_are_productions_weights_in_productions_order():
     # The total is a float sum, so the order of the terms is part of the
     # arithmetic. Iterating a different order could round differently.
