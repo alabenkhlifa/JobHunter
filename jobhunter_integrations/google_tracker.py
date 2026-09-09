@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import mimetypes
 import os
@@ -229,8 +230,10 @@ def upload_local_file(drive, file_path: str | None, job_id: str, state: dict[str
     if not path or not path.exists() or not path.is_file():
         return file_path or ""
     key = str(path)
+    with path.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
     files_state = state.setdefault("files", {})
-    if key in files_state and files_state[key].get("webViewLink"):
+    if key in files_state and files_state[key].get("webViewLink") and files_state[key].get("sha256") == digest:
         return f'=HYPERLINK("{files_state[key]["webViewLink"]}", "{label}")'
     folder_id = ensure_drive_folder(drive, state, state_path, folder_name)
     if not folder_id:
@@ -247,7 +250,11 @@ def upload_local_file(drive, file_path: str | None, job_id: str, state: dict[str
         ).execute()
     except Exception:
         return str(path)
-    files_state[key] = {"id": created.get("id"), "webViewLink": created.get("webViewLink")}
+    if not created.get("id") or not created.get("webViewLink"):
+        return str(path)
+    # Evidence filenames can be reused. Keep the old Drive file intact and
+    # cache each newly uploaded version by its contents, not just its path.
+    files_state[key] = {"id": created["id"], "webViewLink": created["webViewLink"], "sha256": digest}
     save_json(state_path, state)
     return f'=HYPERLINK("{created.get("webViewLink")}", "{label}")'
 

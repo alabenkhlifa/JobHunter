@@ -39,6 +39,35 @@ def test_new_outcome_updates_once_preserving_links_and_manual_notes():
     assert counts["updated"] == counts["added"] == 0
 
 
+@pytest.mark.parametrize("source_kind", ["file", "missing", "directory"])
+def test_evidence_replaces_old_link_only_when_current_file_is_available(tmp_path, source_kind):
+    old = row()
+    old[8] = '=HYPERLINK("https://drive.google.com/resume", "Open resume")'
+    old[11] = '=HYPERLINK("https://drive.google.com/form", "Open screenshot")'
+    path = tmp_path / "evidence.png"
+    if source_kind == "file":
+        path.write_bytes(b"confirmation screenshot")
+    elif source_kind == "directory":
+        path.mkdir()
+    new = row(updated="02/09/2026 10:00")
+    new[8], new[11] = "resume.pdf", "evidence.png"
+    after, _ = sync.merge_rows([tracker.HEADERS, old], [new], repo_root=tmp_path)
+    assert after[1][8] == old[8]
+    assert after[1][11] == (new[11] if source_kind == "file" else old[11])
+
+
+def test_stale_database_cannot_replace_newer_sheet_evidence(tmp_path):
+    old = row(updated="02/09/2026 10:00")
+    old[11] = '=HYPERLINK("https://drive.google.com/confirmation", "Open screenshot")'
+    path = tmp_path / "form.png"
+    path.write_bytes(b"old form")
+    new = row()
+    new[11] = str(path)
+    after, counts = sync.merge_rows([tracker.HEADERS, old], [new], repo_root=tmp_path)
+    assert after[1] == old
+    assert counts["kept_newer"] == 1
+
+
 def test_duplicate_job_history_matches_by_date_then_platform():
     first = row(stage="package_generated", platform="LinkedIn")
     second = row(stage="rejected", applied="02/09/2026 10:00", updated="03/09/2026 10:00")
@@ -165,3 +194,74 @@ def test_no_change_retry_does_not_write_sheet_or_replace_snapshot(services, monk
     assert result["changed_cells"] == result["moved_rows"] == 0
     sheets.spreadsheets().batchUpdate.assert_not_called()
     assert backup.read_text() == "preserved"
+
+
+def test_confirmation_upload_replaces_form_link_and_retry_is_idempotent(services, monkeypatch):
+    args, sheets, drive = services
+    screenshot = args.repo_root / "submission_result.png"
+    screenshot.write_bytes(b"confirmed application")
+    old = row()
+    old[11] = '=HYPERLINK("https://drive.google.com/form", "Open screenshot")'
+    incoming = row()
+    incoming[11] = str(screenshot)
+    monkeypatch.setattr(tracker, "rows_from_db", Mock(return_value=[incoming]))
+    sheets.spreadsheets().values().get().execute.return_value = {"values": [tracker.HEADERS, old]}
+    args.drive_state.parent.mkdir()
+    args.drive_state.write_text(json.dumps({"folder_id": "managed-folder", "files": {}}))
+    drive.files().create().execute.return_value = {"id": "confirmation", "webViewLink": "https://drive.google.com/confirmation"}
+    result = sync.sync_tracker(args)
+    assert result["changed_cells"] == 1
+    requests = sheets.spreadsheets().batchUpdate.call_args.kwargs["body"]["requests"]
+    cells = [r["updateCells"] for r in requests if "updateCells" in r]
+    assert cells[0]["start"]["columnIndex"] == 11
+    link = cells[0]["rows"][0]["values"][0]["userEnteredValue"]["formulaValue"]
+    assert link == '=HYPERLINK("https://drive.google.com/confirmation", "Open screenshot")'
+    old[11] = link
+    sheets.spreadsheets().values().get().execute.return_value = {"values": [tracker.HEADERS, old]}
+    drive.files().create.reset_mock()
+    sheets.spreadsheets().batchUpdate.reset_mock()
+    assert sync.sync_tracker(args)["changed_cells"] == 0
+    drive.files().create.assert_not_called()
+    sheets.spreadsheets().batchUpdate.assert_not_called()
+
+
+def test_reused_screenshot_path_uploads_changed_bytes_without_overwriting_old_file(tmp_path):
+    screenshot = tmp_path / "submission_result.png"
+    screenshot.write_bytes(b"first capture")
+    state = {"folder_id": "managed-folder", "files": {}}
+    drive = Mock()
+    drive.files().create().execute.side_effect = [
+        {"id": "one", "webViewLink": "https://drive.google.com/one"},
+        {"id": "two", "webViewLink": "https://drive.google.com/two"},
+    ]
+    def upload():
+        return tracker.upload_local_file(drive, str(screenshot), "test-job", state, tmp_path / "state.json", "Evidence", "Open screenshot", tmp_path)
+    first = upload()
+    assert upload() == first
+    screenshot.write_bytes(b"later capture")
+    second = upload()
+    assert second != first
+    assert upload() == second
+    assert drive.files().create().execute.call_count == 2
+    drive.files().update.assert_not_called()
+    drive.files().delete.assert_not_called()
+
+
+def test_failed_evidence_upload_keeps_existing_link_and_cache_for_retry(services, monkeypatch):
+    args, sheets, drive = services
+    path = args.repo_root / "submission_result.png"
+    path.write_bytes(b"confirmation")
+    old = row()
+    old[11] = '=HYPERLINK("https://drive.google.com/form", "Open screenshot")'
+    incoming = row()
+    incoming[11] = str(path)
+    sheets.spreadsheets().values().get().execute.return_value = {"values": [tracker.HEADERS, old]}
+    monkeypatch.setattr(tracker, "rows_from_db", Mock(return_value=[incoming]))
+    args.drive_state.parent.mkdir()
+    state = {"folder_id": "managed-folder", "files": {str(path): {"id": "old", "webViewLink": "https://drive.google.com/form"}}}
+    args.drive_state.write_text(json.dumps(state))
+    drive.files().create().execute.side_effect = RuntimeError("test upload failure")
+    with pytest.raises(RuntimeError, match="upload was not confirmed"):
+        sync.sync_tracker(args)
+    sheets.spreadsheets().batchUpdate.assert_not_called()
+    assert json.loads(args.drive_state.read_text()) == state

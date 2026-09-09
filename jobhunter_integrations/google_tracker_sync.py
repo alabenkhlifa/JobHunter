@@ -50,7 +50,7 @@ def merge_notes(old, new):
     return " | ".join(parts)
 
 
-def merge_rows(existing, incoming):
+def merge_rows(existing, incoming, *, repo_root=None):
     """Preserve unmatched history and newer sheet outcomes; reject ambiguity."""
     if existing and existing[0] != tracker.HEADERS:
         raise ValueError("Tracker headers do not match the expected 14 columns.")
@@ -82,7 +82,12 @@ def merge_rows(existing, incoming):
         merged = [new if new != "" else previous for previous, new in zip(old, row)]
         for column in DOCUMENT_COLUMNS:
             if web_link(old[column]) and not web_link(row[column]):
-                merged[column] = old[column]
+                # Evidence advances from the form to the submission receipt.
+                # Prefer the current screenshot only when it can be uploaded;
+                # missing local files must not destroy usable historical links.
+                evidence = tracker.abs_path(row[column], repo_root) if column == 11 and repo_root else None
+                if not evidence or not evidence.is_file():
+                    merged[column] = old[column]
         merged[12] = merge_notes(old[12], row[12])
         if merged != old:
             result[index] = merged
@@ -156,7 +161,7 @@ def sync_locked(args, state_dir):
         return values_api.get(spreadsheetId=args.spreadsheet_id, range=f"{quoted}!A:N", valueRenderOption="FORMULA").execute().get("values", [])
     before = read_values()
     incoming = tracker.rows_from_db(args.db_path, args.repo_root)
-    after, counts = merge_rows(before, incoming)
+    after, counts = merge_rows(before, incoming, repo_root=args.repo_root)
     summary = {"rows": len(after) - 1, **counts, "dry_run": bool(args.dry_run)}
     if args.dry_run:
         return summary
