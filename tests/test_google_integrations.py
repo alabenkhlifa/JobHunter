@@ -516,8 +516,9 @@ def test_gmail_watcher_formats_explicit_rejection_alert():
 
     assert "Application rejected" in alert
     assert "Solutions Architect - SkyCargo" in alert
-    assert "Status: rejected" in alert
-    assert "Application tracker: synced" in alert
+    assert "<b>Emirates</b>" in alert
+    assert "Status:" not in alert
+    assert "Application tracker:" not in alert
 
 
 def test_gmail_watcher_formats_explicit_positive_outcome_alerts():
@@ -550,8 +551,9 @@ def test_gmail_watcher_formats_explicit_positive_outcome_alerts():
         )
 
         assert label in alert
-        assert f"Status: {outcome}" in alert
-        assert "Application tracker: synced" in alert
+        assert "<b>Emirates</b>" in alert
+        assert "Status:" not in alert
+        assert "Application tracker:" not in alert
 
 
 def test_gmail_watcher_formats_retry_alert_before_partial_outcome():

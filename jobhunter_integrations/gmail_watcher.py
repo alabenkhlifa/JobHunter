@@ -23,8 +23,8 @@ from typing import Any
 from jobhunter_integrations.gmail_auth import GmailAuthError, gmail_service, write_private_json
 
 POSITIVE_KEYWORDS = [
-    "application", "applied", "interview", "shortlist", "shortlisted",
-    "assessment", "offer letter", "job offer", "action required", "recruiter",
+    "application", "applications", "applied", "interview", "interviews", "shortlist", "shortlisted",
+    "assessment", "assessments", "offer letter", "offer letters", "job offer", "job offers", "action required", "recruiter", "recruiters",
     "talent acquisition", "hiring", "move forward", "proceed", "next step",
     "next steps", "thank you for applying", "we received your application",
     "your application", "job application", "workday", "greenhouse", "lever", "avature",
@@ -39,6 +39,23 @@ GOOGLE_SHARE_NOISE = [
     "google sheets",
     "google drive",
 ]
+ACCOUNT_NOTICE_SENDERS = {
+    "no-reply@accounts.google.com",
+    "noreply@accounts.google.com",
+    "account-security-noreply@accountprotection.microsoft.com",
+}
+# These are account events, regardless of incidental role/company keywords.
+# Do not block a whole employer domain: Google/Microsoft recruiters are valid.
+ACCOUNT_NOTICE_PATTERN = re.compile(
+    r"\b(?:"
+    r"(?:2 step|two step|two factor|2 factor|multi factor) (?:verification|authentication) "
+    r"(?:turned on|turned off|enabled|disabled)|"
+    r"security alert|new sign in|unusual sign in|suspicious sign in|"
+    r"password (?:reset|changed)|reset your password|"
+    r"verify your (?:email|account)|confirm your email|"
+    r"verification code|security code|one time (?:code|password|passcode)"
+    r")\b"
+)
 REJECTION_PATTERNS = [
     ("regret to inform", r"\bregret to inform (?:you|the candidate)\b"),
     (
@@ -307,6 +324,24 @@ def extract_text(payload: dict[str, Any]) -> str:
     return "\n".join(c for c in chunks if c)
 
 
+def extract_visible_text(payload: dict[str, Any]) -> str:
+    """Read visible mail copy, excluding CSS, scripts and HTML attributes."""
+    mime = str(payload.get("mimeType", ""))
+    chunks = []
+    if mime.startswith("text/") and payload.get("body", {}).get("data"):
+        body = decode_part_body(payload["body"]["data"])
+        if mime == "text/html":
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(body, "html.parser")
+            for element in soup(["head", "style", "script", "noscript"]):
+                element.decompose()
+            body = soup.get_text(" ", strip=True)
+        chunks.append(body)
+    for part in payload.get("parts", []) or []:
+        chunks.append(extract_visible_text(part))
+    return "\n".join(chunk for chunk in chunks if chunk)
+
+
 def header_value(headers: list[dict[str, str]], name: str) -> str:
     name_l = name.lower()
     for h in headers:
@@ -321,6 +356,11 @@ def normalize(text: str) -> str:
 
 def normalize_for_matching(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (text or "").lower())).strip()
+
+
+def contains_term(text: str, term: str) -> bool:
+    """Match complete words/phrases, never CTO in factor or Lever in delivery."""
+    return bool(term and re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text))
 
 
 def job_terms(jobs: list[dict[str, str]]) -> set[str]:
@@ -357,7 +397,7 @@ def match_active_application(
         job
         for job in active
         if len(normalize_for_matching(job.get("title", ""))) >= 8
-        and normalize_for_matching(job.get("title", "")) in text
+        and contains_term(text, normalize_for_matching(job.get("title", "")))
     ]
     if len(exact) == 1:
         return exact[0], "exact job title"
@@ -372,8 +412,8 @@ def match_active_application(
             for token in normalize_for_matching(job.get("title", "")).split()
             if len(token) >= 4 and token not in GENERIC_TITLE_TERMS
         }
-        matched_terms = sorted(term for term in title_terms if term in text)
-        company_matched = bool(company and len(company) >= 3 and company in text)
+        matched_terms = sorted(term for term in title_terms if contains_term(text, term))
+        company_matched = bool(company and len(company) >= 3 and contains_term(text, company))
         if not matched_terms:
             continue
         score = len(matched_terms) * 20 + (40 if company_matched else 0)
@@ -391,7 +431,7 @@ def match_active_application(
         job
         for job in active
         if len(normalize_for_matching(job.get("company", ""))) >= 3
-        and normalize_for_matching(job.get("company", "")) in text
+        and contains_term(text, normalize_for_matching(job.get("company", "")))
     ]
     company_names = {normalize_for_matching(job.get("company", "")) for job in company_matches}
     if len(company_matches) == 1:
@@ -401,17 +441,24 @@ def match_active_application(
     return None, "no unique active application matched the email"
 
 
-def is_relevant(message_text: str, jobs: list[dict[str, str]]) -> tuple[bool, list[str]]:
+def is_relevant(
+    message_text: str, jobs: list[dict[str, str]], *, sender: str = "", subject: str = "",
+) -> tuple[bool, list[str]]:
     text = normalize(message_text)
     reasons: list[str] = []
+    address = email.utils.parseaddr(sender)[1].casefold()
+    if address in ACCOUNT_NOTICE_SENDERS:
+        return False, []
+    if ACCOUNT_NOTICE_PATTERN.search(normalize_for_matching(subject or message_text)):
+        return False, []
     if any(noise in text for noise in GOOGLE_SHARE_NOISE):
         return False, []
-    if any(noise in text for noise in NEGATIVE_NOISE) and not any(k in text for k in POSITIVE_KEYWORDS):
+    hits = [k for k in POSITIVE_KEYWORDS if contains_term(text, k)]
+    if any(contains_term(text, noise) for noise in NEGATIVE_NOISE) and not hits:
         return False, []
-    hits = [k for k in POSITIVE_KEYWORDS if k in text]
     if hits:
         reasons.append("keywords: " + ", ".join(hits[:4]))
-    matched = [term for term in job_terms(jobs) if term and term in text]
+    matched = sorted(term for term in job_terms(jobs) if contains_term(text, term))
     if matched:
         reasons.append("matches jobs/companies: " + ", ".join(matched[:5]))
     return bool(hits or matched), reasons
@@ -421,7 +468,7 @@ def message_summary(service, msg_id: str) -> dict[str, Any]:
     msg = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
     payload = msg.get("payload", {})
     headers = payload.get("headers", [])
-    text = extract_text(payload)
+    text = extract_visible_text(payload)
     return {
         "id": msg_id,
         "from": header_value(headers, "From"),
@@ -567,14 +614,40 @@ def process_application_outcome(
     summary["application_update"] = record_application_outcome(db_path, job, outcome)
 
 
+def format_email_date(value: str, timezone: dt.tzinfo | None = None) -> str:
+    try:
+        parsed = email.utils.parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        local = parsed.astimezone(timezone)
+        return f"{local.day} {local:%b} · {local:%H:%M}"
+    except (TypeError, ValueError, OverflowError):
+        return ""
+
+
+def preview_text(message: dict[str, Any]) -> str:
+    text = html.unescape(message.get("snippet") or "")
+    text = re.sub(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", "", text)
+    text = " ".join(text.split())
+    subject = " ".join((message.get("subject") or "").split())
+    if subject and text.casefold().startswith(subject.casefold()):
+        text = text[len(subject):].lstrip(" :-—")
+    return html.escape(text[:180] + ("…" if len(text) > 180 else ""))
+
+
+def format_email_sender(value: str) -> str:
+    name, address = email.utils.parseaddr(value)
+    return html.escape(name or address.rpartition("@")[2])
+
+
 def format_alert(matches: list[dict[str, Any]]) -> str:
-    lines = ["📬 JobHunter application email update"]
+    lines = ["📬 <b>Application updates</b>"]
     for idx, m in enumerate(matches[:5], 1):
         if m.get("processing_error"):
             lines.extend(
                 [
                     "",
-                    f"{idx}. ⚠️ Application email processing failed",
+                    f"{idx}. ⚠️ <b>Application email processing failed</b>",
                     "The message was left unprocessed so the next watcher run can retry it.",
                 ]
             )
@@ -585,29 +658,30 @@ def format_alert(matches: list[dict[str, Any]]) -> str:
             job = m.get("matched_job") or {}
             update = m.get("application_update") or {}
             icon, label = OUTCOME_ALERTS[outcome]
-            lines.extend(["", f"{idx}. {icon} {label}"])
+            lines.extend(["", f"{idx}. {icon} <b>{label}</b>"])
             if job:
-                lines.append(
-                    f"Job: {html.escape(job.get('title') or 'Unknown')} — "
-                    f"{html.escape(job.get('company') or 'Unknown company')}"
-                )
+                lines.append(f"<b>{html.escape(job.get('company') or 'Unknown company')}</b>")
+                lines.append(html.escape(job.get("title") or "Unknown role"))
             else:
-                lines.append("Job: automatic match was not unique")
-            if update.get("status") in {"updated", "already_recorded"}:
-                lines.append(f"Status: {outcome}")
-            else:
-                lines.append(f"Status update skipped: {html.escape(update.get('reason') or 'unknown reason')}")
-            if update.get("status") == "updated":
-                tracker_status = "synced" if update.get("tracker_synced") else "sync did not complete"
-                lines.append(f"Application tracker: {tracker_status}")
-            lines.append(f"Date: {html.escape(m.get('date') or '')}")
-            continue
+                sender = format_email_sender(m.get("from") or "")
+                if sender:
+                    lines.append(sender)
+                lines.append("⚠️ Couldn’t link this email to one application.")
+            if job and update.get("status") not in {"updated", "already_recorded"}:
+                lines.append("⚠️ Application status was not updated.")
+        else:
+            subject = html.escape(m.get("subject") or "Application reply")
+            lines.extend(["", f"{idx}. <b>{subject}</b>"])
+            sender = format_email_sender(m.get("from") or "")
+            if sender:
+                lines.append(sender)
 
-        subject = html.escape(m.get("subject") or "(no subject)")
-        sender = html.escape(email.utils.parseaddr(m.get("from") or "")[1] or m.get("from") or "unknown sender")
-        snippet = html.escape(" ".join((m.get("snippet") or "").split())[:240])
-        reasons = html.escape("; ".join(m.get("reasons") or []))
-        lines.extend(["", f"{idx}. {subject}", f"From: {sender}", f"Date: {html.escape(m.get('date') or '')}", f"Why: {reasons or 'matched JobHunter email heuristics'}", f"Snippet: {snippet}"])
+        date = format_email_date(m.get("date") or "")
+        if date:
+            lines.append(date)
+        preview = preview_text(m)
+        if preview:
+            lines.append(preview)
     if len(matches) > 5:
         lines.append(f"\n…and {len(matches) - 5} more matching messages.")
     return "\n".join(lines)
@@ -647,7 +721,9 @@ def collect_mail(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[s
                 continue
             summary = message_summary(service, msg_id)
             inspected += 1
-            relevant, reasons = is_relevant(summary["text"], jobs)
+            relevant, reasons = is_relevant(
+                summary["text"], jobs, sender=summary.get("from", ""), subject=summary.get("subject", ""),
+            )
             # Verification secrets belong only to the active ATS interaction,
             # never the periodic recruiter digest.
             verification = re.search(
