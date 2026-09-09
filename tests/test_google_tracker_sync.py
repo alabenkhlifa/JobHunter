@@ -123,6 +123,36 @@ def services(tmp_path, monkeypatch):
     return args, sheets, drive
 
 
+def test_scoped_tracker_uses_explicit_account(services, tmp_path):
+    args, _, _ = services
+    args.account = "tracker@example.com"
+    args.candidate_root = tmp_path
+    sync.sync_tracker(args)
+    tracker.google_services.assert_called_once_with(args.google_token, "tracker@example.com")
+
+
+def test_scoped_tracker_rejects_other_candidate_paths_before_any_io(services, tmp_path):
+    args, _, _ = services
+    args.account = "tracker@example.com"
+    args.candidate_root = tmp_path / "candidate"
+    with pytest.raises(ValueError, match="belong"):
+        sync.sync_tracker(args)
+    tracker.google_services.assert_not_called()
+    assert not args.drive_state.parent.exists()
+
+
+def test_scoped_tracker_rejects_foreign_local_documents(services, tmp_path):
+    args, sheets, _ = services
+    args.account = "tracker@example.com"
+    args.candidate_root = tmp_path
+    incoming = row("new")
+    incoming[8] = str(tmp_path.parent / "other-user-resume.pdf")
+    tracker.rows_from_db.return_value = [incoming]
+    with pytest.raises(ValueError, match="belong"):
+        sync.sync_tracker(args)
+    sheets.spreadsheets().batchUpdate.assert_not_called()
+
+
 def test_dry_run_never_mutates_remote_or_uploads(services):
     args, sheets, drive = services
     args.dry_run = True

@@ -20,8 +20,9 @@ and Switzerland. It scrapes LinkedIn (guest API) and
 Foundit Gulf (JSON API), stores keyword-qualified candidates, then a Hermes
 cron job reviews them with an LLM that returns a structured verdict per job
 (`send`/`hold`/`reject`, a reason, a sponsorship read, and a rank); those
-verdicts are persisted, and a mechanical top-per-market selection decides
-which of them are actually sent.
+verdicts are persisted. Review input is balanced across markets, and delivery
+combines eligible approvals across batches, checking source availability
+before selecting the jobs actually sent.
 
 ## Architecture
 - **Scraper**: `scraper.py` — scraping + CLI utilities (get-job, list-queued, send-doc, send-msg, mark-interested)
@@ -197,6 +198,16 @@ For each candidate job, the scraper fetches the full description and extracts:
    - Does **not** notify directly
 5. Hermes cron reviews unnotified candidates with an LLM against the local
    candidate profile, feedback-adjusted score, and `feedback_learning_notes`.
+   The collector applies feedback to the full eligible pool, then uses
+   `jobhunter_queue.candidate_review_order` to balance up to 40 candidates
+   across available markets. Each market gets a candidate before any gets a
+   second when the cap permits. Balancing continues through all 40 review
+   slots: five markets with enough candidates receive eight each. When a
+   market runs out, the remaining slots go to markets with candidates left.
+   Unseen candidates precede prior
+   approvals, then repeated holds, within that ordering. The collector retains
+   `ai_verdict`, `ai_verdict_reason`, `ai_sponsorship` and `ai_rank`; inspect
+   earlier decisions without treating them as a new approval.
    Read each complete `description`, including requirements and benefits near
    the end. Apply `review_constraints.max_experience` to mandatory experience
    requirements even when extracted metadata is missing or outdated. Check
@@ -212,25 +223,30 @@ For each candidate job, the scraper fetches the full description and extracts:
    `send`/`hold`/`reject`, `reason` at most ten words, `rank` a positive
    integer unique across the batch's `send` entries, 1 = best — on stdin to
    `~/.hermes/scripts/jobhunter_review.py`, which persists every field
-   (`scraper.record_review`), computes which `send` verdicts actually get sent
-   (`job_scoring.select_sendable`), and sends exactly those as one digest
-   (`scraper.send_digest`), marking only them `notified=1` after Telegram
-   acknowledges delivery. A failed or unconfirmed send exits non-zero and
+   (`scraper.record_review`), then calls `scraper.send_reviewed_digest` even
+   when the new batch contains no approved sends. That function combines the
+   new verdicts with still-eligible stored approvals, checks source availability
+   and backfills available places from the combined queue. Only the delivered
+   jobs become `notified=1` after Telegram acknowledges delivery. The wrapper
+   reports actual sends plus checked, closed, unknown and unchecked counts.
+   A failed or unconfirmed Telegram send exits non-zero and
    leaves those jobs pending. Report delivery failure; never claim that the
    selected jobs were sent unless the review script completes successfully.
    When collection succeeds and the review script confirms at least one job
    sent, finish with exactly `[SILENT]` and nothing else: the digest is already
    in Telegram, so Hermes must not send a second success message. If zero jobs
-   were sent, report that briefly. Never suppress collection, review, or
+   were sent, report that briefly and include any unresolved availability
+   checks. Never describe unknown or unchecked listings as confirmed closed.
+   Never suppress collection, review, or
    delivery errors; report them even if a partial digest reached Telegram.
-   `select_sendable` first drops any `send` whose sponsorship reads `doubtful`
-   or `excluded`, then gives each market (the city-level
-   `job_scoring.market_region`, so Dubai and Abu Dhabi count separately) its
-   top 3 by rank as a **floor**, not a ceiling: unused slots from thin markets
-   spill to the next-best-ranked jobs of any market, so a strong market can go
-   past 3, up to a global cap of 12. When the floors alone already reach 12,
-   the selection is truncated to the global top 12 by rank and no spillover
-   runs.
+   Queue selection excludes any `send` whose sponsorship reads `doubtful` or
+   `excluded` under this owner's policy. It allocates one job per market per
+   round (Dubai and Abu Dhabi count separately), for a default floor of 3,
+   then shares unused places up to a global cap of 12. A strong market can
+   receive more than 3. Current approvals retain their batch order; older
+   approvals follow by current score, without comparing ranks from unrelated
+   batches. Closed or unverified listings allow other approved candidates to
+   fill their places within the bounded source-check budget.
 6. Jobs not selected this round are not discarded: a `hold` verdict, a `send`
    dropped on its sponsorship read, and a `send` that loses the cap all leave
    the job `status='new'`, `notified=0`, so it re-competes while it still
@@ -238,7 +254,15 @@ For each candidate job, the scraper fetches the full description and extracts:
    ranking and again when persisting reviews. Freshness uses the posting date,
    falling back to collection time for undated postings; jobs with no usable
    date are excluded. Filtering does not change their stored status. Only an
-   explicit `reject` verdict sets `status='rejected'`.
+   explicit `reject` verdict sets `status='rejected'`. Backfill never promotes
+   a hold or extends freshness; a hold needs a fresh approval. Public source
+   checks must confirm the same job and current application availability.
+   Explicit closure or expiry sets an unsent job to `status='unavailable'`.
+   A timeout, blocked page, login challenge or ambiguous response remains
+   `unknown`, withheld for retry; do not reuse an old open check as proof.
+   These checks preserve application history and store evidence separately
+   from the AI verdict. To retry only the eligible approved queue without a
+   new review batch, pass an empty JSON array to `jobhunter_review.py`.
 7. That digest is ONE message for the whole night, not one message per job
    (`scraper.format_digest_message` composes it). Entries are grouped under a
    fixed market order — Dubai, Abu Dhabi, Jeddah, Riyadh, Switzerland
@@ -252,10 +276,13 @@ For each candidate job, the scraper fetches the full description and extracts:
    posting-age line, then a score and visa-status line. Titles and company
    names are shortened for phone screens; full text stays in the listing.
    Long technology lists and review explanations belong in the details, not
-   the digest. Empty markets share one bold `⚠️ No matches` line. Scores use
+   the digest. Empty markets share one bold `⚠️ No matches` line, except those
+   with unresolved checks, which use `⏳ Availability not confirmed`. These
+   labels describe this delivery, not an exhaustive absence of jobs. Scores use
    🔥 for 80+, ⭐ for 70–79, and 👍 below 70. Visa labels are bold: an inferred
    sponsorship read displays `❓ Visa unconfirmed`; an explicit offer displays
-   `✅ Visa offered`. The live queue count appears once in the summary.
+   `✅ Visa offered`. The live queue count appears once in the summary; it
+   includes eligible unreviewed and held jobs, not only approved sends.
 8. A bare numeric reply that follows the digest (e.g. "2") refers to that job
    — resolved from your own memory of the digest you just sent, not from any
    stored mapping. Look up that job's id, run `scraper.py --get-job <id>`, and
@@ -263,7 +290,12 @@ For each candidate job, the scraper fetches the full description and extracts:
    the job directly.
 9. A reply of "more" runs `scraper.py --list-queued` (`--limit N` widens it)
    and is presented as a short follow-up text list — not a second digest, and
-   not numbered for further drill-down.
+   not numbered for further drill-down. This command checks source listings
+   again and returns only those confirmed open within its check budget.
+   Listings may still need a fit review; this command does not approve a hold.
+   An empty result does not prove there are no matches. Rerun the command to
+   retry uncertain availability rather than presenting stored text as live
+   confirmation. Individual notifications also check availability before send.
 10. The digest carries no buttons; every follow-up is an ordinary text reply.
     The existing "interested" trigger is unchanged: once a specific job is in
     view — from a numbered reply or from the user naming it — that word works
@@ -382,8 +414,11 @@ python3 scraper.py --collect-only
 # Get job as JSON
 python3 scraper.py --get-job <job_id>
 
-# List the top queued (eligible but unsent) jobs as JSON — the "more" reply
+# Recheck top queued listings and return confirmed-open jobs — the "more" reply
 python3 scraper.py --list-queued [--limit N]
+
+# Recheck and send eligible stored approvals without a new review batch (Pi)
+printf '[]\n' | ~/.hermes/scripts/jobhunter_review.py
 
 # Send message via Telegram
 python3 scraper.py --send-msg "<html message>"
@@ -447,3 +482,8 @@ These rules are NON-NEGOTIABLE. Violating them produces a fraudulent resume.
 - **NEVER expose** the evidence bank, refiner session, application defaults, or private/interview-only notes in generated application JSON or PDFs
 - The tailored JSON must use the renderer-compatible public profile structure, not the private/refinement fields from master-profile.json
 - When in doubt, keep the original text unchanged
+
+
+## Invited candidate service
+
+Additional candidates belong to the separate restricted `jobhunter_service` bot. Use the owner's `jobhunter-admin` skill to register numeric Telegram user IDs. Never add candidates to the administrative Hermes allowlist or run their work through the owner's browser, profile, global cron or Google token. They configure their own resume, work authorization, schedule and channels through their private service conversation. Their account links open provider consent or their isolated browser viewer; they do not need the Pi desktop. See setup.md section 14 for the operator installation.

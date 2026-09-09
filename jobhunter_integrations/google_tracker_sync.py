@@ -8,9 +8,10 @@ import hashlib
 import json
 import os
 import re
+from pathlib import Path
 
 from . import google_tracker as tracker
-from .gmail_auth import write_private_json
+from .gmail_auth import normalize_account, write_private_json
 
 DOCUMENT_COLUMNS = {8: "Open resume", 9: "Open cover letter", 11: "Open screenshot"}
 LINK_FORMULA = re.compile(r'^=HYPERLINK\("(https?://[^"\s]+)",\s*"([^"\r\n]*)"\)$', re.IGNORECASE)
@@ -136,6 +137,14 @@ def newest_first_requests(sheet_id, rows):
 
 
 def sync_tracker(args):
+    candidate_root = getattr(args, "candidate_root", None)
+    if candidate_root is not None:
+        candidate_root = Path(candidate_root).expanduser().resolve()
+        if not getattr(args, "account", None):
+            raise ValueError("A scoped tracker requires an explicit tracker account.")
+        for path in (args.db_path, args.google_token, args.drive_state):
+            if not Path(path).expanduser().resolve().is_relative_to(candidate_root):
+                raise ValueError("Tracker data paths must belong to this candidate.")
     state_dir = args.drive_state.parent
     state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(state_dir / "tracker_sync.lock", os.O_CREAT | os.O_RDWR, 0o600)
@@ -145,7 +154,11 @@ def sync_tracker(args):
 
 
 def sync_locked(args, state_dir):
-    sheets, drive = tracker.google_services(args.google_token)
+    account = getattr(args, "account", None)
+    candidate_root = getattr(args, "candidate_root", None)
+    if candidate_root is not None:
+        candidate_root = Path(candidate_root).expanduser().resolve()
+    sheets, drive = tracker.google_services(args.google_token, account) if account is not None else tracker.google_services(args.google_token)
     metadata = sheets.spreadsheets().get(spreadsheetId=args.spreadsheet_id).execute()
     gid = getattr(args, "sheet_id", None)
     matches = [s["properties"] for s in metadata.get("sheets", []) if (
@@ -160,7 +173,15 @@ def sync_locked(args, state_dir):
     def read_values():
         return values_api.get(spreadsheetId=args.spreadsheet_id, range=f"{quoted}!A:N", valueRenderOption="FORMULA").execute().get("values", [])
     before = read_values()
-    incoming = tracker.rows_from_db(args.db_path, args.repo_root)
+    incoming = tracker.rows_from_db(args.db_path, args.repo_root, **({"candidate_root": candidate_root} if candidate_root is not None else {}))
+    if candidate_root is not None:
+        for row in incoming:
+            for column in (*DOCUMENT_COLUMNS, 10):
+                value = row[column]
+                if value and not web_link(value):
+                    path = tracker.abs_path(value, args.repo_root)
+                    if not path.resolve().is_relative_to(candidate_root):
+                        raise ValueError("Application documents must belong to this candidate.")
     after, counts = merge_rows(before, incoming, repo_root=args.repo_root)
     summary = {"rows": len(after) - 1, **counts, "dry_run": bool(args.dry_run)}
     if args.dry_run:
@@ -168,6 +189,13 @@ def sync_locked(args, state_dir):
 
     backup = state_dir / "tracker_before_sync.json"
     uploads = read_json(args.drive_state, {"files": {}})
+    if account is not None:
+        expected = normalize_account(account)
+        if uploads.get("account", expected) != expected:
+            raise ValueError("Document upload state belongs to a different tracker account.")
+        uploads["account"] = expected
+        # An explicit candidate account must never inherit owner share targets.
+        uploads.setdefault("share_with", [])
     if uploads.get("folder_id"):
         tracker.ensure_drive_folder(drive, uploads, args.drive_state, args.drive_folder_name)
     # Only missing links need an upload. Old Drive links remain usable even
@@ -179,6 +207,8 @@ def sync_locked(args, state_dir):
                 row[column] = f'=HYPERLINK("{existing_link.group(1)}", "{label}")'
             if row[column] and not web_link(row[column]):
                 path = tracker.abs_path(row[column], args.repo_root)
+                if candidate_root is not None and path and not path.resolve().is_relative_to(candidate_root):
+                    raise ValueError("Application documents must belong to this candidate.")
                 if path and path.is_file():
                     job_key = hashlib.sha256(repr(row_key(row)).encode()).hexdigest()[:12]
                     row[column] = tracker.upload_local_file(drive, row[column], job_key, uploads, args.drive_state, args.drive_folder_name, label, args.repo_root)

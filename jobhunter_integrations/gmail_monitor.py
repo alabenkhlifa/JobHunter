@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import fcntl
 import os
+import argparse
+from pathlib import Path
 
 from jobhunter_integrations import gmail_watcher
 from jobhunter_integrations.gmail_auth import GmailAuthError, write_private_json
@@ -41,6 +43,7 @@ def notification_batches(matches):
 def run_monitor(args, send) -> None:
     if args.max_messages <= 0:
         raise ValueError("The mail inspection limit must be positive.")
+    scope = gmail_watcher.candidate_mail_scope(args)
     state_path = args.state_path
     state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_path = state_path.with_suffix(".lock")
@@ -55,6 +58,8 @@ def run_monitor(args, send) -> None:
             pending = gmail_watcher.load_json(outbox_path, {})
             if not isinstance(pending.get("notifications"), list) or not isinstance(pending.get("state"), dict):
                 raise ValueError("Invalid mail outbox; restore it before retrying.")
+            if scope is not None and pending["state"].get("mailbox_scope") != scope:
+                raise GmailAuthError("Queued mail alerts belong to a different account; reconnect with separate state.")
         else:
             matches, state = gmail_watcher.collect_mail(args)
             pending = {"notifications": notification_batches(matches), "state": state}
@@ -70,9 +75,21 @@ def run_monitor(args, send) -> None:
         outbox_path.unlink()
 
 
+def run_candidate_monitor(*, token_path: Path, account: str, db_path: Path, state_path: Path,
+                          candidate_root: Path, send, tracker_sync=None,
+                          max_messages: int = 25, query: str = "newer_than:30d -from:me") -> None:
+    """Run one isolated mailbox; a missing tracker callback never uses owner sync."""
+    args = argparse.Namespace(google_token=Path(token_path), account=account,
+                              db_path=Path(db_path), state_path=Path(state_path),
+                              candidate_root=Path(candidate_root), max_messages=max_messages,
+                              query=query, tracker_sync=tracker_sync or (lambda: False))
+    run_monitor(args, send)
+
+
 def main(argv: list[str] | None = None) -> int:
     from dotenv import load_dotenv
-    load_dotenv(gmail_watcher.default_repo_root() / ".env")
+    if not os.getenv("JOBHUNTER_CANDIDATE_ROOT"):
+        load_dotenv(gmail_watcher.default_repo_root() / ".env")
     args = gmail_watcher.parse_args(argv)
     token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat:
@@ -82,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run_monitor(args, lambda message: send_telegram(token, chat, message))
         # Retry an earlier tracker failure even when no new email changes a stage.
-        if _env_flag("JOBHUNTER_AUTO_SYNC_TRACKER") and not sync_application_tracker_if_enabled():
+        if getattr(args, "candidate_root", None) is None and _env_flag("JOBHUNTER_AUTO_SYNC_TRACKER") and not sync_application_tracker_if_enabled():
             print("JobHunter mail check completed, but the application tracker sync failed; it will retry at the next check.")
             return 1
     except GmailAuthError as exc:

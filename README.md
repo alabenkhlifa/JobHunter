@@ -6,7 +6,7 @@ It can:
 
 - collect job opportunities from supported sources;
 - store and deduplicate jobs in local SQLite;
-- send at most the best 5 Telegram CTA job cards per day for review;
+- review candidates across markets and send Telegram digests within the configured delivery cap;
 - learn from Interested/Skip feedback to demote repeatedly declined patterns and boost similar strong matches;
 - run a brief Interested-stage company/recruiter/salary research check before generating an application package;
 - run a resumable Resume Refiner interview that turns an uploaded resume and confirmed follow-up answers into a detailed evidence bank;
@@ -98,6 +98,16 @@ Collect jobs:
 ```bash
 python scraper.py --collect-only
 ```
+
+The Hermes daily collector balances up to 40 review candidates across available markets after applying feedback. Unreviewed candidates precede repeated holds. Delivery combines the new approvals with still-eligible approvals from earlier batches; the default is three places per market with unused places shared, up to 12 jobs. Freshness, score and hard filters still apply, and a held job needs a new approval before it can enter a digest.
+
+Before delivery, JobHunter checks the source listing for the same role and current application availability. Confirmed closure marks an unsent job `unavailable`; timeouts, blocked pages and ambiguous results remain pending for retry. Checks also run for individual cards, delivery retries and the owner's “more” list:
+
+```bash
+python scraper.py --list-queued --limit 10
+```
+
+This list contains eligible, unsent listings confirmed open during the check; entries may still need a fit review. An empty list does not prove there are no jobs in that market.
 
 Inspect a job:
 
@@ -269,7 +279,7 @@ JobHunter should always:
 - save evidence screenshots for blockers/draft-ready states when useful;
 - ask the user with clear CTA options at approval gates.
 
-For CAPTCHA or other human-verification blockers, pause automation and let the user complete the challenge in the live browser. A practical remote-handoff pattern for Raspberry Pi deployments is VNC from a phone: enable VNC/remote desktop on the Pi, connect with a mobile VNC app to `<pi-lan-or-vpn-ip>:5900`, complete the CAPTCHA manually, then tell the agent to continue. Use LAN/VPN access only; never expose VNC, cookies, browser profiles, or CDP ports to the public internet.
+For CAPTCHA or other human-verification blockers, pause automation and let the user complete the challenge in the live browser. For the legacy owner deployment, a practical remote-handoff pattern is VNC from a phone: enable VNC/remote desktop on the Pi, connect with a mobile VNC app to `<pi-lan-or-vpn-ip>:5900`, complete the CAPTCHA manually, then tell the agent to continue. Use LAN/VPN access only; never expose VNC, cookies, browser profiles, or CDP ports to the public internet.
 
 ## Git hygiene
 
@@ -292,3 +302,21 @@ Before contributing, run:
 python -m pytest -q tests
 git status --short
 ```
+
+## Invited Telegram profiles
+
+The optional `jobhunter_service` runs a separate Telegram bot for invited candidates. The existing owner CLI, Hermes gateway, cron jobs and browser remain independent. The owner registers a **numeric Telegram user ID** through `/jobhunter add <id>` in the service bot or the Pi's `jobhunter-admin` Hermes skill. A candidate activates the invitation by starting a private conversation with the bot.
+
+Candidates upload a PDF, DOCX or text resume and refine it conversationally with a restricted Hermes planner. Each configuration change receives an exact preview and a confirmation button. The backend binds identity to the Telegram sender; model output cannot register users, execute commands, confirm facts or access another profile. Search settings, credentials, job history, documents, schedules and delivery queues live in private `u<telegram_id>` directories beneath the service data root.
+
+Each destination declares work authorization (`authorized`, `sponsorship_required`, or `unknown`) and relocation needs. Authorization allows jobs without sponsorship; candidates requiring sponsorship receive jobs whose review confirms an offer of sponsorship. Unknown authorization stays held. Visa-free entry alone does not establish work authorization. Optional salary targets are guidance and do not silently reject jobs. Each candidate chooses an IANA timezone, local time and weekdays. Searches are queued independently and run serially on the Pi; a long collection can delay execution, while other candidates' scheduled slots are retained.
+
+Google integrations are optional and independently authorized. Recommend a dedicated jobs Gmail owning a newly created Google Sheet and document folder, shared as reader with the candidate's personal account. A personal Gmail is also supported; tracker and monitored mailbox can differ. `/connect tracker` creates the tracker after consent. `/connect gmail` enables mailbox access after the candidate has configured monitoring. The Sheet can be viewed in the browser or downloaded from Google Sheets as Excel.
+
+`/jobs` lists collected roles. `/details <id>`, `/interested <id>` and `/apply <id>` show a role, track interest and prepare private application documents. `/connect linkedin` opens a short-lived authenticated web viewer for the candidate's own container browser. Candidates sign in directly on LinkedIn and complete human verification themselves. They do not receive a Pi desktop or VNC account. `/inspect <id>` checks the current application; `/upload <id>` and `/submit <id>` each require a separate confirmation bound to the candidate, job, page, browser and document. A click alone records an attempted submission, and uncertain outcomes prevent automatic retries. `/tracker` retries synchronization; `/logout` closes the viewer while retaining the private browser login profile.
+
+Owner suspension/revocation pauses searches and invalidates access links, pending deliveries and approvals. Candidate data remains available for controlled recovery. Telegram delivery uses a durable outbox and marks jobs notified only after a full destination acknowledges every message part. A lost provider acknowledgement can still cause a duplicate message on retry; the Bot API offers no transactional delivery with the local database.
+
+Each outbox retry checks listing availability again. An inconclusive check keeps the unsent remainder pending. Confirmed closure cancels the remaining copies of that digest; it does not send an outdated listing to another destination.
+
+See [setup.md](setup.md#14-restricted-multi-user-service-on-the-pi) for installation, required operator settings and recovery. This service requires its own bot token, HTTPS endpoint, Google web OAuth client when used, and dedicated model credentials before it can run.

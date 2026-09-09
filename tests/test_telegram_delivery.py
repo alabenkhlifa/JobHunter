@@ -44,7 +44,9 @@ def test_individual_notifications_return_only_confirmed_ids():
     with mock.patch.object(scraper, "send_telegram", side_effect=[True, True, False]), \
          mock.patch.object(scraper, "format_job_message", return_value="card"), \
          mock.patch.object(scraper, "job_inline_keyboard", return_value={}), \
-         mock.patch.object(scraper.time, "sleep"):
+         mock.patch.object(scraper.time, "sleep"), \
+         mock.patch.object(scraper, 'prepare_review_candidate', side_effect=lambda job: (job, None)), \
+         mock.patch('jobhunter_availability.check', return_value={'state': 'open', 'matched': True}):
         assert scraper.notify_new_jobs("tok", "chat", jobs) == ["sent"]
 
 

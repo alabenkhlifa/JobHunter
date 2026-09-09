@@ -65,6 +65,36 @@ def test_corrupt_ledger_is_not_silently_replaced(tmp_path, monkeypatch):
     assert args.state_path.read_text() == "broken"
 
 
+def test_candidate_watcher_verifies_explicit_account_and_avoids_owner_sync(tmp_path, monkeypatch):
+    _, args = watcher_fixture(tmp_path, monkeypatch, [{"messages": [{"id": "m1"}]}])
+    args.account = "candidate@example.com"
+    args.candidate_root = tmp_path
+    monkeypatch.setenv("JOBHUNTER_GMAIL_ACCOUNT", "owner@example.com")
+    _, state = gmail_watcher.collect_mail(args)
+    gmail_watcher.gmail_service.assert_called_once_with(args.google_token, "candidate@example.com")
+    assert state["mailbox_scope"] == {"account": "candidate@example.com", "db_path": str(args.db_path.resolve())}
+    assert gmail_watcher.process_application_outcome.call_args.kwargs["tracker_sync"]() is False
+
+
+def test_candidate_watcher_rejects_outside_paths_before_reading_mail(tmp_path, monkeypatch):
+    _, args = watcher_fixture(tmp_path, monkeypatch, [])
+    args.account = "candidate@example.com"
+    args.candidate_root = tmp_path / "candidate"
+    with pytest.raises(gmail_watcher.GmailAuthError, match="belong"):
+        gmail_watcher.collect_mail(args)
+    gmail_watcher.gmail_service.assert_not_called()
+
+
+def test_candidate_watcher_rejects_old_mailbox_state_before_reading_mail(tmp_path, monkeypatch):
+    _, args = watcher_fixture(tmp_path, monkeypatch, [])
+    args.account = "candidate@example.com"
+    args.candidate_root = tmp_path
+    args.state_path.write_text(json.dumps({"mailbox_scope": {"account": "other@example.com", "db_path": str(args.db_path)}}))
+    with pytest.raises(gmail_watcher.GmailAuthError, match="different account"):
+        gmail_watcher.collect_mail(args)
+    gmail_watcher.gmail_service.assert_not_called()
+
+
 def message(mid, timestamp, *, sender="noreply@ats.example.com", recipient="jobs@example.com"):
     return {"id": mid, "internalDate": str(int(timestamp.timestamp() * 1000)), "payload": {
         "mimeType": "text/plain", "headers": [{"name": "From", "value": sender}, {"name": "To", "value": recipient}],

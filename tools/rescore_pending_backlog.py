@@ -33,13 +33,12 @@ def rescore(job, now):
         allowed_locations=tuple(loc.lower() for loc in scraper.CONFIG.get("allowed_locations", ())),
         max_experience=scraper.CONFIG.get("max_experience", 8),
         now=now,
+        matching=scraper.CONFIG.get("matching"), markets=scraper.CONFIG.get("markets"),
     )
     if result["reason"]:
         return 0, [f"knocked out: {result['reason']}"]
-    breakdown = [
-        f"{name} {result['parts'][name]:.2f}x{job_scoring.WEIGHTS[name]}"
-        for name in job_scoring.WEIGHTS
-    ]
+    weights = scraper.CONFIG.get("matching", {}).get("weights", job_scoring.WEIGHTS)
+    breakdown = [f"{name} {result['parts'][name]:.2f}x{weights[name]}" for name in weights]
     breakdown.append(f"band {result['band']}")
     return result["total"], breakdown
 
@@ -84,7 +83,7 @@ def run_rescore(db_path, *, apply=False, backup_dir=None):
                 "applied": apply, "pending_rows": len(rows), "affected_rows": 0,
                 "score_changes": 0, "breakdown_only_changes": 0,
                 "crossed_above": 0, "crossed_below": 0,
-                "cutoff": job_scoring.SEND_CUTOFF, "backup_path": None,
+                "cutoff": scraper.CONFIG["score_threshold"], "backup_path": None,
             }
             for row in rows:
                 job = dict(row, **UNSCORED_AT_COLLECTION_TIME)
@@ -103,9 +102,9 @@ def run_rescore(db_path, *, apply=False, backup_dir=None):
                 updates.append((new_score, breakdown_text, row["id"]))
                 summary["score_changes" if new_score != row["score"] else "breakdown_only_changes"] += 1
                 old_score = row["score"] or 0
-                if old_score < job_scoring.SEND_CUTOFF <= new_score:
+                if old_score < summary["cutoff"] <= new_score:
                     summary["crossed_above"] += 1
-                elif new_score < job_scoring.SEND_CUTOFF <= old_score:
+                elif new_score < summary["cutoff"] <= old_score:
                     summary["crossed_below"] += 1
             summary["affected_rows"] = len(updates)
             if apply and updates:
@@ -125,14 +124,19 @@ def run_rescore(db_path, *, apply=False, backup_dir=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=Path, default=DB)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--db", type=Path)
+    source.add_argument("--profile", help="Use this named profile's database and matching rules")
     parser.add_argument("--backup-dir", type=Path)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--apply", action="store_true", help="Back up and commit score updates")
     mode.add_argument("--dry-run", action="store_true", help="Preview without writing (default)")
     args = parser.parse_args(argv)
     try:
-        summary = run_rescore(args.db, apply=args.apply, backup_dir=args.backup_dir)
+        if args.profile:
+            scraper.CONFIG = scraper.load_profile_config(args.profile)
+        summary = run_rescore(Path(scraper.CONFIG["db_path"]) if args.profile else args.db or DB,
+                              apply=args.apply, backup_dir=args.backup_dir)
     except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

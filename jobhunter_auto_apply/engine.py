@@ -13,7 +13,7 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import scraper
@@ -64,6 +64,12 @@ class ApplyConfig:
     submit_requires_approval: bool = True
     upload_requires_approval: bool = True
     blocklist_terms: tuple[str, ...] = DEFAULT_BLOCKLIST_TERMS
+    tracker_sync: bool = True
+    verify_submission: bool = False
+    expected_page_url: str | None = None
+    # When Chromium runs in the managed container, output_dir is mounted here
+    # read-only. Local validation keeps using host paths; only CDP sees this path.
+    browser_output_dir: str | None = None
 
 
 @dataclass
@@ -98,7 +104,8 @@ def _job_output_dir(base: str, job_id: str) -> Path:
 def _record(config: ApplyConfig, job_id: str, stage: str, **kwargs: Any) -> int:
     conn = _connect_db(config.db_path)
     try:
-        return scraper.record_application_stage(conn, job_id, stage, **kwargs)
+        return scraper.record_application_stage(conn, job_id, stage, **kwargs,
+                                                **({"sync": False} if not config.tracker_sync else {}))
     finally:
         conn.close()
 
@@ -130,7 +137,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       name: el.name || '',
       label: labelFor(el),
       required: !!el.required,
-      value_present: !!(el.value || '').trim(),
+      value_present: ['checkbox', 'radio'].includes(el.type) ? el.checked : !!(el.value || '').trim(),
       options: el.tagName === 'SELECT' ? [...el.options].slice(0, 25).map(o => o.text.trim()).filter(Boolean) : []
     })),
     buttons: [...document.querySelectorAll('button, input[type=submit], input[type=button]')].filter(visible).slice(0, 50).map((el) => ({
@@ -230,8 +237,20 @@ class AutoApplyEngine:
             raise PermissionError("file upload requires explicit approval")
         if not Path(file_path).is_file():
             raise FileNotFoundError(file_path)
+        upload_path = str(Path(file_path).resolve())
+        if self.config.browser_output_dir is not None:
+            browser_root = PurePosixPath(self.config.browser_output_dir)
+            if not browser_root.is_absolute() or ".." in browser_root.parts or browser_root == PurePosixPath("/"):
+                raise PermissionError("The browser document mount is invalid.")
+            try:
+                relative = Path(file_path).resolve().relative_to(Path(self.config.output_dir).resolve())
+            except ValueError:
+                raise PermissionError("The approved document is outside this candidate's output directory.") from None
+            upload_path = str(browser_root.joinpath(*relative.parts))
         client = self.connect()
-        client.upload_file(selector, str(Path(file_path).resolve()))
+        if self.config.expected_page_url is not None and client.evaluate("location.href") != self.config.expected_page_url:
+            raise PermissionError("The approved application page changed before upload.")
+        client.upload_file(selector, upload_path)
         time.sleep(1)
         _record(self.config, job_id, "resume_uploaded")
         return self.inspect(job_id, stage="after_upload")
@@ -247,17 +266,23 @@ class AutoApplyEngine:
             )
             raise PermissionError("submit requires explicit approval")
         client = self.connect()
-        client.evaluate(
+        result = client.evaluate(
             f"""
 (() => {{
+  if ({json.dumps(self.config.expected_page_url)} !== null && location.href !== {json.dumps(self.config.expected_page_url)}) return {{ok:false, reason:'page changed'}};
   const el = document.querySelector({json.dumps(selector)});
-  if (!el) return {{ok:false, reason:'selector not found'}};
+  if (!el || el.disabled) return {{ok:false, reason:'selector unavailable'}};
   el.click();
   return {{ok:true}};
 }})()
 """
         )
+        if self.config.verify_submission and (not isinstance(result, dict) or result.get("ok") is not True):
+            raise PermissionError("The submit control was not available; no submission was confirmed.")
         time.sleep(2)
+        if self.config.verify_submission:
+            _record(self.config, job_id, "submission_attempted", notes="Submit control clicked; a matching application receipt still requires review.")
+            return self.inspect(job_id, stage="submission_attempted")
         _record(self.config, job_id, "submitted")
         return self.inspect(job_id, stage="submission_result")
 

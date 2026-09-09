@@ -7,6 +7,8 @@ module imports nothing from scraper.py so it can be tested without a database.
 import re
 from datetime import datetime, timezone
 
+import jobhunter_matching
+
 # Words that describe how senior a role is, not what the role is. Stripping
 # them collapses "Senior DevOps Manager" and "Lead DevOps" onto one family, so
 # a blocked family cannot be smuggled past the filter by a new prefix.
@@ -336,7 +338,7 @@ def _words(text):
 _GENDER_MARKER = re.compile(r"\(?\b[mwfdx](?:\s*/\s*[mwfdx]){1,3}\b\)?")
 
 
-def duplicate_key(job):
+def duplicate_key(job, *, matching=None, markets=None):
     """Identity of a posting for deduplication: normalised title, company, country.
 
     The country, not the city: the same title at one company in Dubai and in
@@ -344,6 +346,9 @@ def duplicate_key(job):
     so collapsing them would hide one. Dubai and Abu Dhabi are one repost.
     """
     title = _GENDER_MARKER.sub(" ", str(job.get("title") or "").lower())
+    if matching and matching.get("preset") == "generic":
+        # Different levels and destinations may have different eligibility.
+        return f"{_words(title)}|{_words(job.get('company'))}|{market_region(job.get('location'), markets=markets)}"
     return f"{normalise_title(title)}|{_words(job.get('company'))}|{market_country(job.get('location'))}"
 
 
@@ -407,12 +412,15 @@ _REGION_OF_TERM = {
 }
 
 
-def market_region(location):
+def market_region(location, markets=None):
     """Which of his five markets a displayed location falls in.
 
     Matches the same way market_country and knockout do. "unknown" when
     nothing places it -- same fallback rule as market_country.
     """
+    if markets is not None:
+        market = jobhunter_matching.resolve_market(location, markets)
+        return market["name"].lower() if market else "unknown"
     location = str(location or "").lower()
     for term, region in _REGION_OF_TERM.items():
         if term in location:
@@ -422,7 +430,7 @@ def market_region(location):
     return "unknown"
 
 
-def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset()):
+def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(), matching=None, markets=None):
     """Return the reason this job is rejected outright, or None to keep it.
 
     Runs before any scoring. No number of matching keywords overturns one of
@@ -434,6 +442,18 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset())
     freshness window, not one that dies with the process. The parameter is
     for other callers and the tests.
     """
+    if matching and matching.get("preset", "generic") == "generic":
+        matching = jobhunter_matching.validate_matching(matching)
+        reason = jobhunter_matching.excluded_reason(job, matching)
+        if reason:
+            return reason
+        reason = jobhunter_matching.eligibility_reason(job, markets or [])
+        if reason:
+            return reason
+        if duplicate_key(job, matching=matching, markets=markets) in seen_keys:
+            return "duplicate of a posting already seen"
+        return None
+
     reason = blocked_title(job)
     if reason:
         return reason
@@ -459,9 +479,14 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset())
     # 85 of 4,580 real descriptions use a curly apostrophe, which would make
     # "won't sponsor" a dead entry. Fold it to the straight form before matching.
     description = str(job.get("description") or "").lower().replace("\u2019", "'").replace("\u2018", "'")
-    for phrase in REFUSES_SPONSORSHIP:
-        if phrase in description:
-            return f"refuses sponsorship: {phrase}"
+    if markets is not None:
+        reason = jobhunter_matching.eligibility_reason(job, markets)
+        if reason:
+            return reason
+    else:
+        for phrase in REFUSES_SPONSORSHIP:
+            if phrase in description:
+                return f"refuses sponsorship: {phrase}"
 
     reason = building_industry(job)
     if reason:
@@ -486,12 +511,17 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset())
 # is no unused capacity anywhere in that case, so it truncates to the global
 # top `cap` by rank and spillover never runs -- the only situation where no
 # market can exceed `per_market`.
-def select_sendable(reviewed, *, per_market=3, cap=12):
+def select_sendable(reviewed, *, per_market=3, cap=12, markets=None):
     """Which reviewed jobs actually get sent, from the agent's verdicts."""
+    if type(per_market) is not int or type(cap) is not int or per_market < 1 or cap < 1:
+        raise ValueError("per_market and cap must be positive integers")
+    if markets is not None:
+        markets = jobhunter_matching.validate_markets(markets)
     sendable = [
         job for job in reviewed
         if job.get("ai_verdict") == "send"
-        and job.get("ai_sponsorship") in ("offered", "implied")
+        and (jobhunter_matching.review_sendable(job, markets) if markets is not None
+             else job.get("ai_sponsorship") in ("offered", "implied"))
     ]
 
     by_market = {}
@@ -794,7 +824,7 @@ def band(total):
     return "below"
 
 
-def evaluate(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(), now=None):
+def evaluate(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(), now=None, matching=None, markets=None):
     """Knockouts, then the weighted dimensions. Always returns every part.
 
     Neither `passed` nor `band` is the send gate; `sendable` is. `passed`
@@ -810,10 +840,34 @@ def evaluate(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(),
         allowed_locations=allowed_locations,
         max_experience=max_experience,
         seen_keys=seen_keys,
+        matching=matching,
+        markets=markets,
     )
     if reason:
         empty = {name: 0.0 for name in WEIGHTS}
         return {"passed": False, "reason": reason, "total": 0, "band": "knocked out", "parts": empty}
+
+    if matching and matching.get("preset", "generic") == "generic":
+        matching = jobhunter_matching.validate_matching(matching)
+        required = " ".join(str(job.get(k) or "") for k in ("title", "tech_required"))
+        if "tech_required" not in job:
+            required += " " + str(job.get("description") or "")
+        optional = str(job.get("tech_nice_to_have") or "")
+        technologies = matching["preferred_technologies"]
+        stack = sum(1.0 if jobhunter_matching.contains_term(required, term) else
+                    NICE_TO_HAVE_CREDIT if jobhunter_matching.contains_term(optional, term) else 0.0
+                    for term in technologies) / len(technologies) if technologies else 0.6
+        roles = matching["preferred_roles"]
+        role = (1.0 if any(jobhunter_matching.contains_term(job.get("title"), term) for term in roles)
+                else 0.2) if roles else 0.6
+        years = job.get("min_experience", -1)
+        seniority = matching["seniority"]
+        level = 0.6 if type(years) is not int or years < 0 else (
+            1.0 if seniority["preferred_min_years"] <= years <= seniority["preferred_max_years"] else 0.4)
+        parts = {"stack": stack, "role": role, "seniority": level,
+                 "employer": employer_fit(job), "freshness": freshness(job, now=now)}
+        total = round(sum(parts[name] * matching["weights"][name] for name in WEIGHTS))
+        return {"passed": True, "reason": None, "total": total, "band": band(total), "parts": parts}
 
     parts = {
         "stack": stack_fit(job),

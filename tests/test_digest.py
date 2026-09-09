@@ -8,6 +8,13 @@ from bs4 import BeautifulSoup
 import scraper
 
 
+@pytest.fixture(autouse=True)
+def verified_listing_for_digest_unit_tests(monkeypatch):
+    # Rendering/Telegram acknowledgement tests isolate the new network gate.
+    # Real source parsing and persisted gate outcomes live in test_pre_delivery.
+    monkeypatch.setattr('jobhunter_delivery.revalidate', lambda conn, job: {'state': 'open', 'matched': True})
+
+
 def job(**over):
     base = {
         "id": "j1", "title": "Backend Lead", "company": "Acme",
@@ -260,11 +267,11 @@ def test_send_digest_marks_only_the_selected_jobs_notified():
 def test_failed_digest_leaves_all_jobs_pending(response):
     conn = make_conn([("selected", {"score": 80}), ("queued", {"score": 60})])
     selected = [dict(conn.execute("SELECT * FROM jobs WHERE id='selected'").fetchone())]
-    before = list(conn.iterdump())
+    before = [tuple(row) for row in conn.execute("SELECT * FROM jobs")]
     with mock.patch.object(scraper, "send_telegram", return_value=response):
         with pytest.raises(RuntimeError, match="jobs remain pending"):
             scraper.send_digest("tok", "chat", conn, selected)
-    assert list(conn.iterdump()) == before
+    assert [tuple(row) for row in conn.execute("SELECT * FROM jobs")] == before
 
 
 def test_digest_retry_marks_jobs_only_after_api_acknowledgement():

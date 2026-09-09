@@ -1,4 +1,6 @@
+from contextlib import closing
 import sqlite3
+from unittest.mock import Mock
 
 import pytest
 import scraper
@@ -91,13 +93,100 @@ def test_approved_upload_preserves_permanent_package_directory(tmp_path, monkeyp
     cached = tmp_path / "cache" / "resume.pdf"
     cached.parent.mkdir()
     cached.write_bytes(b"test-only PDF placeholder")
-    with sqlite3.connect(db) as conn:
+    with closing(sqlite3.connect(db)) as conn, conn:
         scraper.record_application_stage(conn, "job-1", "package_generated", package_path=str(package), sync=False)
     client = FakeClient()
     engine = AutoApplyEngine(ApplyConfig(db_path=str(db), output_dir=str(tmp_path)), client=client)
     monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
     monkeypatch.setattr(engine, "inspect", lambda *args, **kwargs: None)
     engine.upload_file("job-1", "input[type=file]", str(cached), approved=True)
-    with sqlite3.connect(db) as conn:
+    with closing(sqlite3.connect(db)) as conn, conn:
         assert conn.execute("SELECT package_path,stage FROM applications").fetchone() == (str(package), "resume_uploaded")
     assert client.uploads == [("input[type=file]", str(cached.resolve()))]
+
+
+def test_scoped_submit_records_attempt_and_skips_global_tracker(tmp_path, monkeypatch):
+    client = FakeClient()
+    tracker = Mock()
+    monkeypatch.setattr(scraper, "sync_application_tracker_if_enabled", tracker)
+    monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), output_dir=str(tmp_path),
+                                        tracker_sync=False, verify_submission=True,
+                                        expected_page_url="https://example.test/apply"), client)
+    monkeypatch.setattr(engine, "inspect", Mock())
+    engine.click_submit("job-1", '[id="submit"]', approved=True)
+    with closing(sqlite3.connect(tmp_path / "jobs.db")) as db, db:
+        assert db.execute("SELECT stage FROM applications").fetchone()[0] == "submission_attempted"
+    tracker.assert_not_called()
+    assert "location.href" in client.clicked[0]
+
+
+def test_scoped_missing_submit_control_never_records_success(tmp_path, monkeypatch):
+    client = Mock()
+    client.evaluate.return_value = {"ok": False}
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), tracker_sync=False, verify_submission=True), client)
+    with pytest.raises(PermissionError, match="not available"):
+        engine.click_submit("job-1", '[id="submit"]', approved=True)
+    assert not (tmp_path / "jobs.db").exists()
+
+
+def test_scoped_upload_checks_url_at_mutation_time(tmp_path):
+    document = tmp_path / "Resume.pdf"
+    document.write_bytes(b"pdf")
+    client = Mock()
+    client.evaluate.return_value = "https://example.test/different"
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), tracker_sync=False,
+                                        expected_page_url="https://example.test/approved"), client)
+    with pytest.raises(PermissionError, match="changed"):
+        engine.upload_file("job-1", '[id="resume"]', str(document), approved=True)
+    client.upload_file.assert_not_called()
+
+
+def test_container_upload_uses_readonly_mount_path_after_host_validation(tmp_path, monkeypatch):
+    output = tmp_path / "candidate/output"
+    document = output / "job package" / "Resume.pdf"
+    document.parent.mkdir(parents=True)
+    document.write_bytes(b"%PDF-1.7\nprivate candidate resume")
+    document.chmod(0o600)
+    client = Mock()
+    client.evaluate.return_value = "https://example.test/approved"
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), output_dir=str(output),
+                                        tracker_sync=False, browser_output_dir="/documents",
+                                        expected_page_url="https://example.test/approved"), client)
+    monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
+    monkeypatch.setattr(engine, "inspect", Mock())
+    engine.upload_file("job-1", '[id="resume"]', str(document), approved=True)
+    client.upload_file.assert_called_once_with('[id="resume"]', "/documents/job package/Resume.pdf")
+    assert document.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_container_upload_rejects_other_candidate_file_or_symlink(tmp_path, symlink):
+    output = tmp_path / "candidate/output"
+    output.mkdir(parents=True)
+    foreign = tmp_path / "other-candidate.pdf"
+    foreign.write_bytes(b"private other candidate")
+    document = foreign
+    if symlink:
+        document = output / "Resume.pdf"
+        document.symlink_to(foreign)
+    client = Mock()
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), output_dir=str(output),
+                                        tracker_sync=False, browser_output_dir="/documents"), client)
+    with pytest.raises(PermissionError, match="outside"):
+        engine.upload_file("job-1", '[id="resume"]', str(document), approved=True)
+    client.upload_file.assert_not_called()
+    assert not (tmp_path / "jobs.db").exists()
+
+
+def test_container_upload_still_requires_explicit_confirmation(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    document = output / "Resume.pdf"
+    document.write_bytes(b"pdf")
+    client = Mock()
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), output_dir=str(output),
+                                        tracker_sync=False, browser_output_dir="/documents"), client)
+    with pytest.raises(PermissionError, match="explicit approval"):
+        engine.upload_file("job-1", '[id="resume"]', str(document), approved=False)
+    client.upload_file.assert_not_called()

@@ -46,6 +46,17 @@ def test_account_config_is_required_and_recoverable(tmp_path, monkeypatch):
     assert auth.expected_account(config_path=path) == "jobs@example.com"
 
 
+def test_explicit_mailbox_config_never_uses_owner_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("JOBHUNTER_GMAIL_ACCOUNT", "owner@example.com")
+    path = tmp_path / "candidate.json"
+    with pytest.raises(auth.GmailAuthError):
+        auth.expected_account(config_path=path)
+    path.write_text('{"email":"candidate@example.com"}')
+    assert auth.expected_account(config_path=path) == "candidate@example.com"
+    with pytest.raises(auth.GmailAuthError):
+        auth.expected_account("")
+
+
 def test_check_only_reads_profile(configured, tmp_path):
     service, creds = configured
     assert auth.gmail_service(tmp_path / "token.json") is service

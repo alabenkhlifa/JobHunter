@@ -172,9 +172,9 @@ def status_color(status: str) -> dict[str, float]:
     return STATUS_PALETTE["neutral"]
 
 
-def google_services(token_path: Path):
+def google_services(token_path: Path, account: str | None = None):
     from .google_tracker_auth import checked_services
-    return checked_services(token_path)
+    return checked_services(token_path, account)
 
 
 def share_drive_folder(drive, folder_id: str, recipients: str) -> list[str]:
@@ -218,7 +218,8 @@ def ensure_drive_folder(drive, state: dict[str, Any], state_path: Path, folder_n
         state["folder_link"] = resp.get("webViewLink")
         save_json(state_path, state)
     folder_id = str(state["folder_id"])
-    readers = share_drive_folder(drive, folder_id, os.getenv("JOBHUNTER_TRACKER_SHARE_WITH", ""))
+    recipients = ",".join(state["share_with"]) if "share_with" in state else os.getenv("JOBHUNTER_TRACKER_SHARE_WITH", "")
+    readers = share_drive_folder(drive, folder_id, recipients)
     if state.get("shared_with", []) != readers:
         state["shared_with"] = readers
         save_json(state_path, state)
@@ -259,7 +260,7 @@ def upload_local_file(drive, file_path: str | None, job_id: str, state: dict[str
     return f'=HYPERLINK("{created.get("webViewLink")}", "{label}")'
 
 
-def rows_from_db(db_path: Path, repo_root: Path, drive=None, drive_state_path: Path | None = None, drive_folder_name: str = "JobHunter Application Evidence") -> list[list[Any]]:
+def rows_from_db(db_path: Path, repo_root: Path, drive=None, drive_state_path: Path | None = None, drive_folder_name: str = "JobHunter Application Evidence", *, candidate_root: Path | None = None) -> list[list[Any]]:
     conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
@@ -282,6 +283,10 @@ def rows_from_db(db_path: Path, repo_root: Path, drive=None, drive_state_path: P
     seen_keys = set()
     for r in rows:
         package = abs_path(r["package_path"], repo_root)
+        if candidate_root is not None:
+            for path in (package, abs_path(r["evidence_path"], repo_root)):
+                if path and not path.resolve().is_relative_to(candidate_root.resolve()):
+                    raise ValueError("Application documents must belong to this candidate.")
         # The upload engine records the selected PDF directly; package
         # generation records its folder. Both are valid application records.
         package_file = package if package and package.is_file() else None
@@ -358,6 +363,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repo-root", type=Path, default=default_repo_root())
     parser.add_argument("--db-path", type=Path, default=Path(os.getenv("JOBHUNTER_DB_PATH", default_repo_root() / "data" / "jobs.db")))
     parser.add_argument("--google-token", type=Path, default=default_token_path())
+    parser.add_argument("--account", default=os.getenv("JOBHUNTER_TRACKER_ACCOUNT"))
+    parser.add_argument("--candidate-root", type=Path, default=os.getenv("JOBHUNTER_CANDIDATE_ROOT"))
     parser.add_argument("--drive-state", type=Path, default=Path(os.getenv("JOBHUNTER_TRACKER_DRIVE_STATE", default_state_dir() / "tracker_drive_files.json")))
     parser.add_argument("--drive-folder-name", default=os.getenv("JOBHUNTER_TRACKER_DRIVE_FOLDER_NAME", "JobHunter Application Evidence"))
     return parser.parse_args(argv)
@@ -365,7 +372,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     from dotenv import load_dotenv
-    load_dotenv(default_repo_root() / ".env")
+    if not os.getenv("JOBHUNTER_CANDIDATE_ROOT"):
+        load_dotenv(default_repo_root() / ".env")
     try:
         result = sync_tracker(parse_args(argv))
     except Exception:

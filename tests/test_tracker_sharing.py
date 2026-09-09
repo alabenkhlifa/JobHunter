@@ -52,3 +52,13 @@ def test_failed_share_is_not_recorded_as_success(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         ensure_drive_folder(drive, state, tmp_path / "uploads.json", "Evidence")
     assert "shared_with" not in state
+
+
+def test_candidate_folder_never_inherits_owner_recipients(tmp_path, monkeypatch):
+    monkeypatch.setenv("JOBHUNTER_TRACKER_SHARE_WITH", "owner@example.com")
+    drive = Mock()
+    drive.permissions().list().execute.return_value = {"permissions": []}
+    state = {"folder_id": "candidate-folder", "share_with": ["candidate-personal@example.com"]}
+    ensure_drive_folder(drive, state, tmp_path / "uploads.json", "Evidence")
+    assert state["shared_with"] == ["candidate-personal@example.com"]
+    assert drive.permissions().create.call_args.kwargs["body"]["emailAddress"] == "candidate-personal@example.com"

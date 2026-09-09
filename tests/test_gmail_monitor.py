@@ -97,6 +97,23 @@ def test_corrupt_outbox_fails_without_sending_or_losing_it(mailbox):
     collector.assert_not_called()
 
 
+def test_candidate_outbox_cannot_send_another_mailbox_alerts(mailbox, tmp_path):
+    args, _, _, collector = mailbox
+    args.account = "candidate@example.com"
+    args.candidate_root = tmp_path
+    args.db_path = tmp_path / "jobs.db"
+    args.google_token = tmp_path / "token.json"
+    outbox = args.state_path.with_suffix(".outbox.json")
+    outbox.write_text(json.dumps({"notifications": ["private other-user mail"], "state": {
+        "mailbox_scope": {"account": "other@example.com", "db_path": str(args.db_path)},
+    }}))
+    send = Mock()
+    with pytest.raises(monitor.GmailAuthError, match="different account"):
+        monitor.run_monitor(args, send)
+    send.assert_not_called()
+    collector.assert_not_called()
+
+
 @pytest.mark.parametrize("sync_success", [True, False])
 def test_scheduled_check_retries_tracker_without_new_mail(mailbox, monkeypatch, capsys, sync_success):
     args, _, state, collector = mailbox

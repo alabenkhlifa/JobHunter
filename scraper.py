@@ -2,6 +2,7 @@
 """Job scraper for Dubai market with Telegram notifications."""
 
 import argparse
+from copy import deepcopy
 import hashlib
 import html
 import json
@@ -25,6 +26,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 import job_scoring
+import jobhunter_matching
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -154,15 +156,35 @@ CONFIG = {
     "max_pages": 10,
 }
 
-DEFAULT_CONFIG = dict(CONFIG)
+DEFAULT_CONFIG = deepcopy(CONFIG)
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def profile_directory(profile_name):
+    """Resolve a named profile within the configured private data root."""
+    if not isinstance(profile_name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", profile_name):
+        raise ValueError("profile ID must contain 1-64 lowercase letters, numbers, underscores or hyphens")
+    override = os.environ.get("JOBHUNTER_DATA_ROOT")
+    root = Path(override) if override else PROJECT_ROOT / "data"
+    if not root.is_absolute():
+        raise ValueError("JOBHUNTER_DATA_ROOT must be an absolute path")
+    root = root.resolve()
+    directory = (root / profile_name).resolve()
+    if not directory.is_relative_to(root) or directory != root / profile_name:
+        raise ValueError("profile directory escapes the configured data root")
+    for filename in ("config.json", "jobs.db", "scraper.log"):
+        if not (directory / filename).resolve().is_relative_to(directory):
+            raise ValueError(f"profile {filename} escapes its directory")
+    return directory
 
 
 def load_profile_config(profile_name):
-    """Load profile-specific config from data/<name>/config.json, merging with defaults."""
+    """Load a project-anchored profile; missing or invalid profiles fail closed."""
     if profile_name is None:
-        return dict(DEFAULT_CONFIG)
+        return deepcopy(DEFAULT_CONFIG)
 
-    config_path = Path(f"data/{profile_name}/config.json")
+    directory = profile_directory(profile_name)
+    config_path = directory / "config.json"
     if not config_path.exists():
         print(f"Profile config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
@@ -170,10 +192,11 @@ def load_profile_config(profile_name):
     with open(config_path, encoding="utf-8") as f:
         profile_config = json.load(f)
 
-    merged = dict(DEFAULT_CONFIG)
+    profile_config = jobhunter_matching.validate_config(profile_config)
+    merged = deepcopy(DEFAULT_CONFIG)
     merged.update(profile_config)
-    merged["db_path"] = f"./data/{profile_name}/jobs.db"
-    merged["log_path"] = f"./data/{profile_name}/scraper.log"
+    merged["db_path"] = str(directory / "jobs.db")
+    merged["log_path"] = str(directory / "scraper.log")
     return merged
 
 
@@ -306,7 +329,8 @@ def load_recent_duplicate_keys(conn, max_age_days, min_score):
         (cutoff, min_score),
     ).fetchall()
     return {
-        job_scoring.duplicate_key({"title": t, "company": c, "location": loc})
+        job_scoring.duplicate_key({"title": t, "company": c, "location": loc},
+                                  matching=CONFIG.get("matching"), markets=CONFIG.get("markets"))
         for t, c, loc in rows
     }
 
@@ -621,9 +645,10 @@ def record_job_feedback(conn, job_id, action, *, reason=None, source="manual", n
     return int(cur.lastrowid)
 
 
-def get_feedback_summary(conn):
+def get_feedback_summary(conn, *, initialize=True):
     """Return compact counts showing what the user tends to skip or like."""
-    init_feedback_tracking(conn)
+    if initialize:
+        init_feedback_tracking(conn)
     by_action = _dict_counts(
         conn.execute(
             """
@@ -658,7 +683,7 @@ def _feedback_reason_count(summary, *needles):
     return total
 
 
-def apply_feedback_learning(job, feedback_summary):
+def apply_feedback_learning(job, feedback_summary, *, matching=None):
     """Attach lightweight learned ranking signals from Interested/Skip feedback.
 
     This is deliberately transparent rather than ML-heavy: repeated skip reasons
@@ -667,6 +692,24 @@ def apply_feedback_learning(job, feedback_summary):
     the resulting notes and adjusted score but still makes the final judgment.
     """
     item = dict(job)
+    matching = CONFIG.get("matching") if matching is None else matching
+    if matching and matching.get("preset", "generic") == "generic":
+        matching = jobhunter_matching.validate_matching(matching)
+        adjustment, notes = 0, []
+        # Generic feedback uses only explicitly configured preferences. Counts
+        # and reasons come from this profile's own database, never the owner.
+        if matching["feedback_enabled"]:
+            text = " ".join(str(item.get(k) or "") for k in ("title", "description", "tech_required"))
+            reasons = (feedback_summary or {}).get("by_reason", {})
+            for term in matching["preferred_roles"] + matching["preferred_technologies"]:
+                count = sum(int(count) for reason, count in reasons.items()
+                            if jobhunter_matching.contains_term(reason, term))
+                if count and jobhunter_matching.contains_term(text, term):
+                    notes.append(f"feedback mentions {term}; review candidate preference")
+        item.update(feedback_adjustment=adjustment,
+                    feedback_adjusted_score=int(item.get("score") or 0) + adjustment,
+                    feedback_learning_notes=", ".join(notes) if notes else "neutral")
+        return item
     text = " ".join(
         str(item.get(key) or "")
         for key in (
@@ -799,12 +842,13 @@ def prepare_review_candidate(job, *, now=None):
         candidate["min_experience"] = years
     if is_excluded(candidate):
         return candidate, "excluded role"
-    if requires_local_presence(candidate["description"]):
+    if requires_local_presence(candidate["description"], job=candidate):
         return candidate, "requires existing local presence or work authorization"
     reason = job_scoring.knockout(
         candidate,
         allowed_locations=tuple(loc.lower() for loc in CONFIG.get("allowed_locations", ())),
         max_experience=CONFIG["max_experience"],
+        matching=CONFIG.get("matching"), markets=CONFIG.get("markets"),
     )
     return candidate, reason
 
@@ -812,15 +856,27 @@ def prepare_review_candidate(job, *, now=None):
 def get_review_candidates(conn, *, now=None):
     """All currently eligible candidates; callers rank before applying a cap."""
     conn.row_factory = sqlite3.Row
+    generic = CONFIG.get("matching", {}).get("preset") == "generic"
     rows = conn.execute(
-        "SELECT * FROM jobs WHERE notified = 0 AND status = 'new' AND score >= ?",
-        (CONFIG["score_threshold"],),
+        "SELECT * FROM jobs WHERE notified = 0 AND status = 'new'" + ("" if generic else " AND score >= ?"),
+        () if generic else (CONFIG["score_threshold"],),
     ).fetchall()
     now = now or datetime.now(timezone.utc)
     candidates = []
     for row in rows:
         candidate, reason = prepare_review_candidate(dict(row), now=now)
         if reason is None:
+            if generic:
+                # A preference edit can promote a previously low-scoring job.
+                # Re-extract and rank from the same current configuration used
+                # for collection, without mutating stored application history.
+                required, optional = extract_tech_keywords(candidate["description"])
+                candidate["tech_required"] = ", ".join(required)
+                candidate["tech_nice_to_have"] = ", ".join(optional)
+                candidate["score"], breakdown = score_job(candidate, now=now)
+                candidate["score_breakdown"] = ", ".join(breakdown)
+                if candidate["score"] < CONFIG["score_threshold"]:
+                    continue
             candidates.append(candidate)
     return candidates
 
@@ -871,7 +927,8 @@ def record_review(conn, verdicts):
         if verdict == "send":
             written.append({
                 "id": job_id,
-                "market": job_scoring.market_region(eligible[job_id]),
+                "market": job_scoring.market_region(eligible[job_id], markets=CONFIG.get("markets")),
+                "location": eligible[job_id],
                 "ai_verdict": verdict,
                 "ai_verdict_reason": reason,
                 "ai_sponsorship": sponsorship,
@@ -879,6 +936,31 @@ def record_review(conn, verdicts):
             })
     conn.commit()
     return written
+
+
+
+def reviewed_queue(conn, newly_reviewed=(), *, context_digest=None):
+    """Current eligible queue plus current verdicts; historical holds never send."""
+    import jobhunter_queue
+    feedback = get_feedback_summary(conn, initialize=False)
+    candidates = [apply_feedback_learning(row, feedback, matching=CONFIG.get('matching'))
+                  for row in get_review_candidates(conn)]
+    if CONFIG.get('matching', {}).get('preset') == 'generic':
+        # A review from a different resume/configuration is not transferable.
+        conn.execute('CREATE TABLE IF NOT EXISTS jobhunter_review_context (job_id TEXT PRIMARY KEY, context_digest TEXT NOT NULL)')
+        valid = {row[0] for row in conn.execute('SELECT job_id FROM jobhunter_review_context WHERE context_digest=?', (context_digest,))}
+        candidates = [dict(row, ai_verdict='') if row['id'] not in valid else row for row in candidates]
+    return jobhunter_queue.merge_reviewed_queue(candidates, newly_reviewed, markets=CONFIG.get('markets'))
+
+
+def send_reviewed_digest(token, chat_id, conn, newly_reviewed=()):
+    """Backfill from eligible approved queue entries, then verify source availability."""
+    from jobhunter_delivery import select_available
+    jobs = reviewed_queue(conn, newly_reviewed)
+    selected, report = select_available(conn, jobs, markets=CONFIG.get('markets'), **CONFIG.get('delivery', {}))
+    if selected:
+        _send_digest_verified(token, chat_id, conn, selected, pending_markets=report['pending_markets'])
+    return {'sent': len(selected), **report}
 
 
 def mark_interested(conn, job_id):
@@ -918,14 +1000,32 @@ def get_job_by_id(conn, job_id):
     return dict(row)
 
 
-def list_queued_jobs(conn, limit=10):
+def list_queued_jobs(conn, limit=10, *, revalidate=False):
     """Top eligible-but-unsent jobs by score, for the 'more' conversational flow."""
+    if limit == 0:
+        return []
     rows = sorted(get_review_candidates(conn), key=lambda row: (-row["score"], row["id"]))
+    if revalidate:
+        import jobhunter_availability as availability
+        from jobhunter_delivery import revalidate as check_listing, MAX_CHECKS, MAX_CHECK_SECONDS
+        availability.ensure_schema(conn)
+        conn.commit()
+        confirmed = []
+        deadline = time.monotonic() + MAX_CHECK_SECONDS
+        for row in rows[:MAX_CHECKS]:
+            if time.monotonic() + availability.TOTAL_SECONDS > deadline:
+                break
+            result = check_listing(conn, row)
+            if result['state'] == 'open' and result.get('matched') is True:
+                confirmed.append(row)
+                if limit >= 0 and len(confirmed) >= limit:
+                    break
+        rows = confirmed
     rows = rows if limit < 0 else rows[:limit]
     return [
         {
             "id": row["id"], "title": row["title"], "company": row["company"],
-            "market": job_scoring.market_region(row["location"]), "score": row["score"],
+            "market": job_scoring.market_region(row["location"], markets=CONFIG.get("markets")), "score": row["score"],
         }
         for row in rows
     ]
@@ -1054,6 +1154,8 @@ def normalize_location(location):
 
 def is_allowed_location(job):
     """Allow only jobs whose displayed location matches configured cities."""
+    if "markets" in CONFIG:
+        return jobhunter_matching.resolve_market(normalize_location(job.get("location")), CONFIG["markets"]) is not None
     allowed = [loc.lower() for loc in CONFIG.get("allowed_locations", [])]
     if not allowed:
         return True
@@ -1894,8 +1996,10 @@ def job_age(date_posted):
         return ""
 
 
-def requires_local_presence(text):
+def requires_local_presence(text, *, job=None):
     """Check if job requires candidate to already be in the country."""
+    if "markets" in CONFIG:
+        return bool(jobhunter_matching.eligibility_reason(dict(job or {}, description=text), CONFIG["markets"]))
     text_lower = text.lower()
     return any(phrase in text_lower for phrase in CONFIG["local_presence_phrases"])
 
@@ -1904,11 +2008,14 @@ def requires_local_presence(text):
 
 
 def is_excluded(job):
+    matching = CONFIG.get("matching")
+    if matching and matching.get("preset", "generic") == "generic":
+        return bool(jobhunter_matching.excluded_reason(job, jobhunter_matching.validate_matching(matching)))
     title = job["title"].lower()
     return any(term in title for term in CONFIG["exclude_terms"])
 
 
-def score_job(job):
+def score_job(job, *, now=None):
     """Score a job 0-100 with the rubric in job_scoring.
 
     Signature and return shape are unchanged: every caller, save_job included,
@@ -1920,14 +2027,14 @@ def score_job(job):
         job,
         allowed_locations=tuple(loc.lower() for loc in CONFIG.get("allowed_locations", ())),
         max_experience=CONFIG.get("max_experience", 8),
+        matching=CONFIG.get("matching"), markets=CONFIG.get("markets"),
+        now=now,
     )
     if result["reason"]:
         return 0, [f"knocked out: {result['reason']}"]
 
-    breakdown = [
-        f"{name} {result['parts'][name]:.2f}x{job_scoring.WEIGHTS[name]}"
-        for name in job_scoring.WEIGHTS
-    ]
+    weights = CONFIG.get("matching", {}).get("weights", job_scoring.WEIGHTS)
+    breakdown = [f"{name} {result['parts'][name]:.2f}x{weights[name]}" for name in weights]
     breakdown.append(f"band {result['band']}")
     return result["total"], breakdown
 
@@ -2090,7 +2197,7 @@ def _digest_age(date_posted, today):
     return "today" if days == 0 else f"{days}d ago"
 
 
-def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
+def format_digest_message(sent, queued_count, queued_top_scores, *, today=None, markets=None, pending_markets=()):
     """Compact Telegram HTML, with display-order numbering and linked titles.
 
     Bound visible fields so twelve jobs fit in one Telegram message. Keep
@@ -2122,12 +2229,15 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
     }
     number = 1
     empty_markets = []
-    for market in DIGEST_MARKET_ORDER:
+    markets = CONFIG.get("markets") if markets is None else markets
+    market_order = [m["name"].lower() for m in markets] if markets is not None else DIGEST_MARKET_ORDER
+    market_labels = {m["name"].lower(): html.escape(m["name"].upper()) for m in markets} if markets is not None else DIGEST_MARKET_LABELS
+    for market in market_order:
         jobs = by_market.get(market, [])
         if not jobs:
             empty_markets.append(market.title())
             continue
-        lines.append(f"<b>{DIGEST_MARKET_LABELS[market]}</b>")
+        lines.append(f"<b>{market_labels[market]}</b>")
         for job in jobs:
             title = _digest_text(job.get("title") or "Untitled role", 64)
             url = str(job.get("url") or "").strip()
@@ -2146,6 +2256,10 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
             raw_score = job.get("score") or 0
             score_icon = "🔥" if raw_score >= 80 else "⭐" if raw_score >= 70 else "👍"
             visa = visa_labels.get(job.get("ai_sponsorship"), "❓ Visa unknown")
+            if markets is not None:
+                policy = next((m for m in markets if m["name"].lower() == market), None)
+                if policy and policy["work_authorization"] == "authorized":
+                    visa = "✅ Work authorized"
             details = f"{score_icon} {score}/100 · <b>{visa}</b>"
             if job_scoring.employer_fit(job) != job_scoring.DIRECT_EMPLOYER:
                 details += " · recruiter"
@@ -2153,7 +2267,12 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None):
             number += 1
 
     if empty_markets:
-        lines.append("<b>⚠️ No matches: " + ", ".join(empty_markets) + "</b>")
+        pending = [name for name in empty_markets if name.lower() in pending_markets]
+        empty = [name for name in empty_markets if name.lower() not in pending_markets]
+        if empty:
+            lines.append("<b>⚠️ No matches: " + html.escape(", ".join(empty)) + "</b>")
+        if pending:
+            lines.append("<b>⏳ Availability not confirmed: " + html.escape(", ".join(pending)) + "</b>")
         lines.append("")
     lines.append('Tap a title for the listing. Reply with its number for details, or "more" for the queue.')
     return "\n".join(lines)
@@ -2200,10 +2319,30 @@ def _queued_after_send(conn, sent_ids):
 
 def send_digest(token, chat_id, conn, selected):
     """Compose and send the one nightly digest, then mark selected jobs notified."""
+    import jobhunter_availability as availability
+    from jobhunter_delivery import revalidate
+    availability.ensure_schema(conn)
+    conn.commit()
+    eligible = {job['id']: job for job in get_review_candidates(conn)}
+    verified = []
+    for selected_job in selected:
+        job = eligible.get(selected_job['id'])
+        if job is None:
+            continue
+        result = revalidate(conn, job)
+        if result['state'] == 'open' and result.get('matched') is True:
+            verified.append(job)
+    if not verified:
+        raise RuntimeError('No listings could be confirmed open; jobs remain pending unless explicitly closed.')
+    _send_digest_verified(token, chat_id, conn, verified)
+    return [job['id'] for job in verified]
+
+
+def _send_digest_verified(token, chat_id, conn, selected, *, pending_markets=()):
     sent = []
     for row in selected:
         job = dict(row)
-        job["market"] = job_scoring.market_region(job.get("location"))
+        job["market"] = job_scoring.market_region(job.get("location"), markets=CONFIG.get("markets"))
         sent.append(job)
 
     sent_ids = [job["id"] for job in sent]
@@ -2211,21 +2350,38 @@ def send_digest(token, chat_id, conn, selected):
     queued_count = len(queued_scores)
     queued_top_scores = queued_scores[:3]
 
-    message = format_digest_message(sent, queued_count, queued_top_scores)
+    message = format_digest_message(sent, queued_count, queued_top_scores, pending_markets=pending_markets)
     if not send_telegram(token, chat_id, message):
         raise RuntimeError("Telegram did not confirm digest delivery; jobs remain pending")
     if sent_ids:
         mark_notified(conn, sent_ids)
 
 
-def notify_new_jobs(token, chat_id, jobs):
+def notify_new_jobs(token, chat_id, jobs, *, conn=None):
     """Send individual cards and return only positively acknowledged job IDs."""
     if not jobs:
         return []
 
-    sorted_jobs = sorted(jobs, key=lambda j: j["score"], reverse=True)
+    import jobhunter_availability as availability
+    if conn is not None:
+        availability.ensure_schema(conn)
+        conn.commit()
+    verified = []
+    for job in jobs:
+        _, reason = prepare_review_candidate(job)
+        if reason is not None:
+            continue
+        result = availability.check(job)
+        if conn is not None:
+            availability.recordcheck(conn, job, result)
+            conn.commit()
+        if result['state'] == 'open' and result.get('matched') is True:
+            verified.append(job)
+    if not verified:
+        return []
+    sorted_jobs = sorted(verified, key=lambda j: j['score'], reverse=True)
 
-    send_telegram(token, chat_id, f"<b>\U0001f4bc {len(sorted_jobs)} new matching job(s) found!</b>")
+    send_telegram(token, chat_id, f"<b>\U0001f4bc {len(sorted_jobs)} matching job(s) confirmed open!</b>")
     time.sleep(1)
 
     confirmed_ids = []
@@ -2279,6 +2435,12 @@ def main():
     CONFIG = load_profile_config(args.profile)
     if args.max_pages is not None:
         CONFIG["max_pages"] = args.max_pages
+    if CONFIG.get("matching", {}).get("preset") == "generic":
+        # Restricted profiles deliver through the authenticated service/outbox.
+        # A standalone collection must never inherit the owner's bot or chat.
+        if args.send_doc or args.send_msg:
+            raise ValueError("generic profiles must send through the scoped JobHunter delivery service")
+        args.collect_only = True
 
     # ── CLI utility commands (no logging setup needed) ────────────────────────
     if args.get_job:
@@ -2293,7 +2455,7 @@ def main():
 
     if args.list_queued:
         conn = init_db()
-        jobs = list_queued_jobs(conn, limit=args.limit)
+        jobs = list_queued_jobs(conn, limit=args.limit, revalidate=True)
         conn.close()
         print(json.dumps(jobs, indent=2))
         return
@@ -2395,7 +2557,7 @@ def main():
         """Evaluate a single job: fetch details, filter, score. Returns job if it passes, None otherwise."""
         if is_job_seen(conn, job["id"]):
             return None
-        title_key = job_scoring.duplicate_key(job)
+        title_key = job_scoring.duplicate_key(job, matching=CONFIG.get("matching"), markets=CONFIG.get("markets"))
         if title_key in seen_titles:
             log.info(f"Skipped (repost of a title already stored): {job['title']} @ {job['company']}")
             return None
@@ -2436,7 +2598,7 @@ def main():
             resolution_note = f"posted via {posting_company} aggregator"
             job["credibility_notes"] = "; ".join(value for value in (existing_notes, resolution_note) if value)
 
-        if not CONFIG.get("skip_local_presence", False) and requires_local_presence(desc):
+        if ("markets" in CONFIG or not CONFIG.get("skip_local_presence", False)) and requires_local_presence(desc, job=job):
             log.info(f"Skipped (requires local presence): {job['title']} @ {job['company']}")
             return None
 
@@ -2511,7 +2673,7 @@ def main():
     elif new_jobs:
         log.info(f"Found {len(new_jobs)} new matching job(s)")
         if notifications_enabled:
-            confirmed_ids = notify_new_jobs(token, chat_id, new_jobs)
+            confirmed_ids = notify_new_jobs(token, chat_id, new_jobs, conn=conn)
             if confirmed_ids:
                 mark_notified(conn, confirmed_ids)
             if len(confirmed_ids) != len(new_jobs):

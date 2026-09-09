@@ -259,21 +259,36 @@ Typical flow:
 
 1. `scraper.py --collect-only` collects candidates into local SQLite.
 2. Interested/Skip feedback is summarized from the `job_feedback` table.
-3. Review/ranking logic uses that feedback to demote repeatedly declined patterns and boost similar interested matches.
-4. Telegram sends at most the best 5 CTA job cards per day.
-5. User taps **Interested** or **Skip**.
+3. Review/ranking logic uses that feedback to demote repeatedly declined patterns and boost similar interested matches. The daily Hermes collector balances up to 40 candidates across markets before the review cutoff, preserving prior verdicts and prioritizing unseen candidates over repeated holds.
+4. The daily review combines new approvals with eligible approvals from previous batches, checks their source listings, and fills the digest from confirmed-open jobs. The default delivery allowance is three places per market, sharing unused places up to a global cap of 12. Legacy/manual notifications use individual CTA cards.
+5. The user replies to a daily digest to inspect a role or express interest; individual cards offer **Interested** and **Skip** buttons.
 6. **Interested** records feedback/application state and sends a concise research brief: company context, recruiter/poster if known, warning-only legitimacy notes, and salary guidance vs `JOBHUNTER_TARGET_SALARY_AED_MONTHLY`.
 7. The research brief offers **Apply**, **Ignore**, and **Details** CTAs.
 8. **Apply** selects a matching candidate-confirmed resume variant when available, otherwise uses legacy evidence ranking. Architecture-titled jobs require a matching role-scoped variant, and inconsistent role chronology pauses generation. A successful run generates a truthful resume + cover-letter package and private tailoring manifest from `data/master-profile.json`, enforces any confirmed page limit, records `package_generated`, and sends a final **Proceed to apply** / **Pause** CTA. A blocked run records no package stage and offers **Refine resume** / **Pause** instead.
 9. **Proceed to apply** starts application preparation only. Final submit, CAPTCHA, legal/visa/salary questions, and sensitive confirmations remain approval-gated.
+
+Backfill does not extend the freshness window, lower the score threshold, bypass hard filters or promote a `hold` verdict. Previously approved jobs must still meet today's requirements. The collector's 40-candidate limit applies to the AI review input, not to all stored jobs eligible for approved-queue backfill.
+
+Availability checks use the source's public listing without account cookies. Job identity and current application evidence must match. An explicit closure or expiry sets an unsent job to `unavailable`; an access challenge, timeout or ambiguous page stays `unknown` and is withheld for retry. Availability evidence is stored separately from the AI verdict. Application history is preserved. Check budgets can leave jobs unchecked, so delivery reports distinguish actual sends from closed, unknown and unchecked listings.
 
 Useful commands:
 
 ```bash
 python scraper.py --collect-only
 python scraper.py --get-job <job_id>
+python scraper.py --list-queued --limit 10
 python scraper.py --mark-interested <job_id>
 ```
+
+`--list-queued` powers the owner's “more” reply and performs fresh source checks before returning jobs. It does not grant an AI approval. Run it again to retry uncertain checks; fewer than the requested limit can mean checks were inconclusive or the check budget was reached.
+
+On a Pi with the Hermes wrappers installed, this command rechecks and sends eligible stored approvals even when no new review batch is available:
+
+```bash
+printf '[]\n' | ~/.hermes/scripts/jobhunter_review.py
+```
+
+The review wrapper prints the actual sent count and availability outcomes. Report zero sends or errors as returned; do not infer delivery from the number of approvals supplied. The restricted multi-user outbox also rechecks listings before retries: uncertainty retains the unsent remainder, while confirmed closure cancels the remaining copies of the affected digest.
 
 ## 8. Auto-apply engine
 
@@ -512,3 +527,30 @@ python -m pytest -q tests
 ```
 
 Optionally scan tracked files for real secrets or personal data before release.
+
+## 14. Restricted multi-user service on the Pi
+
+Install this as a separate service, with a dedicated Telegram bot. Do not add candidates to the owner's Hermes gateway allowlist, reuse the owner bot's poller, or change the existing cron jobs. Runtime configuration contains secrets: create private files directly on the Pi and do not paste their contents into Telegram or commit them.
+
+1. Install a reviewed copy of this application at `/opt/jobhunter`, excluding `.env`, `.venv`, `data`, output, browser profiles and all local credentials. Create `/opt/jobhunter/.venv` with Python 3.11 or later and install `requirements.txt`. The release and its dependencies must be root-owned and unwritable by `jobhunter`; the fixed sudo browser helper imports this code.
+2. Install a clean Hermes source checkout and its virtual environment at `/opt/jobhunter-hermes`. The adapter targets the constructor and conversation API verified against Hermes revision `b1ff8722`. The source must contain no owner `.env`, skills, memory or configuration. Configure a dedicated model/provider key; the adapter creates a fresh temporary Hermes home and disables all tools, context files, memory and conversation persistence. It fails closed if the resulting agent has tools.
+3. From the matching RaspberryPi config release, run `./provision.sh --only 70-jobhunter --apply`. It installs a system `jobhunter` account, restricted unit, fixed browser broker, firewall unit, sudoers rule and reboot-safe lock. It does not start the service. The existing administrative Hermes stays under its current account.
+4. Use `stacks/jobhunter/service.env.example` as the template for `/etc/jobhunter/service.env`. Fill the dedicated bot token, owner Telegram user ID, data root, random admin token, HTTPS origin, Hermes paths, model/provider and dedicated key. Set ownership `root:jobhunter`, mode `0640`. Use a random admin token of at least 32 characters. Keep `/etc/jobhunter/browser.json` root-owned `0600`, with its data root matching the service.
+5. For Google access, create a web OAuth client, enable Sheets, Drive and optional Gmail APIs, and configure the exact redirect URI `https://<service-host>/oauth/google/callback`. Store its JSON at `/etc/jobhunter/google-web-client.json`, `root:jobhunter` mode `0640`. Configure permitted test users or the appropriate production consent setup in Google Cloud. Candidate consent verifies the actual account and stores separate tracker/mailbox grants. Existing Sheets must already be accessible to this app's Drive grant; this implementation creates its own trackers and does not include Google Picker for arbitrary existing sheets.
+6. Build the image with `sudo docker build -t jobhunter-browser:local stacks/jobhunter/browser`, then start the egress service with `sudo docker compose -f stacks/jobhunter/compose.yaml up -d`. The browser network is internal, with subnet `172.30.77.0/24`. The dedicated proxy permits public destinations on ports 80/443 and rejects private, loopback, link-local and Tailscale addresses. Start `jobhunter-firewall.service`; the broker checks its exact host-input rules before starting a browser. Ensure this subnet does not overlap an existing network before installation.
+7. Configure a reachable TLS reverse proxy from `stacks/jobhunter/Caddyfile.example`. Forward only the consent callback/connect paths and `/browser/*`; keep `/admin` and port 8765 on loopback. Do not enable access logs containing connection tokens. The browser has no published ports. A paired relay on `jobhunter_relay` publishes viewer/CDP ports only to loopback and forwards only to its own browser; it has no profile or document mounts. The viewer's secure cookie expires after 30 minutes; revocation closes active WebSockets. A single browser at a time limits Pi memory usage. Its persistent profile and readonly documents mount belong to that candidate only.
+8. Validate the environment with the service interpreter and `python -m jobhunter_service check` under the service's private environment, then explicitly enable/start `jobhunter.service`. `check` validates required configuration without contacting Telegram or submitting a model request. Verify health locally at `http://127.0.0.1:8765/health`, then test with a synthetic invited account before onboarding real candidates. Confirm collection, private delivery, Google consent and browser login on the actual Pi; local automated tests alone do not establish deployment readiness.
+
+The owner's local Hermes skill uses `/home/ala/.hermes/scripts/jobhunter_admin.py`. Create `/home/ala/.jobhunter/admin-client.json` owned by the owner, mode `0600`, containing the same admin token and local port:
+
+```json
+{"token": "REPLACE_WITH_THE_PRIVATE_ADMIN_TOKEN", "port": 8765}
+```
+
+Install the tracked `jobhunter-admin` skill and wrapper from the Pi configuration. Owner commands are `python3 ~/.hermes/scripts/jobhunter_admin.py add <telegram_user_id>`, `list`, `suspend <id>` and `revoke <id>`. They call the authenticated local registry API. Invitation does not send a message to the candidate; the candidate must start the service bot. Do not substitute a channel ID or Telegram display name for a user ID.
+
+Candidates can configure settings in ordinary Telegram messages. Deterministic commands remain available during model outages: `/roles`, `/skills`, `/keywords`, `/destination`, `/timezone`, `/schedule`, `/channel`, `/pause`, `/status` and `/connect`. Schedule example: `/schedule 20:00 Europe/Paris weekdays`. The complete proposed change is shown before saving. `/destination` replaces the market list and `/channel` replaces delivery destinations; the preview makes those replacements explicit. Conversation supports multiple destinations and channels. Mailbox checks run at 10:00 and 15:00 in the candidate's configured timezone when monitoring is enabled.
+
+Changing Google identities requires reconnecting the relevant integration. Preserve archived grants and tracking state privately during account transitions. Revoking a Google OAuth grant can invalidate other grants for the same Google account and client project; do not present token revocation as a purpose-only disconnection. Pausing monitoring in settings stops polling without revoking Google consent.
+
+The multi-user state is `/var/lib/jobhunter/service/registry.sqlite3` plus `/var/lib/jobhunter/u<id>/`. The application database is `jobs.db`, accepted resume is `master-profile.json`, and private integration/browser state stays beneath that profile. The owner service's legacy database and credentials retain their original locations. Pi backup integration stores the new service's recovery archive encrypted on the media drive, separately from git. Use the Pi tool's `tools/jobhunter-backup.py --help` for capture and restore commands; restore first to a new empty bundle directory, inspect the result, stop only the restricted service, and install the bundle's `state/` and `configuration/` into their matching roots with service ownership. Restore the reviewed root-owned code, browser image, firewall and HTTPS configuration before starting the service. Keep an independent copy of the encrypted archive to survive media-drive loss.

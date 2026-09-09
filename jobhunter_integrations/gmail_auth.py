@@ -45,14 +45,20 @@ def write_private_json(path: Path, value: dict) -> None:
 
 
 def expected_account(value: str | None = None, config_path: Path | None = None) -> str:
-    account = value or os.getenv("JOBHUNTER_GMAIL_ACCOUNT")
-    if not account:
+    # An explicit account/config is a boundary; do not substitute owner defaults.
+    account = value if value is not None else (None if config_path is not None else os.getenv("JOBHUNTER_GMAIL_ACCOUNT"))
+    if account is None:
         try:
             account = json.loads((config_path or default_account_path()).read_text())["email"]
         except (OSError, ValueError, KeyError, TypeError):
             raise GmailAuthError("Set JOBHUNTER_GMAIL_ACCOUNT or authorize with --account first.") from None
+    return normalize_account(account)
+
+
+def normalize_account(account: str) -> str:
+    """Validate a supplied identity without consulting environment or files."""
     if not isinstance(account, str) or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", account.strip()):
-        raise GmailAuthError("The expected Gmail account must be an email address.")
+        raise GmailAuthError("The expected Google account must be an email address.")
     return account.strip().casefold()
 
 
@@ -70,11 +76,11 @@ def verify_account(service, account: str) -> None:
         raise GmailAuthError("Authorized mailbox does not match the configured jobs account; access stopped.")
 
 
-def gmail_service(token_path: Path, account: str | None = None, *, force_refresh: bool = False):
+def gmail_service(token_path: Path, account: str | None = None, *, force_refresh: bool = False, account_config_path: Path | None = None):
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
 
-    expected = expected_account(account)
+    expected = expected_account(account, account_config_path)
     try:
         credentials = Credentials.from_authorized_user_file(str(token_path.expanduser()))
         if not credentials.has_scopes(SCOPES):
@@ -95,11 +101,12 @@ def gmail_service(token_path: Path, account: str | None = None, *, force_refresh
         raise GmailAuthError("Gmail authorization check failed. Check connectivity and Gmail API access; reauthorize if access was revoked or expired.") from None
 
 
-def authorize_google_credentials(args, scopes, verify_credentials, *, success_message) -> None:
+def authorize_google_credentials(args, scopes, verify_credentials, *, success_message,
+                                 account_resolver=expected_account, account_config_path: Path | None = None) -> None:
     """Run the shared Desktop consent flow; persist only verified credentials."""
     from google_auth_oauthlib.flow import InstalledAppFlow
 
-    account = expected_account(args.account)
+    account = account_resolver(args.account)
     # The OAuth library logs callback URLs at INFO and token exchanges at DEBUG.
     # Keep authorization codes/tokens out of an embedding agent's configured log.
     loggers = [logging.getLogger(name) for name in ("google_auth_oauthlib.flow", "requests_oauthlib.oauth2_session", "oauthlib.oauth2.rfc6749.clients.base", "urllib3.connectionpool")]
@@ -126,7 +133,8 @@ def authorize_google_credentials(args, scopes, verify_credentials, *, success_me
             raise GmailAuthError("Google did not grant the requested permissions and offline access; authorize again.")
         verify_credentials(credentials, account)
         write_private_json(args.google_token, json.loads(credentials.to_json()))
-        write_private_json(default_account_path(), {"email": account})
+        if account_config_path is not None:
+            write_private_json(account_config_path, {"email": account})
     except GmailAuthError:
         raise
     except Exception:
@@ -141,6 +149,8 @@ def authorize(args) -> None:
         args, SCOPES,
         lambda credentials, account: verify_account(service_for_credentials(credentials), account),
         success_message="Google consent received. Return to the terminal for the mailbox check.",
+        account_resolver=lambda account: expected_account(account, getattr(args, "account_config", None)),
+        account_config_path=getattr(args, "account_config", None) or default_account_path(),
     )
 
 
@@ -150,7 +160,8 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv(Path.cwd() / ".env")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("authorize", "check"))
-    parser.add_argument("--account", default=os.getenv("JOBHUNTER_GMAIL_ACCOUNT"))
+    parser.add_argument("--account")
+    parser.add_argument("--account-config", type=Path)
     parser.add_argument("--google-token", type=Path, default=default_token_path())
     parser.add_argument("--client-secret", type=Path, default=Path(os.getenv("GOOGLE_CLIENT_SECRET_PATH", "~/.jobhunter/google_client_secret.json")))
     parser.add_argument("--port", type=int, default=8765)
@@ -161,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "authorize":
             authorize(args)
         else:
-            gmail_service(args.google_token, args.account, force_refresh=args.refresh)
+            gmail_service(args.google_token, args.account, force_refresh=args.refresh, account_config_path=args.account_config)
     except GmailAuthError as exc:
         print(f"Gmail unavailable: {exc}", file=sys.stderr)
         return 1

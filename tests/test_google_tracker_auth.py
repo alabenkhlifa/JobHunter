@@ -14,6 +14,8 @@ from jobhunter_integrations.google_tracker import HEADERS, SCOPES
 def configured(tmp_path, monkeypatch):
     monkeypatch.setenv("JOBHUNTER_GMAIL_ACCOUNT", "jobs@example.com")
     monkeypatch.setenv("JOBHUNTER_GOOGLE_ACCOUNT_CONFIG", str(tmp_path / "account.json"))
+    monkeypatch.setenv("JOBHUNTER_TRACKER_ACCOUNT_CONFIG", str(tmp_path / "tracker-account.json"))
+    monkeypatch.setenv("JOBHUNTER_TRACKER_ACCOUNT", "jobs@example.com")
     monkeypatch.setenv("GOOGLE_TOKEN_PATH", str(tmp_path / "gmail.json"))
     sheets, drive = Mock(), Mock()
     drive.about().get().execute.return_value = {"user": {"emailAddress": "jobs@example.com"}}
@@ -122,3 +124,34 @@ def test_tracker_default_token_does_not_fall_back_to_mailbox(monkeypatch):
     monkeypatch.delenv("JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH", raising=False)
     monkeypatch.setenv("GOOGLE_TOKEN_PATH", "/tmp/gmail.json")
     assert auth.default_token_path().name == "google_tracker_token.json"
+
+
+def test_tracker_authorize_preserves_different_mailbox_account_config(configured, tmp_path, monkeypatch):
+    _, drive, credentials = configured
+    mailbox_config = tmp_path / "account.json"
+    mailbox_config.write_text('{"email":"monitor@example.com"}')
+    client = tmp_path / "client.json"
+    client.write_text('{"installed":{"client_id":"test","client_secret":"test"}}')
+    drive.about().get().execute.return_value = {"user": {"emailAddress": "tracker@example.com"}}
+    flow = Mock()
+    flow.run_local_server.return_value = credentials
+    monkeypatch.setattr(InstalledAppFlow, "from_client_config", Mock(return_value=flow))
+    auth.authorize(argparse.Namespace(account="tracker@example.com", client_secret=client,
+                                     google_token=tmp_path / "tracker.json", port=8765, no_browser=True))
+    assert json.loads(mailbox_config.read_text())["email"] == "monitor@example.com"
+    assert json.loads((tmp_path / "tracker-account.json").read_text())["email"] == "tracker@example.com"
+
+
+def test_explicit_tracker_account_wins_over_mailbox_and_other_defaults(configured, tmp_path, monkeypatch):
+    _, drive, _ = configured
+    monkeypatch.setenv("JOBHUNTER_GMAIL_ACCOUNT", "owner@example.com")
+    drive.about().get().execute.return_value = {"user": {"emailAddress": "tracker@example.com"}}
+    auth.checked_services(tmp_path / "tracker.json", "tracker@example.com")
+    with pytest.raises(auth.GmailAuthError):
+        auth.checked_services(tmp_path / "tracker.json", "")
+
+
+def test_explicit_missing_tracker_account_config_never_uses_owner(configured, tmp_path):
+    with pytest.raises(auth.GmailAuthError, match="tracker account"):
+        auth.checked_services(tmp_path / "tracker.json", account_config_path=tmp_path / "missing.json")
+    Credentials.from_authorized_user_file.assert_not_called()

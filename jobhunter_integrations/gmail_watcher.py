@@ -20,7 +20,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from jobhunter_integrations.gmail_auth import GmailAuthError, gmail_service, write_private_json
+from jobhunter_integrations.gmail_auth import GmailAuthError, gmail_service, normalize_account, write_private_json
 
 POSITIVE_KEYWORDS = [
     "application", "applications", "applied", "interview", "interviews", "shortlist", "shortlisted",
@@ -500,6 +500,7 @@ def record_application_outcome(
     outcome: str,
     *,
     now: dt.datetime | None = None,
+    tracker_sync=None,
 ) -> dict[str, Any]:
     import scraper
 
@@ -579,7 +580,7 @@ def record_application_outcome(
     finally:
         conn.close()
 
-    tracker_synced = scraper.sync_application_tracker_if_enabled()
+    tracker_synced = tracker_sync() if tracker_sync is not None else scraper.sync_application_tracker_if_enabled()
     return {
         "status": "updated",
         "reason": f"application marked {outcome}",
@@ -600,6 +601,7 @@ def process_application_outcome(
     summary: dict[str, Any],
     jobs: list[dict[str, str]],
     db_path: Path,
+    *, tracker_sync=None,
 ) -> None:
     outcome, outcome_reasons = classify_application_outcome(summary["text"])
     if outcome:
@@ -631,7 +633,7 @@ def process_application_outcome(
         "company": job.get("company", ""),
     }
     if outcome:
-        summary["application_update"] = record_application_outcome(db_path, job, outcome)
+        summary["application_update"] = record_application_outcome(db_path, job, outcome, tracker_sync=tracker_sync)
     else:
         summary["application_update"] = {
             "status": "unchanged",
@@ -739,11 +741,29 @@ def mark_message_read(service, msg_id: str) -> None:
         pass
 
 
+def candidate_mail_scope(args) -> dict | None:
+    root = getattr(args, "candidate_root", None)
+    if root is None:
+        return None
+    root = Path(root).expanduser().resolve()
+    account = normalize_account(getattr(args, "account", None))
+    for path in (args.db_path, args.google_token, args.state_path):
+        if not Path(path).expanduser().resolve().is_relative_to(root):
+            raise GmailAuthError("Mailbox paths must belong to this candidate.")
+    return {"account": account, "db_path": str(Path(args.db_path).resolve())}
+
+
 def collect_mail(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Inspect mail and calculate the next ledger without committing delivery."""
-    service = gmail_service(args.google_token)
-    jobs = interested_jobs(args.db_path)
+    scope = candidate_mail_scope(args)
     state = load_json(args.state_path, {"seen_message_ids": [], "last_checked_at": None})
+    if scope is not None:
+        if state.get("mailbox_scope", scope) != scope or (state.get("seen_message_ids") and "mailbox_scope" not in state):
+            raise GmailAuthError("Mailbox state belongs to a different account; reconnect with separate state.")
+        state["mailbox_scope"] = scope
+    account = getattr(args, "account", None)
+    service = gmail_service(args.google_token, account) if account is not None else gmail_service(args.google_token)
+    jobs = interested_jobs(args.db_path)
     seen = set(state.get("seen_message_ids") or [])
     new_seen = set(seen)
     matches: list[dict[str, Any]] = []
@@ -772,7 +792,10 @@ def collect_mail(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[s
             if relevant and not verification:
                 summary["reasons"] = reasons
                 try:
-                    process_application_outcome(summary, jobs, args.db_path)
+                    sync = getattr(args, "tracker_sync", None)
+                    if scope is not None and sync is None:
+                        sync = lambda: False
+                    process_application_outcome(summary, jobs, args.db_path, **({"tracker_sync": sync} if sync is not None else {}))
                 except Exception as exc:
                     summary["processing_error"] = type(exc).__name__
                     matches.append(summary)
@@ -805,6 +828,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repo-root", type=Path, default=repo)
     parser.add_argument("--db-path", type=Path, default=Path(os.getenv("JOBHUNTER_DB_PATH", repo / "data" / "jobs.db")))
     parser.add_argument("--google-token", type=Path, default=default_token_path())
+    parser.add_argument("--account", default=os.getenv("JOBHUNTER_GMAIL_ACCOUNT"))
+    parser.add_argument("--candidate-root", type=Path, default=os.getenv("JOBHUNTER_CANDIDATE_ROOT"))
     parser.add_argument("--state-path", type=Path, default=default_state_path())
     parser.add_argument("--max-messages", type=int, default=int(os.getenv("JOBHUNTER_GMAIL_WATCHER_MAX", "25")))
     parser.add_argument("--query", default=os.getenv("JOBHUNTER_GMAIL_WATCHER_QUERY", "newer_than:30d -from:me"))
