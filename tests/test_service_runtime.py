@@ -11,14 +11,15 @@ import pytest
 
 from jobhunter_service.dispatch import ApplicationTelegramHandler
 from jobhunter_service.egress import public_address, resolve_public
-from jobhunter_service.hermes_runner import HermesPlanner
+from jobhunter_service.hermes_runner import HermesPlanner, PROVIDER_KEY_ENV
 from jobhunter_service.scheduler import Scheduler
 from jobhunter_service.service import JobHunterService
 from jobhunter_service.state import private_json
 from test_service_core import Telegram, activate, create_run, job_state, ready
 
 
-def test_real_hermes_child_has_no_ambient_owner_tools_or_files(tmp_path, monkeypatch):
+@pytest.mark.parametrize('provider', list(PROVIDER_KEY_ENV))
+def test_real_hermes_child_has_no_ambient_owner_tools_or_files(tmp_path, monkeypatch, provider):
     source = tmp_path / 'sdk'
     source.mkdir()
     (source / 'toolsets.py').write_text("TOOLSETS = {'terminal': {}, 'files': {}, 'cron': {}}")
@@ -33,6 +34,18 @@ class AIAgent:
         assert kw['session_db'] is None and not kw['load_soul_identity']
         assert not kw['save_trajectories'] and not kw['checkpoints_enabled']
         assert kw['api_key'] == 'synthetic-dedicated-key'
+        assert kw['provider'] != 'openai'
+        if kw['provider'] == 'custom':
+            assert kw['base_url'] == 'https://models.example.test/v1'
+        provider_keys = {'openai':'OPENAI_API_KEY','openai-api':'OPENAI_API_KEY',
+                         'openrouter':'OPENROUTER_API_KEY','anthropic':'ANTHROPIC_API_KEY',
+                         'gemini':'GOOGLE_API_KEY','custom':'OPENAI_API_KEY'}
+        requested_key = provider_keys[kw['provider']]
+        assert os.environ[requested_key] == kw['api_key']
+        for key in set(provider_keys.values()) - {requested_key}:
+            assert key not in os.environ
+        assert 'ANTHROPIC_TOKEN' not in os.environ
+        assert 'CLAUDE_CODE_OAUTH_TOKEN' not in os.environ
         assert os.environ.get('OWNER_SECRET') is None
         assert os.environ.get('TELEGRAM_BOT_TOKEN') is None
         assert Path(os.environ['HERMES_HOME']).resolve() == Path.cwd()
@@ -44,11 +57,30 @@ class AIAgent:
 ''')
     monkeypatch.setenv('OWNER_SECRET', 'synthetic-owner-secret')
     monkeypatch.setenv('TELEGRAM_BOT_TOKEN', 'synthetic-owner-token')
-    planner = HermesPlanner(sys.executable, source, model='test', provider='test', api_key='synthetic-dedicated-key')
+    for key in set(PROVIDER_KEY_ENV.values()) | {'ANTHROPIC_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'}:
+        monkeypatch.setenv(key, 'synthetic-owner-provider-secret')
+    planner = HermesPlanner(sys.executable, source, model='test', provider=provider,
+                            api_key='synthetic-dedicated-key',
+                            base_url='https://models.example.test/v1' if provider == 'custom' else None)
     assert planner([{'role': 'user', 'content': 'Configure my jobs'}], {})['reply'] == 'Scoped response'
+    import os
+    assert os.environ[PROVIDER_KEY_ENV[provider]] == 'synthetic-owner-provider-secret'
     (source / 'run_agent.py').write_text("class AIAgent:\n def __init__(self, **kw): self.tools = ['terminal']\n")
     with pytest.raises(RuntimeError, match='scoped response'):
         planner([], {})
+
+
+@pytest.mark.parametrize('provider', ['unknown', 'openai-codex', 'nous', 'copilot-acp', 'OPENAI_API_KEY'])
+def test_hermes_rejects_unconfigured_or_ambient_credential_providers(tmp_path, provider):
+    with pytest.raises(ValueError, match='supported API-key provider'):
+        HermesPlanner(sys.executable, tmp_path, model='test', provider=provider, api_key='synthetic-dedicated-key')
+
+
+@pytest.mark.parametrize('base_url', [None, '', '   '])
+def test_custom_hermes_provider_cannot_fall_back_without_explicit_endpoint(tmp_path, base_url):
+    with pytest.raises(ValueError, match='explicit base URL'):
+        HermesPlanner(sys.executable, tmp_path, model='test', provider='custom',
+                      api_key='synthetic-dedicated-key', base_url=base_url)
 
 
 @pytest.mark.parametrize('address', ['127.0.0.1', '10.0.0.1', '172.30.77.1', '192.168.1.1',

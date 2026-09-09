@@ -320,3 +320,5 @@ Owner suspension/revocation pauses searches and invalidates access links, pendin
 Each outbox retry checks listing availability again. An inconclusive check keeps the unsent remainder pending. Confirmed closure cancels the remaining copies of that digest; it does not send an outdated listing to another destination.
 
 See [setup.md](setup.md#14-restricted-multi-user-service-on-the-pi) for installation, required operator settings and recovery. This service requires its own bot token, HTTPS endpoint, Google web OAuth client when used, and dedicated model credentials before it can run.
+
+The restricted Hermes planner accepts API-key providers `openai`, `openai-api`, `openrouter`, `anthropic`, `gemini` and `custom`. It supplies the dedicated key only inside the disposable planner process; owner OAuth sessions and command-based providers are not used.

@@ -11,6 +11,19 @@ import tempfile
 from pathlib import Path
 
 
+# Pinned Hermes b1ff8722 resolves these providers through its environment even
+# when AIAgent receives api_key= explicitly. OAuth and command-based providers
+# are intentionally absent: this process has only the dedicated service key.
+PROVIDER_KEY_ENV = {
+    'openai': 'OPENAI_API_KEY',
+    'openai-api': 'OPENAI_API_KEY',
+    'openrouter': 'OPENROUTER_API_KEY',
+    'anthropic': 'ANTHROPIC_API_KEY',
+    'gemini': 'GOOGLE_API_KEY',
+    'custom': 'OPENAI_API_KEY',
+}
+
+
 class HermesPlanner:
     def __init__(self, python, source, *, model, provider, api_key, base_url=None, timeout=180):
         # Preserve the venv launcher symlink so Python locates pyvenv.cfg.
@@ -20,6 +33,10 @@ class HermesPlanner:
         self.timeout = timeout
         if not model or not provider or not api_key:
             raise ValueError('A dedicated JobHunter model, provider and API key are required.')
+        if provider not in PROVIDER_KEY_ENV:
+            raise ValueError('The restricted Hermes planner requires a supported API-key provider.')
+        if provider == 'custom' and (not isinstance(base_url, str) or not base_url.strip()):
+            raise ValueError('A custom Hermes provider requires an explicit base URL.')
 
     def __call__(self, messages, response_schema):
         if len(json.dumps(messages)) > 750000:
@@ -47,13 +64,22 @@ class HermesPlanner:
 
 def child():
     request = json.load(sys.stdin)
+    if request.get('provider') not in PROVIDER_KEY_ENV or not request.get('api_key'):
+        raise ValueError('A supported provider and dedicated API key are required.')
+    if request['provider'] == 'custom' and not str(request.get('base_url') or '').strip():
+        raise ValueError('A custom Hermes provider requires an explicit base URL.')
+    # Set only the requested provider's key inside this disposable subprocess.
+    # The parent environment and owner credentials never enter this process.
+    os.environ[PROVIDER_KEY_ENV[request['provider']]] = request['api_key']
+    # This pinned AIAgent uses openai-api; openai is only an auxiliary alias.
+    provider = 'openai-api' if request['provider'] == 'openai' else request['provider']
     source = Path(os.environ['JOBHUNTER_HERMES_SOURCE'])
     sys.path.insert(0, str(source))
     # Third-party startup output must not reach protocol output or expose secrets.
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         from run_agent import AIAgent
         from toolsets import TOOLSETS
-        agent = AIAgent(model=request['model'], provider=request['provider'],
+        agent = AIAgent(model=request['model'], provider=provider,
                         api_key=request['api_key'], base_url=request.get('base_url'),
                         enabled_toolsets=[], disabled_toolsets=list(TOOLSETS),
                         max_iterations=1, max_tokens=12000, run_budget_seconds=150,
