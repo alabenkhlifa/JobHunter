@@ -2,6 +2,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 import scraper
+import pytest
 
 
 def make_conn_with_jobs():
@@ -249,3 +250,16 @@ def test_record_application_stage_auto_sync_failure_does_not_block(tmp_path, mon
 
     assert isinstance(app_id, int)
     assert conn.execute("SELECT stage FROM applications WHERE job_id = 'li-1'").fetchone()[0] == "blocked_captcha"
+
+
+def test_package_reference_rejects_document_file_without_changing_record(tmp_path):
+    package = tmp_path / "output" / "job-1"
+    package.mkdir(parents=True)
+    resume = tmp_path / "cached.pdf"
+    resume.write_bytes(b"test-only PDF placeholder")
+    with sqlite3.connect(tmp_path / "jobs.db") as conn:
+        scraper.record_application_stage(conn, "job-1", "package_generated", package_path=str(package), sync=False)
+        before = conn.execute("SELECT * FROM applications").fetchone()
+        with pytest.raises(ValueError, match="permanent package directory"):
+            scraper.record_application_stage(conn, "job-1", "blocked_login_required", package_path=str(resume), sync=False)
+        assert conn.execute("SELECT * FROM applications").fetchone() == before

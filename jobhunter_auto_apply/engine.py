@@ -233,7 +233,7 @@ class AutoApplyEngine:
         client = self.connect()
         client.upload_file(selector, str(Path(file_path).resolve()))
         time.sleep(1)
-        _record(self.config, job_id, "resume_uploaded", package_path=str(Path(file_path).resolve()))
+        _record(self.config, job_id, "resume_uploaded")
         return self.inspect(job_id, stage="after_upload")
 
     def click_submit(self, job_id: str, selector: str, *, approved: bool = False) -> PageInspection:

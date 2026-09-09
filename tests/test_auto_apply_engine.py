@@ -1,4 +1,7 @@
+import sqlite3
+
 import pytest
+import scraper
 
 from jobhunter_auto_apply.engine import (
     ApplyConfig,
@@ -79,3 +82,22 @@ def test_submit_requires_approval(tmp_path):
 
     with pytest.raises(PermissionError):
         engine.click_submit("job-1", "button[type=submit]", approved=False)
+
+
+def test_approved_upload_preserves_permanent_package_directory(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    package = tmp_path / "output" / "job-1"
+    package.mkdir(parents=True)
+    cached = tmp_path / "cache" / "resume.pdf"
+    cached.parent.mkdir()
+    cached.write_bytes(b"test-only PDF placeholder")
+    with sqlite3.connect(db) as conn:
+        scraper.record_application_stage(conn, "job-1", "package_generated", package_path=str(package), sync=False)
+    client = FakeClient()
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), output_dir=str(tmp_path)), client=client)
+    monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
+    monkeypatch.setattr(engine, "inspect", lambda *args, **kwargs: None)
+    engine.upload_file("job-1", "input[type=file]", str(cached), approved=True)
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT package_path,stage FROM applications").fetchone() == (str(package), "resume_uploaded")
+    assert client.uploads == [("input[type=file]", str(cached.resolve()))]

@@ -446,6 +446,8 @@ def record_application_stage(
     """Insert or update the latest application-state row for a job."""
     if sync and not commit:
         raise ValueError("sync requires commit=True")
+    if package_path and Path(package_path).exists() and not Path(package_path).is_dir():
+        raise ValueError("package_path must be the permanent package directory, not an individual document")
     init_application_tracking(conn)
     timestamp = (now or datetime.now(timezone.utc)).isoformat()
     approved_at = timestamp if stage == "approved" else None
