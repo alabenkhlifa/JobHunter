@@ -460,7 +460,7 @@ Recommended setup:
    ```
 
 6. Upload evidence screenshots, sent resumes, and sent cover letters to a Drive folder created/managed by the jobs Gmail.
-7. Grant the main/personal Google account access to that Drive folder/files. This is required so the human owner can click `Open resume`, `Open cover letter`, and `Open screenshot` links from the Sheet.
+7. Set `JOBHUNTER_TRACKER_SHARE_WITH` in private `.env` to the main/personal Google account (comma-separated for multiple named readers). Sync verifies or grants reader access to its managed evidence folder without notification emails, so existing and future uploads can be opened from the Sheet. It does not make the folder public or modify unrelated old Drive folders. Include this setting in encrypted recovery.
 
 The scheduled mail monitor also retries enabled tracker sync after every check, even without new replies, and reports retry failures through cron delivery. Include the separate tracker token and private state files `tracker_drive_files.json`, `tracker_sync_state.json`, and `tracker_before_sync.json` in encrypted recovery. The last file is the sheet snapshot saved before the most recent write; a no-change sync preserves it.
 

@@ -163,6 +163,8 @@ def sync_locked(args, state_dir):
 
     backup = state_dir / "tracker_before_sync.json"
     uploads = read_json(args.drive_state, {"files": {}})
+    if uploads.get("folder_id"):
+        tracker.ensure_drive_folder(drive, uploads, args.drive_state, args.drive_folder_name)
     # Only missing links need an upload. Old Drive links remain usable even
     # when their original files are outside the new token's drive.file grant.
     for row in after[1:]:

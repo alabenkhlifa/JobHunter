@@ -13,6 +13,7 @@ import datetime as dt
 import json
 import mimetypes
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -175,20 +176,52 @@ def google_services(token_path: Path):
     return checked_services(token_path)
 
 
+def share_drive_folder(drive, folder_id: str, recipients: str) -> list[str]:
+    readers = sorted({value.strip().casefold() for value in recipients.split(",") if value.strip()})
+    if not readers:
+        return []
+    if any(not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) for value in readers):
+        raise ValueError("Configure valid tracker sharing email addresses.")
+    existing = set()
+    page_token = None
+    while True:
+        options = {"fileId": folder_id, "fields": "nextPageToken,permissions(type,emailAddress,role)", "pageSize": 100}
+        if page_token:
+            options["pageToken"] = page_token
+        page = drive.permissions().list(**options).execute()
+        for permission in page.get("permissions", []):
+            if permission.get("type") == "user" and permission.get("role") in {"owner", "organizer", "fileOrganizer", "writer", "commenter", "reader"}:
+                existing.add(str(permission.get("emailAddress", "")).casefold())
+        page_token = page.get("nextPageToken")
+        if not page_token:
+            break
+    for email in readers:
+        if email not in existing:
+            drive.permissions().create(
+                fileId=folder_id, body={"type": "user", "role": "reader", "emailAddress": email},
+                sendNotificationEmail=False, fields="id",
+            ).execute()
+    return readers
+
+
 def ensure_drive_folder(drive, state: dict[str, Any], state_path: Path, folder_name: str) -> str | None:
-    if state.get("folder_id"):
-        return str(state["folder_id"])
-    try:
-        resp = drive.files().create(
-            body={"name": folder_name, "mimeType": "application/vnd.google-apps.folder"},
-            fields="id, webViewLink",
-        ).execute()
-    except Exception:
-        return None
-    state["folder_id"] = resp.get("id")
-    state["folder_link"] = resp.get("webViewLink")
-    save_json(state_path, state)
-    return state.get("folder_id")
+    if not state.get("folder_id"):
+        try:
+            resp = drive.files().create(
+                body={"name": folder_name, "mimeType": "application/vnd.google-apps.folder"},
+                fields="id, webViewLink",
+            ).execute()
+        except Exception:
+            return None
+        state["folder_id"] = resp.get("id")
+        state["folder_link"] = resp.get("webViewLink")
+        save_json(state_path, state)
+    folder_id = str(state["folder_id"])
+    readers = share_drive_folder(drive, folder_id, os.getenv("JOBHUNTER_TRACKER_SHARE_WITH", ""))
+    if state.get("shared_with", []) != readers:
+        state["shared_with"] = readers
+        save_json(state_path, state)
+    return folder_id
 
 
 def upload_local_file(drive, file_path: str | None, job_id: str, state: dict[str, Any], state_path: Path, folder_name: str, label: str, repo_root: Path) -> str:

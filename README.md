@@ -179,6 +179,8 @@ Typical tracker fields include application date, status, company/title, platform
 
 The tracker can also link generated artifacts and evidence files so the main account can open application packages without accessing local runtime data directly.
 
+Set `JOBHUNTER_TRACKER_SHARE_WITH` to the personal Google account that opens these links (comma-separated for multiple named readers). Sync grants read access to the managed evidence folder without notification emails; current and future files inherit that access. The folder stays restricted to its owner and named users. The setting belongs in the private `.env` and encrypted recovery.
+
 ![Sanitized tracker attachment links and screenshot preview](assets/application-tracker-attachments-example.svg)
 
 Recommended permissions:
