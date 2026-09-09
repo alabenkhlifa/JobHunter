@@ -96,7 +96,18 @@ REJECTION_PATTERNS = [
         "unable to progress application",
         r"\bunable to (?:progress|proceed|move forward)(?: with)? (?:your|the) application\b",
     ),
+    (
+        "selection process will not continue",
+        r"\b(?:will not|won t|cannot|can t|decided not to) "
+        r"(?:be )?(?:continue|continuing|proceed|proceeding)(?: with)? "
+        r"(?:the|this|our) (?:(?:hiring|recruitment|selection|application) )?process with you\b",
+    ),
 ]
+ACKNOWLEDGEMENT_PATTERNS = (
+    r"\b(?:we (?:have )?received|we ve received) your application\b",
+    r"\byour application (?:has been|was) (?:received|submitted)\b",
+    r"\byour application (?:will be reviewed|is (?:currently )?under review)\b",
+)
 OFFER_PATTERNS = [
     (
         "offer extended",
@@ -591,10 +602,18 @@ def process_application_outcome(
     db_path: Path,
 ) -> None:
     outcome, outcome_reasons = classify_application_outcome(summary["text"])
-    if not outcome:
-        return
-    summary["outcome"] = outcome
-    summary["outcome_reasons"] = outcome_reasons
+    if outcome:
+        summary["outcome"] = outcome
+        summary["outcome_reasons"] = outcome_reasons
+    else:
+        normalized = normalize_for_matching(summary["text"])
+        summary["acknowledgement"] = any(
+            re.search(pattern, normalized)
+            for pattern in ACKNOWLEDGEMENT_PATTERNS
+        ) and not re.search(
+            r"\b(?:unfortunately|regret|unsuccessful|declined|rejected|decided|chosen|other candidates)\b",
+            normalized,
+        )
 
     job, match_reason = match_active_application(summary["text"], jobs)
     summary["application_match_reason"] = match_reason
@@ -611,7 +630,14 @@ def process_application_outcome(
         "title": job.get("title", ""),
         "company": job.get("company", ""),
     }
-    summary["application_update"] = record_application_outcome(db_path, job, outcome)
+    if outcome:
+        summary["application_update"] = record_application_outcome(db_path, job, outcome)
+    else:
+        summary["application_update"] = {
+            "status": "unchanged",
+            "reason": "receipt acknowledgement" if summary["acknowledgement"] else "outcome needs review",
+            "tracker_synced": False,
+        }
 
 
 def format_email_date(value: str, timezone: dt.tzinfo | None = None) -> str:
@@ -632,7 +658,9 @@ def preview_text(message: dict[str, Any]) -> str:
     subject = " ".join((message.get("subject") or "").split())
     if subject and text.casefold().startswith(subject.casefold()):
         text = text[len(subject):].lstrip(" :-—")
-    return html.escape(text[:180] + ("…" if len(text) > 180 else ""))
+    if len(text) > 140:
+        text = text[:141].rsplit(" ", 1)[0] + "…"
+    return html.escape(text)
 
 
 def format_email_sender(value: str) -> str:
@@ -642,46 +670,57 @@ def format_email_sender(value: str) -> str:
 
 def format_alert(matches: list[dict[str, Any]]) -> str:
     lines = ["📬 <b>Application updates</b>"]
-    for idx, m in enumerate(matches[:5], 1):
+    for m in matches[:5]:
         if m.get("processing_error"):
             lines.extend(
                 [
                     "",
-                    f"{idx}. ⚠️ <b>Application email processing failed</b>",
+                    "⚠️ <b>Application email processing failed</b>",
                     "The message was left unprocessed so the next watcher run can retry it.",
                 ]
             )
             continue
 
         outcome = m.get("outcome")
+        job = m.get("matched_job") or {}
+        update = m.get("application_update") or {}
         if outcome in OUTCOME_ALERTS:
-            job = m.get("matched_job") or {}
-            update = m.get("application_update") or {}
             icon, label = OUTCOME_ALERTS[outcome]
-            lines.extend(["", f"{idx}. {icon} <b>{label}</b>"])
-            if job:
-                lines.append(f"<b>{html.escape(job.get('company') or 'Unknown company')}</b>")
-                lines.append(html.escape(job.get("title") or "Unknown role"))
-            else:
-                sender = format_email_sender(m.get("from") or "")
-                if sender:
-                    lines.append(sender)
-                lines.append("⚠️ Couldn’t link this email to one application.")
-            if job and update.get("status") not in {"updated", "already_recorded"}:
-                lines.append("⚠️ Application status was not updated.")
+        elif m.get("acknowledgement"):
+            icon, label = "📨", "Application received"
         else:
-            subject = html.escape(m.get("subject") or "Application reply")
-            lines.extend(["", f"{idx}. <b>{subject}</b>"])
+            icon, label = "⚠️", "Review needed"
+        lines.extend(["", f"{icon} <b>{label}</b>"])
+        if job:
+            lines.append(f"<b>{html.escape(job.get('company') or 'Unknown company')}</b>")
+            lines.append(html.escape(job.get("title") or "Unknown role"))
+        else:
             sender = format_email_sender(m.get("from") or "")
             if sender:
                 lines.append(sender)
+            subject = m.get("subject") or "Application reply"
+            if subject.casefold() != label.casefold():
+                lines.append(html.escape(subject))
 
         date = format_email_date(m.get("date") or "")
         if date:
-            lines.append(date)
-        preview = preview_text(m)
-        if preview:
-            lines.append(preview)
+            lines.append(f"🕒 {date}")
+        if outcome in OUTCOME_ALERTS:
+            if not job:
+                lines.append("⚠️ Couldn’t link this email to one application.")
+            elif update.get("status") not in {"updated", "already_recorded"}:
+                lines.append("⚠️ Application status was not updated.")
+            elif update.get("tracker_synced"):
+                lines.append("✅ Database and spreadsheet updated")
+            else:
+                lines.extend(["✅ Outcome recorded in database", "⚠️ Spreadsheet update not confirmed"])
+        elif m.get("acknowledgement"):
+            lines.append("Receipt confirmation; no status change.")
+        else:
+            preview = preview_text(m)
+            if preview:
+                lines.append(preview)
+            lines.append("⚠️ Status unchanged — review this email.")
     if len(matches) > 5:
         lines.append(f"\n…and {len(matches) - 5} more matching messages.")
     return "\n".join(lines)

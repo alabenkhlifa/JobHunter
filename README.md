@@ -237,6 +237,8 @@ For a code requested during an approved ATS interaction, use `python -m jobhunte
 
 For scheduled Telegram alerts, use `python -m jobhunter_integrations.gmail_monitor`. It keeps a private outbox, retries unconfirmed delivery, commits processed IDs after confirmed delivery, and prevents concurrent monitor runs. Success is silent to avoid a second cron summary. Configure Hermes with a script-only job (`no_agent=true`) at `0 10,15 * * *` in the intended timezone, with Telegram delivery for failures. The Pi config repo tracks the entrypoint and job definition. Registration and verification-code lookup remain on demand within the approved application; the periodic job only handles replies.
 
+Reply alerts show the classified outcome, matched company and role, and whether the database and spreadsheet update succeeded. Receipt acknowledgements never reset an application's status. Unrecognized outcomes are labeled **Review needed**, with an explicit warning that the status was unchanged; classification rules do not cover every employer's wording. Known outcomes omit the email's generic opening snippet.
+
 To keep the Sheet live while applying, enable best-effort auto-sync after every application stage update:
 
 ```env

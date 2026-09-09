@@ -1,8 +1,13 @@
 import sqlite3
+import argparse
+import base64
+import json
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
 from jobhunter_integrations import gmail_watcher, google_tracker
+from jobhunter_integrations import gmail_monitor, google_tracker_sync
 
 
 def make_application_db(tmp_path: Path, *, stage: str = "submitted") -> Path:
@@ -430,6 +435,70 @@ def test_gmail_watcher_records_rejection_and_syncs_tracker_once(tmp_path: Path, 
     assert application[1] == "2026-07-10T15:21:41+00:00"
     assert application[2].startswith("Submission confirmed. | Rejection detected by Gmail watcher")
     assert job_status == "rejected"
+
+
+def test_monitor_full_email_rejection_updates_database_sheet_and_notification(tmp_path, monkeypatch):
+    db = make_application_db(tmp_path)
+    before = [google_tracker.HEADERS, *google_tracker.rows_from_db(db, tmp_path)]
+    sheets, drive, gmail = Mock(), Mock(), Mock()
+    sheets.spreadsheets().get().execute.return_value = {"sheets": [{"properties": {
+        "sheetId": 123, "title": "Applications", "gridProperties": {"rowCount": 100},
+    }}]}
+    sheets.spreadsheets().values().get().execute.return_value = {"values": before}
+    monkeypatch.setattr(google_tracker, "google_services", lambda _: (sheets, drive))
+    tracker_args = argparse.Namespace(
+        google_token=tmp_path / "tracker-token.json", spreadsheet_id="test-sheet", sheet_id=123,
+        tab_name="Applications", db_path=db, repo_root=tmp_path, drive_state=tmp_path / "tracker/files.json",
+        drive_folder_name="Evidence", dry_run=False,
+    )
+    sync_calls = []
+    def sync_tracker():
+        sync_calls.append(google_tracker_sync.sync_tracker(tracker_args))
+        return True
+    monkeypatch.setattr("scraper.sync_application_tracker_if_enabled", sync_tracker)
+    monkeypatch.setattr(gmail_watcher, "gmail_service", lambda _: gmail)
+    gmail.users().messages().list().execute.return_value = {"messages": [{"id": "rejection"}, {"id": "receipt"}]}
+    body = (
+        "Update about Solutions Architect - SkyCargo. We received many applications. "
+        "In the meantime, we unfortunately decided that we will not continue the process with you."
+    )
+    def email_message(request):
+        rejection = request["id"] == "rejection"
+        copy = body if rejection else "We received your application for Solutions Architect - SkyCargo."
+        return {
+            "id": request["id"], "snippet": "We received many applications.",
+            "payload": {"mimeType": "text/html", "headers": [
+                {"name": "Subject", "value": "Your Application"},
+                {"name": "From", "value": "Example Careers <careers@example.com>"},
+            ], "body": {"data": base64.urlsafe_b64encode(f"<p>{copy}</p>".encode()).decode()}},
+        }
+    gmail.users().messages().get.side_effect = lambda **kwargs: Mock(execute=lambda: email_message(kwargs))
+    args = argparse.Namespace(
+        google_token=tmp_path / "gmail-token.json", db_path=db, state_path=tmp_path / "seen.json",
+        max_messages=25, query="newer_than:30d",
+    )
+    send = Mock(return_value=True)
+    gmail_monitor.run_monitor(args, send)
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage,submitted_at FROM applications").fetchone() == (
+            "rejected", "2026-07-10T15:21:41+00:00",
+        )
+        assert conn.execute("SELECT status FROM jobs").fetchone()[0] == "rejected"
+    requests = sheets.spreadsheets().batchUpdate.call_args.kwargs["body"]["requests"]
+    statuses = [r["updateCells"] for r in requests if "updateCells" in r and r["updateCells"]["start"]["columnIndex"] == 2]
+    assert statuses[0]["rows"][0]["values"][0]["userEnteredValue"] == {"stringValue": "rejected"}
+    assert len(sync_calls) == 1
+    alert = send.call_args.args[0]
+    assert "Application rejected" in alert
+    assert "Database and spreadsheet updated" in alert
+    assert "Receipt confirmation; no status change." in alert
+    assert "We received many applications" not in alert
+    assert json.loads(args.state_path.read_text())["seen_message_ids"] == ["receipt", "rejection"]
+    send.reset_mock()
+    gmail_monitor.run_monitor(args, send)
+    send.assert_not_called()
+    assert len(sync_calls) == 1
+    gmail.users().messages().modify.assert_not_called()
 
 
 def test_gmail_watcher_records_positive_progression_without_downgrading_offer(

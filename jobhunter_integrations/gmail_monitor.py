@@ -20,7 +20,7 @@ def notification_batches(matches):
     for match in matches:
         item = dict(match)
         # Bound untrusted headers before escaping; never truncate HTML entities.
-        for field, limit in (("subject", 120), ("from", 160), ("date", 64), ("snippet", 160)):
+        for field, limit in (("subject", 120), ("from", 160), ("date", 64)):
             if field in item:
                 item[field] = str(item[field])[:limit]
         if item.get("matched_job"):

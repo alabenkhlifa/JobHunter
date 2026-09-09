@@ -217,6 +217,8 @@ For twice-daily reply monitoring, run `python -m jobhunter_integrations.gmail_mo
 
 The private `gmail_watcher_seen.outbox.json` beside the processed-ID ledger retains alerts until Telegram confirms delivery. Include both files in encrypted backups. Delivery retries resume the remaining batches and overlapping monitor runs are skipped. A crash between Telegram accepting a message and saving its acknowledgement can repeat that message on retry. Run the scheduled monitor as the sole owner of this ledger; use verification lookup separately for codes. The Pi config repository captures the cron definition and scripts for recovery.
 
+Alerts distinguish receipt acknowledgements from application outcomes and report the database/spreadsheet update result. Unknown wording produces **Review needed** and leaves the status unchanged. After correcting a missed classification, back up the database and reprocess only the affected message through `message_summary` and `process_application_outcome`; verify the database and tracker result. Do not clear the processed-ID ledger or run the full monitor to replay old mail. Never infer a rejection from high application volume alone.
+
 ### ATS verification during an approved application
 
 Capture the current timestamp when requesting a code, then fetch only mail from the exact expected ATS sender domain addressed to the configured jobs mailbox:

@@ -96,7 +96,7 @@ def test_compact_alert_hides_matching_diagnostics_and_repeated_addresses():
         "reasons": ["matches jobs/companies: cto"],
     }
     alert = watcher.format_alert([message])
-    assert "<b>Application received</b>" in alert
+    assert "<b>Review needed</b>" in alert
     assert "ExampleCo Careers" in alert
     assert "Thank you for applying." in alert
     for noise in ("Why:", "Snippet:", "Date:", "From:", "GMT", "cto", "candidate@example.com", "recruiter@example.com"):
@@ -120,5 +120,91 @@ def test_alert_escapes_html_and_preserves_unmatched_outcome_warning():
     assert "Couldn’t link this email to one application." in alert
     assert "ExampleCo Careers" in alert
     assert "internal match details" not in alert
-    assert "&lt;a href=" in alert
+    assert "unexpected HTML" not in alert
     assert '<a href="https://invalid.example"' not in alert
+
+
+@pytest.mark.parametrize("message", [
+    "We unfortunately decided that we will not continue the process with you.",
+    "We won't be continuing the recruitment process with you.",
+    "We decided not to continue the selection process with you.",
+    "We cannot proceed with the application process with you.",
+])
+def test_rejection_when_employer_ends_process_with_candidate(message):
+    assert watcher.classify_application_outcome(message)[0] == "rejected"
+
+
+@pytest.mark.parametrize("message", [
+    "We will continue the process with you.",
+    "We will not continue the process until you upload your documents.",
+    "We will not continue the process with other candidates.",
+    "We received many applications and will review your profile.",
+])
+def test_process_mentions_do_not_imply_rejection(message):
+    assert watcher.classify_application_outcome(message)[0] is None
+
+
+@pytest.mark.parametrize("synced", [True, False])
+def test_outcome_card_shows_tracking_result_instead_of_truncated_email(synced):
+    message = {
+        "outcome": "rejected",
+        "matched_job": {"company": "ExampleCo", "title": "Technical Lead"},
+        "application_update": {"status": "updated", "tracker_synced": synced},
+        "snippet": "Dear Candidate, we received an overwhelming response " * 8,
+    }
+    alert = watcher.format_alert([message])
+    assert "❌ <b>Application rejected</b>" in alert
+    assert "<b>ExampleCo</b>\nTechnical Lead" in alert
+    assert "Dear Candidate" not in alert
+    assert ("Database and spreadsheet updated" in alert) == synced
+    assert ("Spreadsheet update not confirmed" in alert) != synced
+
+
+def test_unknown_reply_keeps_company_context_and_explicit_review_warning(tmp_path, monkeypatch):
+    jobs = [{"id": "test-job", "company": "ExampleCo", "title": "Technical Lead", "stage": "submitted"}]
+    message = {"text": "ExampleCo Technical Lead: we have an update to discuss.", "snippet": "<script>untrusted & text</script>"}
+    writer = Mock()
+    monkeypatch.setattr(watcher, "record_application_outcome", writer)
+    watcher.process_application_outcome(message, jobs, tmp_path / "unused.db")
+    writer.assert_not_called()
+    alert = watcher.format_alert([message])
+    assert "<b>Review needed</b>" in alert
+    assert "<b>ExampleCo</b>" in alert
+    assert "Status unchanged — review this email." in alert
+    assert "&lt;script&gt;" in alert
+    assert "<script>" not in alert
+
+
+def test_receipt_is_linked_without_downgrading_application(tmp_path, monkeypatch):
+    jobs = [{"id": "test-job", "company": "ExampleCo", "title": "Technical Lead", "stage": "interview_invited"}]
+    message = {"text": "Thank you for your application to ExampleCo for Technical Lead. Your application will be reviewed by our team."}
+    writer = Mock()
+    monkeypatch.setattr(watcher, "record_application_outcome", writer)
+    watcher.process_application_outcome(message, jobs, tmp_path / "unused.db")
+    assert message["acknowledgement"]
+    assert message["matched_job"]["id"] == "test-job"
+    writer.assert_not_called()
+    alert = watcher.format_alert([message])
+    assert "📨 <b>Application received</b>" in alert
+    assert "Receipt confirmation; no status change." in alert
+    assert "updated" not in alert
+
+
+def test_unclear_negative_reply_is_not_labeled_as_receipt(tmp_path):
+    message = {"text": "We received your application. Unfortunately, circumstances have changed."}
+    watcher.process_application_outcome(message, [], tmp_path / "unused.db")
+    assert not message["acknowledgement"]
+    assert "Review needed" in watcher.format_alert([message])
+
+
+def test_generic_thanks_alone_does_not_hide_unknown_outcome(tmp_path):
+    message = {"text": "Thank you for your application. Our team has an update for you."}
+    watcher.process_application_outcome(message, [], tmp_path / "unused.db")
+    assert not message["acknowledgement"]
+    assert "Review needed" in watcher.format_alert([message])
+
+
+def test_preview_truncates_at_word_boundary_with_ellipsis():
+    preview = watcher.preview_text({"snippet": "longword " * 40})
+    assert len(preview) <= 141
+    assert preview.endswith("longword…")
