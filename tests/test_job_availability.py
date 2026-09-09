@@ -222,6 +222,61 @@ def test_unsupported_private_or_mismatched_input_urls_never_make_requests(url):
     assert transport.requests == []
 
 
+@pytest.mark.parametrize('source,identifier,url', [
+    ('linkedin', '4462147346', 'https://ch.linkedin.com/jobs/view/lead-software-engineer-%E2%80%93-data-migration-80-100%25-at-abraxas-informatik-ag-4462147346'),
+    ('linkedin', '4459593960', 'https://ch.linkedin.com/jobs/view/architecte-de-solution-et-d-int%C3%A9gration-at-act-digital-emea-alter-solutions-4459593960'),
+    ('linkedin', '12345', 'https://www.linkedin.com/jobs/view/ing%C3%A9nieur-80-100%25-12345'),
+    ('foundit', '98765', 'https://www.founditgulf.com/job/ing%c3%a9nieur-80-100%25-98765'),
+])
+def test_encoded_unicode_and_percent_slugs_keep_exact_listing_identity(source, identifier, url):
+    job = {**(LINKEDIN if source == 'linkedin' else FOUNDIT), 'url': url,
+           'id': ('li-' if source == 'linkedin' else 'foundit-') + identifier}
+    # The source's canonical URL may retain the encoded slug as well.
+    body = page(source=source, identifier=identifier)
+    canonical = (f'https://www.linkedin.com/jobs/view/{identifier}' if source == 'linkedin'
+                 else f'https://www.founditgulf.com/job/backend-engineer-{identifier}')
+    body = body.replace(canonical, url)
+    transport = Transport(Response(body))
+    result = availability.check(job, transport, NOW)
+    assert result['state'] == 'open' and result['matched'] is True
+    assert result['source_job_id'] == identifier
+    if source == 'linkedin':
+        assert result['url'] == f'https://www.linkedin.com/jobs/view/{identifier}'
+        assert transport.requests[0][0].url == result['url']
+    else:
+        assert transport.requests[0][0].url.lower() == url.lower()
+
+
+@pytest.mark.parametrize('source', ['linkedin', 'foundit'])
+@pytest.mark.parametrize('slug', ['role-%', 'role-%2', 'role-%GG', 'role-%C3%28', 'role-%FF',
+                                'role-%2F-other', 'role-%5c-other', 'role-%3F-other', 'role-%23-other',
+                                'role-%00-other', 'role-%0D%0A-other'])
+def test_malformed_encoding_or_encoded_route_delimiters_never_make_requests(source, slug):
+    job = LINKEDIN if source == 'linkedin' else FOUNDIT
+    url = (f'https://www.linkedin.com/jobs/view/{slug}-12345' if source == 'linkedin'
+           else f'https://www.founditgulf.com/job/{slug}-98765')
+    transport = Transport(Response(page(source=source)))
+    assert availability.check({**job, 'url': url}, transport, NOW)['state'] == 'unknown'
+    assert transport.requests == []
+
+
+def test_encoded_slug_does_not_relax_local_id_or_redirect_identity():
+    other = 'https://www.linkedin.com/jobs/view/ing%C3%A9nieur-54321'
+    transport = Transport(Response(page()))
+    assert availability.check({**LINKEDIN, 'url': other}, transport, NOW)['state'] == 'unknown'
+    assert transport.requests == []
+    redirected = Transport(Response(status=302, headers={'Location': other}))
+    assert availability.check(LINKEDIN, redirected, NOW)['state'] == 'unknown'
+    assert all(request.url.endswith('/12345') for request, _ in redirected.requests)
+
+
+def test_same_job_redirect_with_encoded_slug_is_checked_and_followed():
+    url = 'https://www.linkedin.com/jobs/view/ing%C3%A9nieur-80-100%25-12345'
+    transport = Transport(Response(status=302, headers={'Location': url}), Response(page()))
+    assert availability.check(LINKEDIN, transport, NOW)['state'] == 'open'
+    assert transport.requests[1][0].url == url
+
+
 @pytest.mark.parametrize("target", ["http://127.0.0.1/secrets", "https://169.254.169.254/latest/meta-data",
                                    "https://example.com/", "https://www.linkedin.com/login",
                                    "https://www.linkedin.com/jobs/view/99999"])

@@ -12,7 +12,7 @@ from datetime import datetime, time as day_time, timedelta, timezone
 import json
 import re
 import time
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 import requests
@@ -60,14 +60,26 @@ def _url_identity(value):
     parsed = _parsed_url(value)
     if parsed is None:
         return None
+    # Source slugs contain percent-encoded Unicode and punctuation. Validate
+    # escapes before accepting them, and keep encoded path separators/control
+    # characters from changing the route whose trailing job ID we recognize.
+    if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path):
+        return None
+    try:
+        decoded_path = unquote(parsed.path, errors="strict")
+    except UnicodeError:
+        return None
+    if (re.search(r"[\x00-\x1f\x7f\\?#]", decoded_path)
+            or decoded_path.count("/") != parsed.path.count("/")):
+        return None
     host = parsed.hostname.lower()
     if host in LINKEDIN_HOSTS:
-        match = re.fullmatch(r"/jobs/view/(?:[^/%?#]+-)?(\d{1,20})/?", parsed.path)
+        match = re.fullmatch(r"/jobs/view/(?:[^/?#]+-)?(\d{1,20})/?", parsed.path)
         guest = re.fullmatch(r"/jobs-guest/jobs/api/jobPosting/(\d{1,20})/?", parsed.path)
         if match or guest:
             return "linkedin", (match or guest).group(1)
     if host in FOUNDIT_HOSTS:
-        match = re.fullmatch(r"/job/(?:[^/%?#]+-)?(\d{1,20})(?:\.html)?/?", parsed.path)
+        match = re.fullmatch(r"/job/(?:[^/?#]+-)?(\d{1,20})(?:\.html)?/?", parsed.path)
         detail = re.fullmatch(r"/middleware/jobdetail/(\d{1,20})/?", parsed.path)
         if match or detail:
             return "foundit", (match or detail).group(1)
