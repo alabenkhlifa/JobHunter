@@ -626,7 +626,8 @@ def mark_message_read(service, msg_id: str) -> None:
         pass
 
 
-def check_mail(args: argparse.Namespace) -> list[dict[str, Any]]:
+def collect_mail(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Inspect mail and calculate the next ledger without committing delivery."""
     service = gmail_service(args.google_token)
     jobs = interested_jobs(args.db_path)
     state = load_json(args.state_path, {"seen_message_ids": [], "last_checked_at": None})
@@ -674,6 +675,11 @@ def check_mail(args: argparse.Namespace) -> list[dict[str, Any]]:
     # old alerts. Keep the small ID ledger, independently of mailbox read flags.
     state["seen_message_ids"] = sorted(new_seen)
     state["last_checked_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    return matches, state
+
+
+def check_mail(args: argparse.Namespace) -> list[dict[str, Any]]:
+    matches, state = collect_mail(args)
     save_json(args.state_path, state)
     return matches
 

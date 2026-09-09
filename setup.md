@@ -200,6 +200,12 @@ python -m jobhunter_integrations.gmail_watcher \
 
 It prints nothing when there is nothing new to report. It tracks processed message IDs locally and leaves mailbox read flags unchanged. It paginates past processed mail to reach older unchecked replies. When recognized rejection, interview, assessment, action-required, progression, or offer language matches exactly one active application, it updates its status, requests tracker sync, and prints an alert for the scheduler to deliver. Basic receipt acknowledgements remain `submitted`. Ambiguous matches do not change application state. Recognized verification-code messages are excluded from periodic alerts. Authorization failures produce a warning and nonzero exit status. Configure the scheduler to report failures and deliver nonempty stdout; do not overlap watcher runs. Schedule only after `gmail_auth check --refresh` succeeds, for example at 10:00 and 15:00. It never replies, schedules interviews, follows links, or accepts offers automatically.
 
+### Scheduled reply monitoring
+
+For twice-daily reply monitoring, run `python -m jobhunter_integrations.gmail_monitor` from a Hermes script-only cron job at `0 10,15 * * *` in the configured timezone. On the Pi, use `~/.hermes/scripts/jobhunter_gmail_monitor.py`, workdir set to the JobHunter checkout, `no_agent=true`, and Telegram delivery for failures. The script uses JobHunter's Telegram configuration to send new replies directly; successful/empty runs print nothing, so Hermes does not send an extra summary. Confirm the job's computed next-run time after creating it.
+
+The private `gmail_watcher_seen.outbox.json` beside the processed-ID ledger retains alerts until Telegram confirms delivery. Include both files in encrypted backups. Delivery retries resume the remaining batches and overlapping monitor runs are skipped. A crash between Telegram accepting a message and saving its acknowledgement can repeat that message on retry. Run the scheduled monitor as the sole owner of this ledger; use verification lookup separately for codes. The Pi config repository captures the cron definition and scripts for recovery.
+
 ### ATS verification during an approved application
 
 Capture the current timestamp when requesting a code, then fetch only mail from the exact expected ATS sender domain addressed to the configured jobs mailbox:

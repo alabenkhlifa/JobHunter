@@ -218,6 +218,8 @@ These integrations read credentials from ignored files/env variables. The Gmail 
 
 For a code requested during an approved ATS interaction, use `python -m jobhunter_integrations.gmail_verification --sender-domain <expected-domain> --after <request-timestamp>`. It verifies recipient, exact sender domain and a window of at most 15 minutes, then saves the newest matching email to a private file without printing its contents. Read it only for that interaction and delete it afterwards; never forward codes to Telegram. See [setup.md](setup.md#ats-verification-during-an-approved-application).
 
+For scheduled Telegram alerts, use `python -m jobhunter_integrations.gmail_monitor`. It keeps a private outbox, retries unconfirmed delivery, commits processed IDs after confirmed delivery, and prevents concurrent monitor runs. Success is silent to avoid a second cron summary. Configure Hermes with a script-only job (`no_agent=true`) at `0 10,15 * * *` in the intended timezone, with Telegram delivery for failures. The Pi config repo tracks the entrypoint and job definition. Registration and verification-code lookup remain on demand within the approved application; the periodic job only handles replies.
+
 To keep the Sheet live while applying, enable best-effort auto-sync after every application stage update:
 
 ```env
