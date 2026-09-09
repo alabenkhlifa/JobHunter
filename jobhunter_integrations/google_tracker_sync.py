@@ -171,6 +171,9 @@ def sync_locked(args, state_dir):
                 path = tracker.abs_path(row[column], args.repo_root)
                 if path and path.is_file():
                     job_key = hashlib.sha256(repr(row_key(row)).encode()).hexdigest()[:12]
+                    sent_stages = {"submitted", "submission_result", "rejected", "interview_invited", "assessment_requested", "action_required", "application_progressed", "offer_received"}
+                    if column in (8, 9) and row[2] not in sent_stages:
+                        label = "Open prepared resume" if column == 8 else "Open prepared cover letter"
                     row[column] = tracker.upload_local_file(drive, row[column], job_key, uploads, args.drive_state, args.drive_folder_name, label, args.repo_root)
                     if not web_link(row[column]):
                         raise RuntimeError("Document upload was not confirmed; retry the tracker sync.")

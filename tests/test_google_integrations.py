@@ -93,6 +93,33 @@ def test_tracker_uses_separate_token_without_requesting_gmail_access(monkeypatch
     ]
 
 
+def test_tracker_links_selected_resume_pdf_without_unrelated_siblings(tmp_path):
+    db = make_application_db(tmp_path, stage="blocked_login_required")
+    package = tmp_path / "package"
+    package.mkdir()
+    resume = package / "Selected.pdf"
+    cover = package / "CoverLetter_Test.pdf"
+    resume.write_text("test-only document placeholder")
+    cover.write_text("test-only document placeholder")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE applications SET package_path=?", (str(resume),))
+    result = google_tracker.rows_from_db(db, tmp_path)[0]
+    assert result[8] == str(resume)
+    assert result[9] == ""
+    assert result[10] == str(package)
+
+
+def test_tracker_does_not_treat_selected_cover_letter_as_resume(tmp_path):
+    db = make_application_db(tmp_path)
+    cover = tmp_path / "CoverLetter_Test.pdf"
+    cover.write_text("test-only document placeholder")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE applications SET package_path=?", (str(cover),))
+    result = google_tracker.rows_from_db(db, tmp_path)[0]
+    assert result[8] == ""
+    assert result[9] == str(cover)
+
+
 def test_tracker_assigns_non_white_color_to_every_status_family():
     statuses = [
         "new",

@@ -242,8 +242,15 @@ def rows_from_db(db_path: Path, repo_root: Path, drive=None, drive_state_path: P
     seen_keys = set()
     for r in rows:
         package = abs_path(r["package_path"], repo_root)
-        resume = first_match(package, ["Resume*.pdf", "*Resume*.pdf", "resume*.pdf"])
-        cover = first_match(package, ["CoverLetter*.pdf", "*Cover*Letter*.pdf", "cover*.pdf"])
+        # The upload engine records the selected PDF directly; package
+        # generation records its folder. Both are valid application records.
+        package_file = package if package and package.is_file() else None
+        package_folder = package_file.parent if package_file else package
+        # A selected file does not authorize attaching unrelated siblings.
+        search_folder = None if package_file else package_folder
+        is_cover = bool(package_file and "cover" in package_file.stem.casefold())
+        resume = str(package_file) if package_file and package_file.suffix.lower() == ".pdf" and not is_cover else first_match(search_folder, ["Resume*.pdf", "*Resume*.pdf", "resume*.pdf"])
+        cover = str(package_file) if package_file and package_file.suffix.lower() == ".pdf" and is_cover else first_match(search_folder, ["CoverLetter*.pdf", "*Cover*Letter*.pdf", "cover*.pdf"])
         resume_cell = upload_local_file(drive, resume, r["job_id"], drive_state, active_drive_state_path, drive_folder_name, "Open resume", repo_root) if drive and resume else resume
         cover_cell = upload_local_file(drive, cover, r["job_id"], drive_state, active_drive_state_path, drive_folder_name, "Open cover letter", repo_root) if drive and cover else cover
         key = (r["job_id"], r["stage"], r["submitted_at"] or r["created_at"])
@@ -262,7 +269,7 @@ def rows_from_db(db_path: Path, repo_root: Path, drive=None, drive_state_path: P
             r["application_url"] or "",
             resume_cell,
             cover_cell,
-            str(package) if package else "",
+            str(package_folder) if package_folder else "",
             evidence_cell,
             " | ".join(x for x in [r["application_type"], r["notes"], r["error"]] if x),
             next_action(r["stage"] or "", r["error"]),
