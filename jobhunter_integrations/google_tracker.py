@@ -18,9 +18,6 @@ from pathlib import Path
 from typing import Any
 
 SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.file",
 ]
@@ -62,7 +59,7 @@ def default_state_dir() -> Path:
 
 
 def default_token_path() -> Path:
-    return Path(os.getenv("GOOGLE_TOKEN_PATH", Path.home() / ".jobhunter" / "google_token.json")).expanduser()
+    return Path(os.getenv("JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH", os.getenv("GOOGLE_TOKEN_PATH", Path.home() / ".jobhunter" / "google_token.json"))).expanduser()
 
 
 def load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:

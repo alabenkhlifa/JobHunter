@@ -195,8 +195,17 @@ Run a tracker sync:
 ```bash
 python -m jobhunter_integrations.google_tracker \
   --spreadsheet-id "$JOBHUNTER_TRACKER_SPREADSHEET_ID" \
-  --google-token "$GOOGLE_TOKEN_PATH"
+  --google-token "$JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH"
 ```
+
+Authorize the dedicated Gmail account and test refresh first:
+
+```bash
+python -m jobhunter_integrations.gmail_auth authorize
+python -m jobhunter_integrations.gmail_auth check --refresh
+```
+
+Use your existing Google **Desktop app** client JSON and set `JOBHUNTER_GMAIL_ACCOUNT` in `.env`. Setup requests Gmail read permission only, uses a loopback callback with PKCE, and refuses a mismatched mailbox. See [setup.md](setup.md#gmail-oauth-desktop-client-flow) for headless SSH consent and recovery. Use a Production consent audience for ongoing use; Gmail grants from External apps in Testing expire after seven days. OAuth credentials and the processed-mail ledger belong in an encrypted backup, never plaintext Git. Restore them and check refresh before resuming monitoring. The Pi config repo manages them through its secret manifest and `secrets.age`.
 
 Run the Gmail watcher once:
 
@@ -205,7 +214,9 @@ python -m jobhunter_integrations.gmail_watcher \
   --google-token "$GOOGLE_TOKEN_PATH"
 ```
 
-Both commands are safe to schedule from cron/Hermes cron. They read secrets only from local ignored files/env variables. The Gmail watcher marks inspected messages as read so the dedicated jobs mailbox stays clean. When recognized rejection, interview, assessment, action-required, progression, or offer language matches exactly one active application, the watcher updates its status, requests tracker sync, and prints an explicit alert for the scheduler to deliver. Basic receipt acknowledgements remain `submitted`. If the application match is missing or ambiguous, it prints a warning without changing state. It never replies, schedules an interview, completes an assessment, follows action links, or accepts an offer automatically.
+These integrations read credentials from ignored files/env variables. The Gmail watcher tracks processed IDs and leaves mail read flags unchanged. When recognized rejection, interview, assessment, action-required, progression, or offer language matches exactly one active application, it updates its status and prints an alert. Basic acknowledgements remain `submitted`; ambiguous matches do not change application state. Recognized verification messages are excluded from periodic alerts. It never replies, follows links, completes assessments or accepts offers. Schedule only after the connection check passes, avoid overlapping runs, and arrange delivery of nonempty output and failures. Sheets/Drive and sending access remain separate optional authorizations.
+
+For a code requested during an approved ATS interaction, use `python -m jobhunter_integrations.gmail_verification --sender-domain <expected-domain> --after <request-timestamp>`. It verifies recipient, exact sender domain and a window of at most 15 minutes, then saves the newest matching email to a private file without printing its contents. Read it only for that interaction and delete it afterwards; never forward codes to Telegram. See [setup.md](setup.md#ats-verification-during-an-approved-application).
 
 To keep the Sheet live while applying, enable best-effort auto-sync after every application stage update:
 

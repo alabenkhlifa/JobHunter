@@ -1,5 +1,12 @@
 # Secrets
 .env
+google_token.json
+google_tracker_token.json
+google_client_secret.json
+google_account.json
+google_oauth_pending.json
+client_secret*.json
+.jobhunter/
 
 # Data
 data/*

@@ -83,6 +83,16 @@ def test_tracker_formats_dates_and_status_colors():
     assert "acceptance requires approval" in google_tracker.next_action("offer_received", None)
 
 
+def test_tracker_uses_separate_token_without_requesting_gmail_access(monkeypatch):
+    monkeypatch.setenv("GOOGLE_TOKEN_PATH", "/tmp/test-gmail-token.json")
+    monkeypatch.setenv("JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH", "/tmp/test-tracker-token.json")
+    assert google_tracker.default_token_path() == Path("/tmp/test-tracker-token.json")
+    assert google_tracker.SCOPES == [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive.file",
+    ]
+
+
 def test_tracker_assigns_non_white_color_to_every_status_family():
     statuses = [
         "new",

@@ -20,11 +20,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/gmail.send",
-]
+from jobhunter_integrations.gmail_auth import GmailAuthError, gmail_service, write_private_json
+
 POSITIVE_KEYWORDS = [
     "application", "applied", "interview", "shortlist", "shortlisted",
     "assessment", "offer letter", "job offer", "action required", "recruiter",
@@ -241,21 +238,12 @@ def load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
         try:
             return json.loads(path.read_text())
         except Exception:
-            return dict(default)
+            raise RuntimeError("Gmail watcher state could not be read; restore it before retrying.") from None
     return dict(default)
 
 
 def save_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True))
-
-
-def gmail_service(token_path: Path):
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
-
-    creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    write_private_json(path, data)
 
 
 def interested_jobs(db_path: Path) -> list[dict[str, str]]:
@@ -643,27 +631,48 @@ def check_mail(args: argparse.Namespace) -> list[dict[str, Any]]:
     jobs = interested_jobs(args.db_path)
     state = load_json(args.state_path, {"seen_message_ids": [], "last_checked_at": None})
     seen = set(state.get("seen_message_ids") or [])
-    resp = service.users().messages().list(userId="me", q=args.query, maxResults=args.max_messages).execute()
     new_seen = set(seen)
     matches: list[dict[str, Any]] = []
-    for item in resp.get("messages", []) or []:
-        msg_id = item["id"]
-        if msg_id in seen:
-            continue
-        summary = message_summary(service, msg_id)
-        relevant, reasons = is_relevant(summary["text"], jobs)
-        if relevant:
-            summary["reasons"] = reasons
-            try:
-                process_application_outcome(summary, jobs, args.db_path)
-            except Exception as exc:
-                summary["processing_error"] = type(exc).__name__
-                matches.append(summary)
+    page_token = None
+    inspected = 0
+    while inspected < args.max_messages:
+        request = {"userId": "me", "q": args.query, "maxResults": min(args.max_messages, 100)}
+        if page_token:
+            request["pageToken"] = page_token
+        resp = service.users().messages().list(**request).execute()
+        for item in resp.get("messages", []) or []:
+            msg_id = item["id"]
+            if msg_id in new_seen:
                 continue
-            matches.append(summary)
-        mark_message_read(service, msg_id)
-        new_seen.add(msg_id)
-    state["seen_message_ids"] = sorted(new_seen)[-500:]
+            summary = message_summary(service, msg_id)
+            inspected += 1
+            relevant, reasons = is_relevant(summary["text"], jobs)
+            # Verification secrets belong only to the active ATS interaction,
+            # never the periodic recruiter digest.
+            verification = re.search(
+                r"\b(?:verification code|security code|one[- ]time (?:code|password)|otp|verify your (?:email|account)|confirm your email)\b",
+                summary["text"], re.IGNORECASE,
+            )
+            if relevant and not verification:
+                summary["reasons"] = reasons
+                try:
+                    process_application_outcome(summary, jobs, args.db_path)
+                except Exception as exc:
+                    summary["processing_error"] = type(exc).__name__
+                    matches.append(summary)
+                    if inspected >= args.max_messages:
+                        break
+                    continue
+                matches.append(summary)
+            new_seen.add(msg_id)
+            if inspected >= args.max_messages:
+                break
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    # Do not evict IDs while they can still match the query: eviction replays
+    # old alerts. Keep the small ID ledger, independently of mailbox read flags.
+    state["seen_message_ids"] = sorted(new_seen)
     state["last_checked_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     save_json(args.state_path, state)
     return matches
@@ -682,7 +691,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    matches = check_mail(parse_args(argv))
+    from dotenv import load_dotenv
+    load_dotenv(default_repo_root() / ".env")
+    try:
+        matches = check_mail(parse_args(argv))
+    except GmailAuthError as exc:
+        print(f"⚠️ JobHunter Gmail unavailable: {exc}")
+        return 1
     if matches:
         print(format_alert(matches))
     return 0
