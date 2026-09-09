@@ -78,9 +78,13 @@ def main(argv: list[str] | None = None) -> int:
     if not token or not chat:
         print("JobHunter mail check failed: Telegram configuration is missing.")
         return 1
-    from scraper import send_telegram
+    from scraper import _env_flag, send_telegram, sync_application_tracker_if_enabled
     try:
         run_monitor(args, lambda message: send_telegram(token, chat, message))
+        # Retry an earlier tracker failure even when no new email changes a stage.
+        if _env_flag("JOBHUNTER_AUTO_SYNC_TRACKER") and not sync_application_tracker_if_enabled():
+            print("JobHunter mail check completed, but the application tracker sync failed; it will retry at the next check.")
+            return 1
     except GmailAuthError as exc:
         print(f"JobHunter mail check failed: {exc}")
         return 1

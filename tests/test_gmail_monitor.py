@@ -95,3 +95,23 @@ def test_corrupt_outbox_fails_without_sending_or_losing_it(mailbox):
         monitor.run_monitor(args, Mock())
     assert outbox.read_text() == "broken"
     collector.assert_not_called()
+
+
+@pytest.mark.parametrize("sync_success", [True, False])
+def test_scheduled_check_retries_tracker_without_new_mail(mailbox, monkeypatch, capsys, sync_success):
+    args, _, state, collector = mailbox
+    collector.return_value = ([], state)
+    monkeypatch.setattr(monitor.gmail_watcher, "parse_args", lambda argv: args)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "test-chat")
+    monkeypatch.setenv("JOBHUNTER_AUTO_SYNC_TRACKER", "true")
+    sync = Mock(return_value=sync_success)
+    send = Mock()
+    monkeypatch.setattr("scraper.sync_application_tracker_if_enabled", sync)
+    monkeypatch.setattr("scraper.send_telegram", send)
+    assert monitor.main([]) == (0 if sync_success else 1)
+    sync.assert_called_once_with()
+    send.assert_not_called()
+    assert json.loads(args.state_path.read_text()) == state
+    output = capsys.readouterr().out
+    assert output == "" if sync_success else "tracker sync failed" in output

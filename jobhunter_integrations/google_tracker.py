@@ -60,7 +60,7 @@ def default_state_dir() -> Path:
 
 
 def default_token_path() -> Path:
-    return Path(os.getenv("JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH", os.getenv("GOOGLE_TOKEN_PATH", Path.home() / ".jobhunter" / "google_token.json"))).expanduser()
+    return Path(os.getenv("JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH", Path.home() / ".jobhunter" / "google_tracker_token.json")).expanduser()
 
 
 def load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -69,14 +69,13 @@ def load_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
             return json.loads(path.read_text())
         except Exception:
             return dict(default)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(default, indent=2, sort_keys=True))
+    save_json(path, default)
     return dict(default)
 
 
 def save_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True))
+    from .gmail_auth import write_private_json
+    write_private_json(path, data)
 
 
 def format_dt(value: str | None) -> str:
@@ -172,14 +171,8 @@ def status_color(status: str) -> dict[str, float]:
 
 
 def google_services(token_path: Path):
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
-
-    creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-    return (
-        build("sheets", "v4", credentials=creds, cache_discovery=False),
-        build("drive", "v3", credentials=creds, cache_discovery=False),
-    )
+    from .google_tracker_auth import checked_services
+    return checked_services(token_path)
 
 
 def ensure_drive_folder(drive, state: dict[str, Any], state_path: Path, folder_name: str) -> str | None:
@@ -227,7 +220,7 @@ def upload_local_file(drive, file_path: str | None, job_id: str, state: dict[str
 
 
 def rows_from_db(db_path: Path, repo_root: Path, drive=None, drive_state_path: Path | None = None, drive_folder_name: str = "JobHunter Application Evidence") -> list[list[Any]]:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
@@ -245,7 +238,6 @@ def rows_from_db(db_path: Path, repo_root: Path, drive=None, drive_state_path: P
 
     drive_state = load_json(drive_state_path, {"files": {}}) if drive and drive_state_path else {"files": {}}
     active_drive_state_path = drive_state_path or (default_state_dir() / "tracker_drive_files.json")
-    now = sheet_text_dt(dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
     output: list[list[Any]] = []
     seen_keys = set()
     for r in rows:
@@ -261,7 +253,7 @@ def rows_from_db(db_path: Path, repo_root: Path, drive=None, drive_state_path: P
         evidence_cell = upload_local_file(drive, r["evidence_path"], r["job_id"], drive_state, active_drive_state_path, drive_folder_name, "Open screenshot", repo_root) if drive else (r["evidence_path"] or "")
         output.append([
             sheet_text_dt(r["submitted_at"] or r["approved_at"] or r["created_at"] or ""),
-            now,
+            sheet_text_dt(r["created_at"] or r["submitted_at"] or ""),
             r["stage"] or "",
             r["title"] or r["job_id"],
             r["company"] or "",
@@ -306,20 +298,16 @@ def formatting_requests(sheet_id: int, values: list[list[Any]]) -> list[dict[str
 
 
 def sync_tracker(args: argparse.Namespace) -> dict[str, Any]:
-    sheets, drive = google_services(args.google_token)
-    sheet_id = ensure_tab(sheets, args.spreadsheet_id, args.tab_name)
-    values = [HEADERS] + rows_from_db(args.db_path, args.repo_root, drive, args.drive_state, args.drive_folder_name)
-    sheets.spreadsheets().values().clear(spreadsheetId=args.spreadsheet_id, range=f"{args.tab_name}!A:N", body={}).execute()
-    sheets.spreadsheets().values().update(spreadsheetId=args.spreadsheet_id, range=f"{args.tab_name}!A1", valueInputOption="USER_ENTERED", body={"values": values}).execute()
-    sheets.spreadsheets().batchUpdate(spreadsheetId=args.spreadsheet_id, body={"requests": formatting_requests(sheet_id, values)}).execute()
-    drive_state = load_json(args.drive_state, {"files": {}})
-    return {"spreadsheet_id": args.spreadsheet_id, "tab": args.tab_name, "rows": len(values) - 1, "uploaded_files": len(drive_state.get("files", {})), "drive_folder_link": drive_state.get("folder_link", "")}
+    from .google_tracker_sync import sync_tracker as sync
+    return sync(args)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spreadsheet-id", default=os.getenv("JOBHUNTER_TRACKER_SPREADSHEET_ID"), required=not bool(os.getenv("JOBHUNTER_TRACKER_SPREADSHEET_ID")))
     parser.add_argument("--tab-name", default=os.getenv("JOBHUNTER_TRACKER_TAB", "Applications"))
+    parser.add_argument("--sheet-id", type=int, default=os.getenv("JOBHUNTER_TRACKER_SHEET_ID"))
+    parser.add_argument("--dry-run", action="store_true", help="Inspect the merge without writing to Sheets or Drive.")
     parser.add_argument("--repo-root", type=Path, default=default_repo_root())
     parser.add_argument("--db-path", type=Path, default=Path(os.getenv("JOBHUNTER_DB_PATH", default_repo_root() / "data" / "jobs.db")))
     parser.add_argument("--google-token", type=Path, default=default_token_path())
@@ -329,7 +317,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    result = sync_tracker(parse_args(argv))
+    from dotenv import load_dotenv
+    load_dotenv(default_repo_root() / ".env")
+    try:
+        result = sync_tracker(parse_args(argv))
+    except Exception:
+        # Provider failures can contain private URLs or token response data.
+        print("Tracker sync failed; existing sheet rows are retained. Check authorization, tab headers, ambiguous matches and local state.")
+        return 1
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 

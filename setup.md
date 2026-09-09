@@ -451,7 +451,7 @@ Recommended setup:
      --google-token "$JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH"
    ```
 
-5. To keep the tracker live while applying, enable best-effort auto-sync in local `.env` or deployment env:
+5. First run the same sync command with `--dry-run` to preview the merge. The existing tab is required: sync preserves unmatched history, newer spreadsheet statuses, existing document links and manual notes. Ambiguous matches stop the sync. Updates and status colors are applied in one batch without clearing the tab, then whole rows move into **Applied At, newest first** order. `Last Updated` uses the actual application update time. To keep the tracker live while applying, enable best-effort auto-sync in local `.env` or deployment env:
 
    ```env
    JOBHUNTER_AUTO_SYNC_TRACKER=true
@@ -461,6 +461,8 @@ Recommended setup:
 
 6. Upload evidence screenshots, sent resumes, and sent cover letters to a Drive folder created/managed by the jobs Gmail.
 7. Grant the main/personal Google account access to that Drive folder/files. This is required so the human owner can click `Open resume`, `Open cover letter`, and `Open screenshot` links from the Sheet.
+
+The scheduled mail monitor also retries enabled tracker sync after every check, even without new replies, and reports retry failures through cron delivery. Include the separate tracker token and private state files `tracker_drive_files.json`, `tracker_sync_state.json`, and `tracker_before_sync.json` in encrypted recovery. The last file is the sheet snapshot saved before the most recent write; a no-change sync preserves it.
 
 Useful formatting for the tracker:
 

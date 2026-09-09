@@ -211,6 +211,8 @@ python -m jobhunter_integrations.google_tracker \
   --google-token "$JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH"
 ```
 
+Add `--dry-run` to preview row counts without updating Sheets or uploading files. Sync merges into the existing tab, keeps unmatched history and newer spreadsheet statuses, preserves existing document links and manual notes, and orders whole rows by **Applied At, newest first**. Ambiguous matches stop the sync. Only changed cells are written, with formatting and row moves in one Sheets batch; the tab is never cleared. `Last Updated` reflects the database's application update time, not each sync's run time. Private state includes the uploaded-file cache, last sync receipt and the sheet snapshot from before the last write.
+
 Authorize the dedicated Gmail account and test refresh first:
 
 ```bash
@@ -242,6 +244,8 @@ JOBHUNTER_TRACKER_SYNC_TIMEOUT=120
 ```
 
 Auto-sync failures are logged but do not block application progress; SQLite remains the source of truth.
+
+When enabled, the mail monitor retries tracker sync after every scheduled check, including checks with no new replies. An unsuccessful retry is reported through the cron job's failure delivery. Back up the tracker token and `tracker_drive_files.json`, `tracker_sync_state.json`, and `tracker_before_sync.json` from the private state directory in encrypted recovery.
 
 ## Safety model
 
