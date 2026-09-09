@@ -185,12 +185,25 @@ Recommended permissions:
 
 1. Main/personal Google account creates or owns the Sheet.
 2. Dedicated jobs Gmail is granted **Editor** on the Sheet.
-3. JobHunter OAuth for the jobs Gmail includes Gmail scopes plus `spreadsheets` and `drive.file`.
+3. Authorize a separate tracker token with `spreadsheets` and `drive.file`; keep the mailbox token read-only.
 4. Files uploaded by the jobs Gmail, such as resumes, cover letters, and screenshots, must also be shared with the main/personal Google account so the owner can open links from the Sheet.
 
 Recommended formatting includes wrapped text, taller rows, frozen headers, `dd/mm/yyyy hh:mm`-style dates, and a non-white color for every application row: green for `submitted`/`offer_received`, red for `rejected`/failures, orange for blockers, blue for application progression/interviews/package states, amber for assessments/actions, purple for `interested`, grey for closed/skipped states, and light blue-grey for new or unknown statuses.
 
-Run a tracker sync:
+The tracker preserves its 14 columns in the order shown above. The reference palette is header `#E2ECFD`, submitted `#D7EED3`, interested `#E6DBF7`, preparation/progression `#D5E4FC`, blocked `#F7E1C3`, and rejected `#F3D4CD`. Status colors cover the full row from A through N.
+
+Authorize the tracker using the existing Desktop client and configured jobs account:
+
+```bash
+python -m jobhunter_integrations.google_tracker_auth authorize
+python -m jobhunter_integrations.google_tracker_auth check --refresh \
+  --spreadsheet-id "$JOBHUNTER_TRACKER_SPREADSHEET_ID" \
+  --sheet-id "$JOBHUNTER_TRACKER_SHEET_ID"
+```
+
+The tracker token defaults to `~/.jobhunter/google_tracker_token.json`. The command verifies the Drive account before saving credentials and refuses to overwrite the mailbox token. Enable the Sheets and Drive APIs in the same Google Cloud project. The check reads the existing tab's title and headers without editing cells; `--sheet-id` is the `gid` from its URL. It confirms read access, not edit permission. Keep auto-sync disabled until the existing tracker data and target tab have been reviewed. Back up this separate token with the existing encrypted credential recovery.
+
+Run a tracker sync after that review:
 
 ```bash
 python -m jobhunter_integrations.google_tracker \

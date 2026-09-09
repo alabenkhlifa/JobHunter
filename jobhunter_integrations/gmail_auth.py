@@ -95,7 +95,8 @@ def gmail_service(token_path: Path, account: str | None = None, *, force_refresh
         raise GmailAuthError("Gmail authorization check failed. Check connectivity and Gmail API access; reauthorize if access was revoked or expired.") from None
 
 
-def authorize(args) -> None:
+def authorize_google_credentials(args, scopes, verify_credentials, *, success_message) -> None:
+    """Run the shared Desktop consent flow; persist only verified credentials."""
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     account = expected_account(args.account)
@@ -113,17 +114,17 @@ def authorize(args) -> None:
         # Never send credentials to endpoints supplied by an arbitrary config file.
         installed["auth_uri"] = AUTH_URI
         installed["token_uri"] = TOKEN_URI
-        flow = InstalledAppFlow.from_client_config({"installed": installed}, SCOPES, autogenerate_code_verifier=True)
+        flow = InstalledAppFlow.from_client_config({"installed": installed}, scopes, autogenerate_code_verifier=True)
         credentials = flow.run_local_server(
             host="127.0.0.1", port=args.port, open_browser=not args.no_browser,
             timeout_seconds=300, access_type="offline", prompt="consent",
             login_hint=account,
             authorization_prompt_message="Open this Google consent link in your browser:\n{url}",
-            success_message="Google consent received. Return to the terminal for the mailbox check.",
+            success_message=success_message,
         )
-        if not credentials.refresh_token or not credentials.has_scopes(SCOPES):
-            raise GmailAuthError("Google did not grant Gmail read and offline access; authorize again.")
-        verify_account(service_for_credentials(credentials), account)
+        if not credentials.refresh_token or not credentials.has_scopes(scopes):
+            raise GmailAuthError("Google did not grant the requested permissions and offline access; authorize again.")
+        verify_credentials(credentials, account)
         write_private_json(args.google_token, json.loads(credentials.to_json()))
         write_private_json(default_account_path(), {"email": account})
     except GmailAuthError:
@@ -133,6 +134,14 @@ def authorize(args) -> None:
     finally:
         for logger, level in zip(loggers, levels):
             logger.setLevel(level)
+
+
+def authorize(args) -> None:
+    authorize_google_credentials(
+        args, SCOPES,
+        lambda credentials, account: verify_account(service_for_credentials(credentials), account),
+        success_message="Google consent received. Return to the terminal for the mailbox check.",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

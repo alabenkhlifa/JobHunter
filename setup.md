@@ -180,12 +180,23 @@ For recovery, back up the client JSON, token JSON, account JSON and `~/.jobhunte
 
 Google documents the [Desktop OAuth flow](https://developers.google.com/identity/protocols/oauth2/native-app) and [refresh-token expiry conditions](https://developers.google.com/identity/protocols/oauth2#expiration).
 
-The shared Google Sheet tracker is optional and should use a separate authorization/token file with these permissions, configured through `JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH` or `google_tracker --google-token`. The Gmail authorization command above does not grant them:
+The shared Google Sheet tracker uses a separate authorization/token file with these permissions, configured through `JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH` or `google_tracker --google-token`. The Gmail authorization command above does not grant them:
 
 ```text
 https://www.googleapis.com/auth/spreadsheets
 https://www.googleapis.com/auth/drive.file
 ```
+
+Enable the Sheets and Drive APIs in the same Google Cloud project, then use the existing Desktop client and configured jobs account:
+
+```bash
+python -m jobhunter_integrations.google_tracker_auth authorize
+python -m jobhunter_integrations.google_tracker_auth check --refresh \
+  --spreadsheet-id "$JOBHUNTER_TRACKER_SPREADSHEET_ID" \
+  --sheet-id "$JOBHUNTER_TRACKER_SHEET_ID"
+```
+
+`--sheet-id` is the tab's `gid` from its URL. The check reads its title and headers without editing cells; it confirms read access, not edit permission. Keep auto-sync disabled until the existing rows and target tab have been reviewed. The default tracker token is `~/.jobhunter/google_tracker_token.json`; the command verifies the Drive account before saving it and refuses to overwrite the mailbox token. Use `--no-browser` with the same SSH callback forward as Gmail when authorizing on the Pi. Include the separate tracker token in encrypted recovery, then run `google_tracker_auth check --refresh` after restoration.
 
 `spreadsheets` allows JobHunter to update tracker rows. `drive.file` allows JobHunter to create/upload the specific Drive files it manages, such as uploaded evidence screenshots, sent resumes, and sent cover letters. After the jobs Gmail creates a Drive evidence folder, make sure the main/personal Google account has access to that folder/files so the human owner can open the tracker links.
 
@@ -432,12 +443,12 @@ Recommended setup:
 1. Create a Google Sheet from the main/personal Google account.
 2. Share it with the dedicated jobs Gmail account as **Editor**.
 3. Store the spreadsheet ID in local config outside the repo, for example under `~/.hermes/state/` or `~/.jobhunter/`.
-4. Run the repo-provided sync module using the jobs Gmail OAuth token:
+4. Review the existing tracker with `google_tracker_auth check`, then run the sync module using the separate tracker token:
 
    ```bash
    python -m jobhunter_integrations.google_tracker \
      --spreadsheet-id "$JOBHUNTER_TRACKER_SPREADSHEET_ID" \
-     --google-token "$GOOGLE_TOKEN_PATH"
+     --google-token "$JOBHUNTER_TRACKER_GOOGLE_TOKEN_PATH"
    ```
 
 5. To keep the tracker live while applying, enable best-effort auto-sync in local `.env` or deployment env:
@@ -452,6 +463,8 @@ Recommended setup:
 7. Grant the main/personal Google account access to that Drive folder/files. This is required so the human owner can click `Open resume`, `Open cover letter`, and `Open screenshot` links from the Sheet.
 
 Useful formatting for the tracker:
+
+Keep the 14 columns above in that order. The reference palette is header `#E2ECFD`, submitted `#D7EED3`, interested `#E6DBF7`, preparation/progression `#D5E4FC`, blocked `#F7E1C3`, and rejected `#F3D4CD`. Status colors cover A:N.
 
 - date strings like `18/07/2026 15:47`;
 - wrapped text;

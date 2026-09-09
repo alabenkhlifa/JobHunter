@@ -37,14 +37,15 @@ HEADERS = [
     "Notes",
     "Next Action",
 ]
+HEADER_BACKGROUND = {"red": 226 / 255, "green": 236 / 255, "blue": 253 / 255}  # #E2ECFD
 STATUS_PALETTE = {
-    "green": {"red": 0.82, "green": 0.94, "blue": 0.82},
+    "green": {"red": 215 / 255, "green": 238 / 255, "blue": 211 / 255},  # #D7EED3
     "offer": {"red": 0.75, "green": 0.93, "blue": 0.78},
-    "red": {"red": 0.98, "green": 0.83, "blue": 0.80},
-    "blocked": {"red": 0.99, "green": 0.88, "blue": 0.75},
-    "blue": {"red": 0.82, "green": 0.90, "blue": 1.0},
+    "red": {"red": 243 / 255, "green": 212 / 255, "blue": 205 / 255},  # #F3D4CD
+    "blocked": {"red": 247 / 255, "green": 225 / 255, "blue": 195 / 255},  # #F7E1C3
+    "blue": {"red": 213 / 255, "green": 228 / 255, "blue": 252 / 255},  # #D5E4FC
     "amber": {"red": 1.0, "green": 0.93, "blue": 0.72},
-    "purple": {"red": 0.91, "green": 0.86, "blue": 0.98},
+    "purple": {"red": 230 / 255, "green": 219 / 255, "blue": 247 / 255},  # #E6DBF7
     "grey": {"red": 0.92, "green": 0.92, "blue": 0.92},
     "neutral": {"red": 0.95, "green": 0.96, "blue": 0.98},
 }
@@ -293,7 +294,7 @@ def ensure_tab(svc, spreadsheet_id: str, tab_name: str) -> int:
 def formatting_requests(sheet_id: int, values: list[list[Any]]) -> list[dict[str, Any]]:
     row_count = len(values)
     requests = [
-        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1}, "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 12}, "backgroundColor": {"red": 0.88, "green": 0.93, "blue": 1.0}, "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}}, "fields": "userEnteredFormat(textFormat,backgroundColor,verticalAlignment,wrapStrategy)"}},
+        {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": len(HEADERS)}, "cell": {"userEnteredFormat": {"textFormat": {"bold": True, "fontSize": 12}, "backgroundColor": HEADER_BACKGROUND, "verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"}}, "fields": "userEnteredFormat(textFormat,backgroundColor,verticalAlignment,wrapStrategy)"}},
         {"repeatCell": {"range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": max(row_count, 2), "startColumnIndex": 0, "endColumnIndex": len(HEADERS)}, "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP", "verticalAlignment": "TOP", "textFormat": {"fontSize": 11}}}, "fields": "userEnteredFormat(wrapStrategy,verticalAlignment,textFormat.fontSize)"}},
         {"updateDimensionProperties": {"range": {"sheetId": sheet_id, "dimension": "ROWS", "startIndex": 1, "endIndex": max(row_count, 2)}, "properties": {"pixelSize": 84}, "fields": "pixelSize"}},
         {"autoResizeDimensions": {"dimensions": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": len(HEADERS)}}},
