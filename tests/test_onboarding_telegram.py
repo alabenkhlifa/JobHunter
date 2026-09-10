@@ -72,6 +72,7 @@ def test_new_candidate_upload_confirmation_and_next_focused_step(dialogue):
     assert "Maintained APIs." in dialogue.output()
     assert '"resume":' not in dialogue.output()
     assert not dialogue.service.snapshot(11)["settings"]["resume"]
+    dialogue.planner.return_value = {"operation": "reply", "reply": "How did you test those APIs?"}
     dialogue.click("jh:confirm:")
     assert dialogue.service.snapshot(11)["settings"]["resume"]["name"] == "Candidate Example"
     assert dialogue.service.onboarding_status(11)["next_step"] == "resume"
@@ -152,6 +153,7 @@ def test_guided_schedule_waits_for_complete_review_and_activation_confirmation(d
         "schedule": {"time": "20:00", "timezone": "Africa/Tunis", "weekdays": [0, 1, 2, 3, 4], "enabled": True}}}
     dialogue.message("Use this background, search and weekday schedule")
     assert "enabled: No" in dialogue.output()
+    dialogue.planner.return_value = {"operation": "reply", "reply": "Do you have any other experience to review?"}
     dialogue.click("jh:confirm:")
     for step in ("resume", "roles", "markets", "schedule", "delivery"):
         assert dialogue.service.onboarding_status(11)["next_step"] == step
@@ -195,3 +197,130 @@ def test_readable_preview_preserves_list_replacements_and_every_public_fact():
     assert "Replace the previous list" in result and "with no entries" in result
     assert all(fact in result for fact in facts)
     assert "enabled: No" in result and '"resume"' not in result
+
+
+def test_upload_announces_wait_before_download_and_model_then_requests_answer(dialogue):
+    dialogue.message("/start")
+    dialogue.clear()
+
+    def download(document):
+        assert "Resume received" in dialogue.output() and "Please wait" in dialogue.output()
+        assert "Done reviewing" not in dialogue.output()
+        assert dialogue.planner.call_count == 0
+        return b"Candidate Example\nEngineer at Example Co\nBuilt APIs."
+
+    def plan(messages, schema):
+        assert "Please wait" in dialogue.output()
+        assert "Your turn:" not in dialogue.output()
+        assert not dialogue.service.snapshot(11)["settings"]["resume"]
+        return {"operation": "reply", "reply": "What were your responsibilities at Example Co?"}
+
+    dialogue.client.download_document.side_effect = download
+    dialogue.planner.side_effect = plan
+    dialogue.message("", document={"file_id": "synthetic", "file_name": "resume.txt"})
+    messages = [call.args[1] for call in dialogue.client.send_message.call_args_list]
+    assert len(messages) == 2
+    assert messages[-1] == "Your turn:\nWhat were your responsibilities at Example Co?"
+
+
+@pytest.mark.parametrize("text_confirmation", [False, True])
+def test_confirmed_resume_automatically_asks_once_using_saved_facts(dialogue, text_confirmation):
+    dialogue.message("/start")
+    proposal = dialogue.service.propose(11, {"resume": {"name": "Candidate Example", "experience": [{
+        "id": "exp-1", "title": "Engineer", "company": "Example Co", "dates": "2020-2024",
+        "bullets": ["Maintained APIs."]}]}})
+
+    def next_question(messages, schema):
+        assert "Your changes are saved" in dialogue.output() and "Please wait" in dialogue.output()
+        context = json.loads(messages[1]["content"].split("\n", 1)[1])
+        assert context["settings"]["resume"]["experience"][0]["bullets"] == ["Maintained APIs."]
+        assert schema["properties"]["operation"]["enum"] == ["reply"]
+        return {"operation": "reply", "reply": "How did you test those APIs?"}
+
+    dialogue.planner.side_effect = next_question
+    dialogue.clear()
+    if text_confirmation:
+        dialogue.message("/confirm " + proposal["action_id"])
+    else:
+        dialogue.click("", data="jh:confirm:" + proposal["action_id"])
+    assert "Your turn:\nHow did you test those APIs?" in dialogue.output()
+    assert dialogue.planner.call_count == 1
+    revision = dialogue.service.snapshot(11)["revision"]
+    dialogue.click("", data="jh:confirm:" + proposal["action_id"])
+    assert dialogue.planner.call_count == 1
+    assert dialogue.service.snapshot(11)["revision"] == revision
+    dialogue.click("jh:onboard:acknowledge:resume:")
+    assert dialogue.service.onboarding_status(11)["next_step"] == "roles"
+    assert dialogue.planner.call_count == 1
+
+
+def test_followup_failure_preserves_confirmed_facts_and_retry_continues_interview(dialogue):
+    from jobhunter_service.recovery import get_recovery
+    dialogue.message("/start")
+    proposal = dialogue.service.propose(11, {"resume": {"name": "Candidate Example"}})
+    dialogue.planner.side_effect = RuntimeError("synthetic provider failure")
+    dialogue.click("", data="jh:confirm:" + proposal["action_id"])
+    revision = dialogue.service.snapshot(11)["revision"]
+    assert dialogue.service.snapshot(11)["settings"]["resume"]["name"] == "Candidate Example"
+    assert get_recovery(dialogue.service, 11)["kind"] == "resume_followup"
+    assert "Your turn: Tap Retry" in dialogue.output()
+    dialogue.planner.side_effect = None
+    dialogue.planner.return_value = {"operation": "reply", "reply": "What else should we know about your experience?"}
+    dialogue.clear()
+    dialogue.message("/retry")
+    assert "Please wait" in dialogue.output() and "Your turn:" in dialogue.output()
+    assert get_recovery(dialogue.service, 11) is None
+    assert dialogue.service.snapshot(11)["revision"] == revision
+    assert "first experience" not in dialogue.planner.call_args.args[0][-1]["content"]
+
+
+def test_followup_retry_does_not_reopen_completed_resume_step(dialogue):
+    from jobhunter_service.recovery import get_recovery
+    dialogue.message("/start")
+    proposal = dialogue.service.propose(11, {"resume": {"name": "Candidate Example"}})
+    dialogue.planner.side_effect = RuntimeError("synthetic failure")
+    dialogue.click("", data="jh:confirm:" + proposal["action_id"])
+    dialogue.message("/continue")
+    dialogue.click("jh:onboard:acknowledge:resume:")
+    calls = dialogue.planner.call_count
+    dialogue.clear()
+    dialogue.message("/retry")
+    assert dialogue.planner.call_count == calls
+    assert "Your turn — Next:" in dialogue.output()
+    assert dialogue.service.onboarding_status(11)["next_step"] == "roles"
+    assert get_recovery(dialogue.service, 11) is None
+
+
+def test_automatic_followup_cannot_propose_another_mutation(dialogue):
+    from jobhunter_service.recovery import get_recovery
+    dialogue.message("/start")
+    proposal = dialogue.service.propose(11, {"resume": {"name": "Candidate Example"}})
+    dialogue.planner.return_value = {"operation": "propose", "patch": {"resume": {"name": "Wrong Name"}}}
+    dialogue.clear()
+    dialogue.click("", data="jh:confirm:" + proposal["action_id"])
+    assert dialogue.service.snapshot(11)["settings"]["resume"]["name"] == "Candidate Example"
+    assert "Wrong Name" not in dialogue.output()
+    assert "Review the complete proposed changes" not in dialogue.output()
+    assert get_recovery(dialogue.service, 11)["kind"] == "resume_followup"
+
+
+def test_failed_wait_notice_does_not_call_model_or_create_model_recovery(dialogue):
+    from jobhunter_service.recovery import get_recovery
+    from jobhunter_service.telegram import TelegramAPIError
+    dialogue.message("/start")
+    dialogue.client.send_message.side_effect = TelegramAPIError("synthetic network failure")
+    with pytest.raises(TelegramAPIError):
+        dialogue.message("I built APIs in my previous role")
+    dialogue.planner.assert_not_called()
+    assert get_recovery(dialogue.service, 11) is None
+
+
+def test_download_failure_ends_wait_with_an_actionable_error(dialogue):
+    from jobhunter_service.resumes import ResumeImportError
+    dialogue.message("/start")
+    dialogue.clear()
+    dialogue.client.download_document.side_effect = ResumeImportError("Upload a readable resume.")
+    dialogue.message("", document={"file_id": "synthetic", "file_name": "resume.txt"})
+    assert "Please wait" in dialogue.output()
+    assert dialogue.client.send_message.call_args.args[1].startswith("Your turn: Upload a readable resume.")
+    dialogue.planner.assert_not_called()

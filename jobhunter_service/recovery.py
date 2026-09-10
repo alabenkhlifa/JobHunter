@@ -22,6 +22,12 @@ RESUME_RETRY_INTENT = (
     'I uploaded my resume. Begin refinement with one focused question about my '
     'first experience. Do not confirm any facts.'
 )
+RESUME_FOLLOWUP_INTENT = (
+    'My resume changes have been confirmed and saved. Continue the experience '
+    'interview with one new focused question, using my confirmed facts, uploaded '
+    'source and conversation so I do not repeat an answer. Return only a reply; '
+    'do not propose or save changes. I will choose Done reviewing when finished.'
+)
 
 
 def _initialize(db):
@@ -61,10 +67,12 @@ def save_recovery(service, actor_id, text, kind='message'):
     keeps its retry count and reference. A different intent replaces the old
     one. Resume recovery always refers to the separately staged source.
     """
-    if kind not in {'message', 'resume'}:
+    if kind not in {'message', 'resume', 'resume_followup'}:
         raise ValueError('Unsupported onboarding recovery request.')
     if kind == 'resume':
         text = RESUME_RETRY_INTENT
+    elif kind == 'resume_followup':
+        text = RESUME_FOLLOWUP_INTENT
     if (not isinstance(text, str) or not text.strip() or len(text) > MAX_MESSAGE_CHARS
             or contains_credentials(text)):
         raise ValueError('Send one short JobHunter request without credentials.')

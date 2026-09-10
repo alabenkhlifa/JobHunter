@@ -58,7 +58,7 @@ class Planner:
     def __init__(self):
         self.calls = []
 
-    def plan(self, text, snapshot):
+    def plan(self, text, snapshot, **kwargs):
         self.calls.append((text, snapshot['profile_id']))
         return {'operation': 'reply', 'reply': 'Scoped JobHunter response'}
 
@@ -344,7 +344,7 @@ def test_model_outage_is_visible_and_setup_commands_run_before_explicit_retry(sy
     assert ingress.drain_one()
     assert receipt(service, 5)['status'] == 'done'
     assert len(calls) == 2 and calls[-1][-1]['content'] == 'My job preferences'
-    assert any(text == 'Recovered scoped response' for _, text, _ in client.sends)
+    assert any(text == 'Your turn:\nRecovered scoped response' for _, text, _ in client.sends)
     assert get_recovery(service, 11) is None
     ingress.enqueue(message(6, text='/retry'))
     assert ingress.drain_one() and len(calls) == 2
@@ -388,13 +388,19 @@ def test_recovery_notice_delivery_failure_stays_queued_and_does_not_bypass_confi
     proposal = service.propose(11, {'schedule': {'time': '10:45'}})
     ingress.enqueue(message())
     ingress.enqueue(callback(2, data='jh:confirm:' + proposal['action_id']))
-    client.outage = True
+    send = client.send_message
+    fail_notice = [True]
+    def send_with_failed_notice(actor, text, reply_markup=None):
+        if fail_notice[0] and 'Support reference:' in text:
+            raise TelegramAPIError('Synthetic recovery notice delivery failure')
+        return send(actor, text, reply_markup)
+    client.send_message = send_with_failed_notice
     assert ingress.drain_one()
     assert receipt(service)['status'] == 'pending' and receipt(service, 2)['status'] == 'pending'
     assert service.store.member(11)['revision'] == 0 and not ingress.drain_one()
     failed = get_recovery(service, 11)
     assert failed['attempts'] == 0
-    client.outage = False
+    fail_notice[0] = False
     clock[0] = receipt(service)['next_attempt']
     assert ingress.drain_one() and receipt(service)['status'] == 'done'
     assert get_recovery(service, 11)['reference'] == failed['reference']
@@ -490,7 +496,7 @@ def test_inline_retry_is_private_reference_bound_and_recovers_after_delivery_ret
     clock[0] = receipt(service, 3)['next_attempt']
     assert ingress.drain_one() and receipt(service, 3)['status'] == 'done'
     assert get_recovery(service, 11) is None
-    assert [text for _, text, _ in client.sends].count('Recovered private reply') == 1
+    assert [text for _, text, _ in client.sends].count('Your turn:\nRecovered private reply') == 1
     delivered_calls = len(calls)
     assert ingress.enqueue(callback(3, data=button))['duplicate']
     assert not ingress.drain_one() and len(calls) == delivered_calls
@@ -505,8 +511,9 @@ def test_invalid_model_response_is_a_visible_validation_error_and_not_retried(sy
     ingress.enqueue(message())
     assert ingress.drain_one()
     assert receipt(service)['status'] == 'done'
-    assert len(client.sends) == 1
-    assert 'model' in client.sends[0][1].lower()
+    assert len(client.sends) == 2
+    assert 'Please wait' in client.sends[0][1]
+    assert 'model' in client.sends[-1][1].lower()
     assert not ingress.drain_one()
 
 

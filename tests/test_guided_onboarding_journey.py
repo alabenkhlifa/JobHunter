@@ -57,6 +57,7 @@ def test_beginner_configures_each_step_resumes_after_restart_and_recovers_from_m
         planner.side_effect = None
         planner.return_value = {'operation': 'propose', 'patch': patch}
         send(text)
+        planner.return_value = {'operation': 'reply', 'reply': 'What else should we review about your experience?'}
         click('jh:confirm:')
 
     send('/start')

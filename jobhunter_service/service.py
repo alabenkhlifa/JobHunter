@@ -396,6 +396,7 @@ class JobHunterService:
 
     def _confirm(self, actor_id, action_id):
         self._member(actor_id)
+        newly_applied, resume_changed = False, False
         with self.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             member_row = db.execute("SELECT * FROM members WHERE user_id=? AND status='active'", (actor_id,)).fetchone()
@@ -448,8 +449,11 @@ class JobHunterService:
                 db.execute('UPDATE actions SET consumed=2 WHERE id=?', (action_id,))
                 db.execute('INSERT INTO audit(actor,operation,target,created_at) VALUES(?,?,?,?)',
                            (actor_id, 'confirm_settings', actor_id, time.time()))
+                newly_applied = True
+                resume_changed = settings['resume'] != json.loads(member_row['settings'])['resume']
         self.materialize(self._member(actor_id))
-        return self.snapshot(actor_id)
+        return {**self.snapshot(actor_id), 'confirmation': {
+            'newly_applied': newly_applied, 'resume_changed': resume_changed}}
 
     def materialize(self, member):
         with self.mutation(member['user_id']):

@@ -320,9 +320,10 @@ class TelegramHandler:
             raise ValueError("The settings preview has an invalid confirmation identifier.")
         if not isinstance(preview, str) or not preview.strip() or len(preview) > _MAX_PREVIEW_CHARS:
             raise ValueError("This change is too large to review in Telegram. Propose one section at a time.")
-        self._send(actor_id, "Review the complete proposed changes:\n" + preview)
+        self._send(actor_id, "Your turn: Review the complete proposed changes:\n" + preview)
         # If any preceding message fails, there is no confirmation button.
-        self.client.send_message(actor_id, "Save these changes? Resume facts are confirmed only if you approve their exact public wording.", {
+        self.client.send_message(actor_id, "Your turn: Tap Confirm changes to save this wording, or reply with corrections. "
+                                 "Resume facts are confirmed only if you approve their exact public wording.", {
             "inline_keyboard": [[{"text": "Confirm changes", "callback_data": "jh:confirm:" + action_id}]]
         })
 
@@ -357,7 +358,7 @@ class TelegramHandler:
         elif state.get("complete"):
             lines.append("Your guided setup is complete. Use /status to check your schedule, /jobs for results, or describe a change.")
         elif state.get("next_question"):
-            lines.append("Next: " + state["next_question"])
+            lines.append("Your turn — Next: " + state["next_question"])
         current = next((step for step in steps if step["id"] == state.get("next_step")), None)
         if current and current.get("detail"):
             lines.append(current["label"] + "\n" + current["detail"])
@@ -370,8 +371,31 @@ class TelegramHandler:
         buttons = [{"text": labels[action], "callback_data": f"jh:onboard:{action}:{current['id']}:{state['revision']}"}
                    for action in current.get("actions", []) if action in labels]
         if buttons:
-            self.client.send_message(actor_id, "Choose when you are ready, or reply in your own words.",
+            self.client.send_message(actor_id, "Your turn: Choose a button below, or reply in your own words. I’m waiting for you.",
                                      {"inline_keyboard": [[button] for button in buttons]})
+
+    def _resume_review_choices(self, actor_id):
+        state = self._onboarding(actor_id)
+        if not isinstance(state, dict) or state.get("next_step") != "resume":
+            return
+        current = next((step for step in state.get("steps", []) if step["id"] == "resume"), {})
+        if "acknowledge" in current.get("actions", []):
+            self.client.send_message(actor_id, "Your turn: Answer the question above. If you have finished reviewing all "
+                "experiences or want to stop refinement, tap Done reviewing to continue setup.", {
+                "inline_keyboard": [[{"text": "Done reviewing",
+                    "callback_data": f"jh:onboard:acknowledge:resume:{state['revision']}"}]]})
+
+    def _after_confirmation(self, actor_id, result):
+        state = self._onboarding(actor_id)
+        receipt = result.get("confirmation", {}) if isinstance(result, dict) else {}
+        if (receipt.get("newly_applied") is True and receipt.get("resume_changed") is True
+                and isinstance(state, dict) and state.get("started") and state.get("next_step") == "resume"):
+            from .recovery import RESUME_FOLLOWUP_INTENT
+            self._plan(actor_id, RESUME_FOLLOWUP_INTENT, kind="resume_followup",
+                       waiting="Your changes are saved. I’m preparing your next interview question. "
+                               "Please wait—I’ll message you when it’s your turn.")
+        else:
+            self._guide(actor_id, state, introduction="Your changes are saved.")
 
     def _status(self, actor_id):
         snapshot = self.service.snapshot(actor_id)
@@ -394,20 +418,34 @@ class TelegramHandler:
             lines.append("Use /check linkedin, /check gmail or /check tracker to verify a connection now.")
         self._guide(actor_id, checklist=True, introduction="\n".join(lines))
 
-    def _plan(self, actor_id, text, *, kind="message", recovery=None):
+    def _plan(self, actor_id, text, *, kind="message", recovery=None, waiting=None, announce=True):
         from .recovery import clear_recovery, save_recovery
+        context = self._context(actor_id)
+        if kind == "resume_followup" and context.get("onboarding", {}).get("next_step") != "resume":
+            self._guide(actor_id, introduction="Your saved resume is safe. Continue your current setup step below.")
+            if recovery:
+                clear_recovery(self.service, actor_id, recovery["reference"])
+            return
+        waiting = waiting or ("I’m preparing your next interview question. Please wait." if kind == "resume_followup" else
+                              "Thanks. I’m reviewing your message and preparing the next step. Please wait.")
         try:
-            plan = self.assistant.plan(text, self._context(actor_id))
-        except HermesUnavailableError:
+            plan = self.assistant.plan(text, context,
+                on_wait=(lambda: self._send(actor_id, waiting)) if announce else None,
+                reply_only=kind == "resume_followup")
+        except (HermesUnavailableError, HermesResponseError) as error:
+            if isinstance(error, HermesResponseError) and kind != "resume_followup":
+                raise
             saved = save_recovery(self.service, actor_id, text, kind=kind)
-            self.client.send_message(actor_id, "The conversation service is temporarily unavailable. Your saved settings are safe. "
-                       "Use /retry to retry this step, /status to continue with the checklist, or /support for a report.\n"
+            draft = "Your resume draft is saved; you do not need to upload it again. " if kind == "resume" else "Your saved settings are safe. "
+            self.client.send_message(actor_id, "I couldn’t finish this step. The conversation service is temporarily unavailable. " + draft +
+                       "Your turn: Tap Retry this request or use /retry. You can also use /status for the checklist or /support for a report.\n"
                        "Support reference: " + saved["reference"], {"inline_keyboard": [[{
                            "text": "Retry this request", "callback_data": "jh:retry:" + saved["reference"]}]]})
             return
         self._execute(actor_id, plan)
         if not contains_credentials(text):
-            self.service.record_turn(actor_id, text if kind == "message" else "Uploaded resume for refinement",
+            self.service.record_turn(actor_id, text if kind == "message" else
+                                     "Resume changes confirmed; continue the interview" if kind == "resume_followup" else "Uploaded resume for refinement",
                                      plan.get("reply", {"propose": "Proposed changes await exact confirmation.",
                                                         "connect": "A private connection link was provided.",
                                                         "show": "Displayed the current setup checklist."}.get(plan["operation"], "")))
@@ -444,14 +482,15 @@ class TelegramHandler:
             if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError("The connection service did not return a secure link.")
             label = "LinkedIn" if plan["provider"] == "linkedin" else "Gmail" if plan["purpose"] == "gmail" else "tracker"
-            self.client.send_message(actor_id, "Open your private connection link. Enter credentials only on the account provider's page; never send them to Telegram. "
+            self.client.send_message(actor_id, "Your turn: Open your private connection link. Enter credentials only on the account provider's page; never send them to Telegram. "
                                      "After signing in, return here and use /check " + ("linkedin" if plan["provider"] == "linkedin" else plan["purpose"]) + " to verify the connection.", {
                 "inline_keyboard": [[{"text": "Connect " + label, "url": link}]]
             })
         elif plan["operation"] == "show":
             self._status(actor_id)
         else:
-            self._send(actor_id, plan["reply"])
+            self._send(actor_id, "Your turn:\n" + plan["reply"])
+            self._resume_review_choices(actor_id)
 
     def _handle_private(self, actor_id: int, message: dict, callback: dict | None) -> None:
         text = message.get("text", "")
@@ -486,6 +525,8 @@ class TelegramHandler:
             guided = _ONBOARDING.fullmatch(data) if isinstance(data, str) else None
             if guided:
                 action, step, revision = guided.groups()
+                if action == "check":
+                    self._send(actor_id, f"I’m checking your {step.title()} connection. Please wait—I’ll send the result here.")
                 result = self.service.onboarding_action(actor_id, action, step, int(revision))
                 if "action_id" in result:
                     self._preview(actor_id, result)
@@ -498,14 +539,14 @@ class TelegramHandler:
                 return
             if not isinstance(data, str) or not data.startswith("jh:confirm:") or not _ACTION_ID.fullmatch(data[11:]):
                 raise ValueError("This action is unavailable. Use /status to continue.")
-            self.service.confirm(actor_id, data[11:])
+            result = self.service.confirm(actor_id, data[11:])
             try:
                 self.client.answer_callback(callback["id"], "Changes saved")
             except TelegramAPIError:
                 # Telegram expires callback acknowledgements quickly. Saving
                 # succeeded, so still send the durable outcome to the chat.
                 pass
-            self._guide(actor_id, introduction="Your changes are saved.")
+            self._after_confirmation(actor_id, result)
             return
         command = text.strip().split(" ", 1)[0].split("@", 1)[0].lower()
         if command in {"/start", "/onboarding", "/continue"}:
@@ -529,6 +570,7 @@ class TelegramHandler:
             parts = text.split()
             if len(parts) != 2 or parts[1].lower() not in {"linkedin", "gmail", "tracker"}:
                 raise ValueError("Use /check linkedin, /check gmail or /check tracker.")
+            self._send(actor_id, f"I’m checking your {parts[1].title()} connection. Please wait—I’ll send the result here.")
             self.service.check_connection(actor_id, parts[1].lower())
             self._status(actor_id)
             return
@@ -546,8 +588,8 @@ class TelegramHandler:
             parts = text.split()
             if len(parts) != 2 or parts[0].split("@", 1)[0] != "/confirm" or not _ACTION_ID.fullmatch(parts[1]):
                 raise ValueError("Use the confirmation button below the complete settings preview.")
-            self.service.confirm(actor_id, parts[1])
-            self._guide(actor_id, introduction="Your changes are saved.")
+            result = self.service.confirm(actor_id, parts[1])
+            self._after_confirmation(actor_id, result)
             return
         if "document" in message:
             document = message["document"]
@@ -556,14 +598,15 @@ class TelegramHandler:
             filename = document.get("file_name", "")
             if not isinstance(filename, str) or Path(filename).suffix.lower() not in {".pdf", ".docx", ".txt"}:
                 raise ResumeImportError("Upload a PDF, DOCX, or UTF-8 text resume.")
+            self._send(actor_id, "Resume received. I’m reading it and preparing your first question. "
+                       "Please wait—I’ll message you when it’s your turn. "
+                       "Its contents remain an unconfirmed draft until you approve the wording.")
             source = import_resume(self.client.download_document(document), filename, document.get("mime_type"))
             self.service.stage_resume(actor_id, source)
             snapshot = self.service.snapshot(actor_id)
             if not snapshot.get("settings", {}).get("schedule", {}).get("enabled"):
                 self._onboarding(actor_id, start=True)
-            self._send(actor_id, "Your resume is saved as an unconfirmed draft. We will review one experience at a time. "
-                       "Confirm exact public wording before it is used; choose Done reviewing only when you have reviewed all experiences or explicitly want to stop refinement.")
-            self._plan(actor_id, "I uploaded my resume. Begin refinement with one focused question about my first experience. Do not confirm any facts.", kind="resume")
+            self._plan(actor_id, "I uploaded my resume. Begin refinement with one focused question about my first experience. Do not confirm any facts.", kind="resume", announce=False)
             return
         if not text:
             self._send(actor_id, "Send a text message or upload your resume as PDF, DOCX, or text.")
@@ -600,7 +643,7 @@ class TelegramHandler:
             if (contains_credentials(explanation) or "api.telegram.org" in explanation or len(explanation) > 600
                     or re.search(r"/(?:home|etc|opt|Users|var)/|Traceback|Bearer\s", explanation)):
                 explanation = "The request could not be processed. Your credentials were not shared. Use /status to continue."
-            self._send(actor_id, explanation + "\nUse /status for your current step or /support for a safe report.")
+            self._send(actor_id, "Your turn: " + explanation + "\nUse /status for your current step or /support for a safe report.")
             if callback is not None:
                 self._guide(actor_id)
         # Network/transient failures deliberately do not acknowledge an update.

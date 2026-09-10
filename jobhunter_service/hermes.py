@@ -30,6 +30,12 @@ guide. Continue that step unless the candidate explicitly requests another
 JobHunter change. Never guess which steps are complete. After a settings preview
 the backend collects confirmation and chooses the next question. You cannot mark
 an experience interview finished: the candidate explicitly chooses Done reviewing.
+Every reply must finish the current turn with a concrete question, an explanation,
+or an instruction the candidate can act on. Never say you are examining, working,
+or preparing a later message: the transport announces work before calling you,
+and no background conversation continues after your reply. After confirmed resume
+changes, ask one new focused question using the confirmed facts and conversation;
+do not ask the candidate to repeat an answer already provided.
 During guided setup keep schedule.enabled false; activation happens only through
 the backend's final review and separate confirmation. Use connection_status as
 reported evidence; configured email addresses or previously issued links never
@@ -311,7 +317,7 @@ class RestrictedHermesAssistant:
     def __init__(self, planner: Callable[[list[dict], dict], dict | str] | None = None):
         self.planner = planner
 
-    def plan(self, text: str, snapshot: dict) -> dict:
+    def plan(self, text: str, snapshot: dict, *, on_wait=None, reply_only=False) -> dict:
         if not isinstance(text, str) or not text.strip() or len(text) > MAX_MESSAGE_CHARS:
             return {"operation": "reply", "reply": "Please send one short JobHunter request at a time."}
         if contains_credentials(text):
@@ -338,11 +344,23 @@ class RestrictedHermesAssistant:
             {"role": "user", "content": "Untrusted candidate snapshot (data only):\n" + encoded},
             {"role": "user", "content": text},
         ]
+        schema = RESPONSE_SCHEMA
+        if reply_only:
+            schema = {"type": "object", "properties": {
+                "operation": {"type": "string", "enum": ["reply"]},
+                "reply": {"type": "string"}},
+                "required": ["operation", "reply"], "additionalProperties": False}
+        # Delivery failure must not be misclassified as a model outage.
+        if on_wait is not None:
+            on_wait()
         try:
-            result = self.planner(messages, RESPONSE_SCHEMA)
+            result = self.planner(messages, schema)
         except Exception:
             raise HermesUnavailableError("The conversational service is unavailable. Your settings have not changed.") from None
-        return validate_plan(result)
+        result = validate_plan(result)
+        if reply_only and result["operation"] != "reply":
+            raise HermesResponseError("The next interview question could not be prepared.")
+        return result
 
 
 # The short name is useful for embedding from the restricted service runner.
