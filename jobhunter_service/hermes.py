@@ -93,6 +93,10 @@ class HermesResponseError(ValueError):
     """An isolated model returned an unsupported or unsafe operation."""
 
 
+class HermesUnavailableError(RuntimeError):
+    """A model/provider failure that must leave the incoming request retryable."""
+
+
 def contains_credentials(text: str) -> bool:
     return bool(re.search(
         r"(?:password|passcode|otp|verification\s+code|access[_ ]?token|refresh[_ ]?token|"
@@ -273,7 +277,7 @@ class RestrictedHermesAssistant:
         try:
             result = self.planner(messages, RESPONSE_SCHEMA)
         except Exception:
-            raise HermesResponseError("The conversational service is unavailable. Your settings have not changed.") from None
+            raise HermesUnavailableError("The conversational service is unavailable. Your settings have not changed.") from None
         return validate_plan(result)
 
 

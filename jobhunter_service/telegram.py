@@ -375,21 +375,24 @@ class TelegramHandler:
                 "show": "Displayed the candidate's current JobHunter settings.",
             }.get(plan["operation"], "")))
 
-    def handle_update(self, update: dict) -> None:
+    def handle_update(self, update: dict, *, use_offset: bool = True) -> None:
         """Handle one update obtained from the authenticated Bot API poller.
 
         This is not an unauthenticated webhook endpoint. The persistent offset
         rejects redelivery after a completed update. Backend confirmations must
-        also be idempotent to cover crashes after applying an action.
+        also be idempotent to cover crashes after applying an action. Durable
+        shared-bot ingress uses its own per-update receipts and passes
+        ``use_offset=False`` so reordered forwarded updates are not discarded.
         """
         if not isinstance(update, dict) or not _integer(update.get("update_id")) or update["update_id"] < 0:
             return
         update_id = update["update_id"]
-        if update_id < self.service.get_update_offset():
+        if use_offset and update_id < self.service.get_update_offset():
             return
         private = _private_actor(update)
         if private is None:
-            self.service.acknowledge_update(update_id)
+            if use_offset:
+                self.service.acknowledge_update(update_id)
             return
         actor_id, message, callback = private
         try:
@@ -402,7 +405,8 @@ class TelegramHandler:
                 explanation = "The request could not be processed. Your credentials were not shared. Use /status to continue."
             self._send(actor_id, explanation)
         # Network/transient failures deliberately do not acknowledge an update.
-        self.service.acknowledge_update(update_id)
+        if use_offset:
+            self.service.acknowledge_update(update_id)
 
     def poll_once(self) -> int:
         updates = self.client.get_updates(self.service.get_update_offset())
@@ -436,5 +440,5 @@ def polling_lock(path: str | Path):
         os.close(descriptor)
 
 
-def handle_update(update: dict, service: JobHunterService, client=None, assistant=None) -> None:
-    TelegramHandler(service, client or service.telegram_client, assistant).handle_update(update)
+def handle_update(update: dict, service: JobHunterService, client=None, assistant=None, *, use_offset=True) -> None:
+    TelegramHandler(service, client or service.telegram_client, assistant).handle_update(update, use_offset=use_offset)

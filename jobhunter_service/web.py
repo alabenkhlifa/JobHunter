@@ -33,7 +33,7 @@ async def safe_responses(request, handler):
     return response
 
 
-def create_app(service, *, google_client=None, admin_token=None):
+def create_app(service, *, google_client=None, admin_token=None, telegram_ingress=None):
     app = web.Application(middlewares=[safe_responses], client_max_size=65536)
 
     async def health(request):
@@ -49,6 +49,22 @@ def create_app(service, *, google_client=None, admin_token=None):
         # The trusted admin transport supplies the owner identity, never request JSON.
         result = await asyncio.to_thread(service.admin, service.owner_id, data['operation'], data.get('user_id'))
         return web.json_response(result)
+
+    async def internal_telegram(request):
+        supplied = request.headers.get('Authorization', '')
+        if not admin_token or not hmac.compare_digest(supplied.encode(), ('Bearer ' + admin_token).encode()):
+            raise PermissionError
+        if telegram_ingress is None:
+            raise web.HTTPServiceUnavailable(text='Shared Telegram ingress is not configured.')
+        from .telegram_ingress import IngressConflict
+        try:
+            update = await request.json()
+            receipt = await asyncio.to_thread(telegram_ingress.enqueue, update)
+        except IngressConflict:
+            raise web.HTTPConflict(text='This update ID already has different content.') from None
+        except (RecursionError, UnicodeError):
+            raise ValueError('Invalid Telegram update.') from None
+        return web.json_response(receipt, status=202)
 
     async def google_start(request):
         if google_client is None:
@@ -168,6 +184,7 @@ def create_app(service, *, google_client=None, admin_token=None):
 
     app.router.add_get('/health', health)
     app.router.add_post('/admin', admin)
+    app.router.add_post('/internal/telegram', internal_telegram)
     app.router.add_get('/connect/google', google_start)
     app.router.add_get('/oauth/google/callback', google_callback)
     app.router.add_get('/connect/browser', browser_start)

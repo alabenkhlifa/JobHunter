@@ -305,7 +305,7 @@ git status --short
 
 ## Invited Telegram profiles
 
-The optional `jobhunter_service` runs a separate Telegram bot for invited candidates. The existing owner CLI, Hermes gateway, cron jobs and browser remain independent. The owner registers a **numeric Telegram user ID** through `/jobhunter add <id>` in the service bot or the Pi's `jobhunter-admin` Hermes skill. A candidate activates the invitation by starting a private conversation with the bot.
+The optional `jobhunter_service` supports invited candidates through the owner's existing Telegram bot. Hermes remains the sole Telegram receiver and forwards candidate updates to a restricted service before its administrative handlers. The owner's normal conversations, CLI, cron jobs and browser keep their existing behavior. The owner registers a **numeric Telegram user ID** through `/jobhunter add <id>` or the Pi's `jobhunter-admin` Hermes skill. A candidate activates the invitation by starting a private conversation with the same bot. Keep the administrative Hermes allowlist restricted to the owner.
 
 Candidates upload a PDF, DOCX or text resume and refine it conversationally with a restricted Hermes planner. Each configuration change receives an exact preview and a confirmation button. The backend binds identity to the Telegram sender; model output cannot register users, execute commands, confirm facts or access another profile. Search settings, credentials, job history, documents, schedules and delivery queues live in private `u<telegram_id>` directories beneath the service data root.
 
@@ -319,6 +319,6 @@ Owner suspension/revocation pauses searches and invalidates access links, pendin
 
 Each outbox retry checks listing availability again. An inconclusive check keeps the unsent remainder pending. Confirmed closure cancels the remaining copies of that digest; it does not send an outdated listing to another destination.
 
-See [setup.md](setup.md#14-restricted-multi-user-service-on-the-pi) for installation, required operator settings and recovery. This service requires its own bot token, HTTPS endpoint, Google web OAuth client when used, and dedicated model credentials before it can run.
+See [setup.md](setup.md#14-restricted-multi-user-service-on-the-pi) for installation, required operator settings and recovery. Telegram onboarding reuses the owner's bot and model login. Google consent and private browser login additionally require a reachable HTTPS endpoint; Google integrations also need a web OAuth client.
 
-The restricted Hermes planner accepts API-key providers `openai`, `openai-api`, `openrouter`, `anthropic`, `gemini` and `custom`. It supplies the dedicated key only inside the disposable planner process; owner OAuth sessions and command-based providers are not used.
+An owner-only local credential service resolves the current Hermes model/provider and refreshes the original credential pool. The restricted planner receives only the effective access credential in memory, including support for the owner's `openai-codex` OAuth login. Each request runs in a disposable Hermes home with tools, owner files, memory and history disabled. Candidate updates are acknowledged after durable local storage and retried independently of the owner's Telegram polling offset. A standalone bot and explicit API-key provider remain optional deployment modes.

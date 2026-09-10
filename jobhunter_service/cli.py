@@ -12,6 +12,13 @@ import requests
 from aiohttp import web
 
 
+def telegram_mode():
+    mode = os.environ.get('JOBHUNTER_TELEGRAM_MODE', 'polling')
+    if mode not in {'shared', 'polling'}:
+        raise ValueError('JOBHUNTER_TELEGRAM_MODE must be shared or polling.')
+    return mode
+
+
 def configured_service():
     from .browser import DockerBrowserManager
     from .hermes_runner import HermesPlanner
@@ -20,8 +27,11 @@ def configured_service():
 
     required = ['JOBHUNTER_SERVICE_BOT_TOKEN', 'JOBHUNTER_OWNER_TELEGRAM_USER_ID',
                 'JOBHUNTER_SERVICE_DATA_ROOT', 'JOBHUNTER_ADMIN_TOKEN',
-                'JOBHUNTER_HERMES_PYTHON', 'JOBHUNTER_HERMES_SOURCE', 'JOBHUNTER_MODEL',
-                'JOBHUNTER_MODEL_PROVIDER', 'JOBHUNTER_MODEL_API_KEY']
+                'JOBHUNTER_HERMES_PYTHON', 'JOBHUNTER_HERMES_SOURCE']
+    telegram_mode()
+    shared_auth = os.environ.get('JOBHUNTER_OWNER_AUTH_SOCKET')
+    if not shared_auth:
+        required += ['JOBHUNTER_MODEL', 'JOBHUNTER_MODEL_PROVIDER', 'JOBHUNTER_MODEL_API_KEY']
     missing = [key for key in required if not os.environ.get(key)]
     if missing:
         raise ValueError('Missing operator settings: ' + ', '.join(missing))
@@ -33,9 +43,14 @@ def configured_service():
     service = JobHunterService(os.environ['JOBHUNTER_SERVICE_DATA_ROOT'],
         int(os.environ['JOBHUNTER_OWNER_TELEGRAM_USER_ID']),
         public_url=os.environ.get('JOBHUNTER_PUBLIC_URL', ''), telegram_client=client, browser_manager=browsers)
-    planner = HermesPlanner(os.environ['JOBHUNTER_HERMES_PYTHON'], os.environ['JOBHUNTER_HERMES_SOURCE'],
-        model=os.environ['JOBHUNTER_MODEL'], provider=os.environ['JOBHUNTER_MODEL_PROVIDER'],
-        api_key=os.environ['JOBHUNTER_MODEL_API_KEY'], base_url=os.environ.get('JOBHUNTER_MODEL_BASE_URL'))
+    if shared_auth:
+        from .hermes_runner import SharedOwnerPlanner
+        planner = SharedOwnerPlanner(os.environ['JOBHUNTER_HERMES_PYTHON'],
+            os.environ['JOBHUNTER_HERMES_SOURCE'], shared_auth)
+    else:
+        planner = HermesPlanner(os.environ['JOBHUNTER_HERMES_PYTHON'], os.environ['JOBHUNTER_HERMES_SOURCE'],
+            model=os.environ['JOBHUNTER_MODEL'], provider=os.environ['JOBHUNTER_MODEL_PROVIDER'],
+            api_key=os.environ['JOBHUNTER_MODEL_API_KEY'], base_url=os.environ.get('JOBHUNTER_MODEL_BASE_URL'))
     return service, client, planner
 
 
@@ -44,18 +59,24 @@ def serve():
     from .scheduler import Scheduler
     from .telegram import polling_lock
     from .web import create_app
+    mode = telegram_mode()
     service, client, planner = configured_service()
     stop = threading.Event()
     scheduler = Scheduler(service, planner, client)
     # Optional application facade is installed only after dependencies import.
     from .dispatch import ApplicationTelegramHandler
     handler = ApplicationTelegramHandler(service, client, RestrictedHermesAssistant(planner), scheduler)
+    ingress = None
+    if mode == 'shared':
+        from .telegram_ingress import TelegramIngress
+        ingress = TelegramIngress(service, handler)
     google_client = None
     if os.environ.get('JOBHUNTER_GOOGLE_WEB_CLIENT'):
         from jobhunter_integrations.web_oauth import GoogleOAuthClient
         google_client = GoogleOAuthClient(os.environ['JOBHUNTER_GOOGLE_WEB_CLIENT'],
                                          service.public_url + '/oauth/google/callback')
-    app = create_app(service, google_client=google_client, admin_token=os.environ['JOBHUNTER_ADMIN_TOKEN'])
+    app = create_app(service, google_client=google_client, admin_token=os.environ['JOBHUNTER_ADMIN_TOKEN'],
+                     telegram_ingress=ingress)
 
     def polling():
         while not stop.is_set():
@@ -72,6 +93,15 @@ def serve():
             except Exception as error:
                 logging.getLogger('jobhunter').warning('Background operation failed (%s); pending work retained.', type(error).__name__)
             stop.wait(20)
+
+    def incoming():
+        while not stop.is_set():
+            try:
+                if ingress.drain_one():
+                    continue
+            except Exception as error:
+                logging.getLogger('jobhunter').warning('Telegram processing failed (%s); update retained.', type(error).__name__)
+            stop.wait(1)
 
     def work():
         scheduler.recover()
@@ -94,7 +124,8 @@ def serve():
             stop.wait(60)
 
     with polling_lock(service.root / 'service' / 'daemon.lock'):
-        threads = [threading.Thread(target=target, daemon=True) for target in (polling, scheduling, work, monitoring)]
+        receiver = incoming if mode == 'shared' else polling
+        threads = [threading.Thread(target=target, daemon=True) for target in (receiver, scheduling, work, monitoring)]
         for thread in threads:
             thread.start()
         try:

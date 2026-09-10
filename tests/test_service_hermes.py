@@ -5,6 +5,7 @@ import pytest
 
 from jobhunter_service.hermes import (
     HermesResponseError,
+    HermesUnavailableError,
     RestrictedHermesAssistant,
     contains_credentials,
     validate_plan,
@@ -80,7 +81,7 @@ def test_credentials_are_detected(text):
 
 def test_model_error_details_are_not_propagated():
     planner = Mock(side_effect=RuntimeError("secret-provider-key and owner files"))
-    with pytest.raises(HermesResponseError) as error:
+    with pytest.raises(HermesUnavailableError) as error:
         RestrictedHermesAssistant(planner).plan("Change my preferences", {})
     assert "secret-provider-key" not in str(error.value)
 
