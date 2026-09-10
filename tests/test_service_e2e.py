@@ -44,12 +44,20 @@ class Conversation:
     def __init__(self, root):
         self.transport = TelegramTransport()
         self.service = JobHunterService(root, 1, telegram_client=self.transport)
+        # OAuth itself is covered separately; this synthetic conversation treats
+        # configured enabled Google accounts as having completed a mocked grant.
+        self.service.connection_status = self.connection_status
         self.next_plan = {"operation": "reply", "reply": "What did you build in your first experience?"}
         self.handler = TelegramHandler(self.service, self.transport, RestrictedHermesAssistant(self.planner))
         self.counter = 0
 
     def planner(self, messages, schema):
         return copy.deepcopy(self.next_plan)
+
+    def connection_status(self, actor):
+        settings = json.loads(self.service.store.member(actor)["settings"])
+        return {provider: {"status": "connected" if provider != "linkedin" and settings["accounts"][provider]["enabled"] else "unavailable",
+                           "message": "Synthetic connection evidence."} for provider in ("linkedin", "gmail", "tracker")}
 
     def message(self, actor, text, **fields):
         self.counter += 1
@@ -98,7 +106,23 @@ def invite_and_configure(conversation, user):
     conversation.message(user, "Configure my confirmed resume, preferences, accounts and schedule")
     assert conversation.service.snapshot(user)["settings"]["schedule"]["enabled"] is False
     conversation.confirm(user)
+    finish_guided_setup(conversation, user)
     assert conversation.service.snapshot(user)["settings"]["schedule"]["enabled"] is True
+
+
+def finish_guided_setup(conversation, user):
+    for _ in range(12):
+        state = conversation.service.onboarding_status(user)
+        if state["complete"]:
+            return
+        step = next(item for item in state["steps"] if item["id"] == state["next_step"])
+        operation = "activate" if "activate" in step["actions"] else "acknowledge" if "acknowledge" in step["actions"] else "skip"
+        assert operation in step["actions"]
+        conversation.confirm(user, f"jh:onboard:{operation}:{step['id']}:{state['revision']}")
+        if operation == "activate":
+            assert not conversation.service.snapshot(user)["settings"]["schedule"]["enabled"]
+            conversation.confirm(user)
+    raise AssertionError("Guided setup did not finish")
 
 
 def test_two_candidates_onboard_confirm_schedule_and_retry_separate_deliveries(tmp_path, monkeypatch):
@@ -128,6 +152,8 @@ def test_two_candidates_onboard_confirm_schedule_and_retry_separate_deliveries(t
     conversation.next_plan = {"operation": "propose", "patch": patch_for(22)}
     conversation.message(22, "Configure my own resume and evening search")
     conversation.confirm(22)
+    finish_guided_setup(conversation, 11)
+    finish_guided_setup(conversation, 22)
     first = conversation.service.snapshot(11)["settings"]
     second = conversation.service.snapshot(22)["settings"]
     assert first["schedule"]["time"] == "09:00" and second["schedule"]["time"] == "20:00"

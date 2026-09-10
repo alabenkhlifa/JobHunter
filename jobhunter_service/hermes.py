@@ -25,6 +25,25 @@ access tokens, OAuth codes or other credentials in Telegram. Use account links.
 Ask one focused question at a time. Support resumable resume refinement, matching
 preferences, job destinations, work authorization per destination, relocation,
 timezone and schedule, delivery channels and message presentation, and optional Google integrations.
+The saved onboarding.next_step and onboarding.next_question are the canonical
+guide. Continue that step unless the candidate explicitly requests another
+JobHunter change. Never guess which steps are complete. After a settings preview
+the backend collects confirmation and chooses the next question. You cannot mark
+an experience interview finished: the candidate explicitly chooses Done reviewing.
+During guided setup keep schedule.enabled false; activation happens only through
+the backend's final review and separate confirmation. Use connection_status as
+reported evidence; configured email addresses or previously issued links never
+prove that an account is connected. If optional Google/browser services are
+unavailable, explain the supplied reason and that this optional step may be skipped.
+On failure suggest /retry, /status or /support; never offer to change infrastructure.
+For a fresh account check, explain /check linkedin, /check gmail or /check tracker.
+Only those explicit commands or backend buttons run the bounded connection check.
+At the roles step distinguish search.keywords (phrases actually searched) from
+search.matching.preferred_roles (matching preferences). When the candidate agrees
+which roles to search for, propose the actual search.keywords as well as the
+matching preferences they requested. If preferred_roles are already confirmed
+but keywords are missing, ask whether to use those roles as search phrases; do
+not restart the same role interview. Every proposed field still needs confirmation.
 Recommend a dedicated job application Gmail and sharing its Google Sheet and
 document folder with the personal account. Gmail monitoring is optional and
 separate from tracker authorization. Travel visas never establish work rights.
@@ -103,7 +122,29 @@ _PRIVATE_KEY = re.compile(r"password|secret|token|cookie|credential|private_key|
 _FORBIDDEN_KEY = re.compile(r"^(?:candidate_id|owner_id|actor_id|user_id|telegram_user_id|database|db_path|path|command|shell|tools|home|cron_command|action_id|confirmed_at|confirmed_by|trusted)$", re.I)
 _CONTEXT_KEYS = {"profile", "config", "settings", "search", "schedule", "telegram", "accounts", "resume",
                  "resume_source", "resume_draft", "draft", "pending", "onboarding", "readiness",
-                 "history", "conversation", "status", "next_run", "next_question"}
+                 "history", "conversation", "status", "next_run", "next_question", "connection_status", "connections"}
+
+HELP_TEXT = """JobHunter helps you set up your own job search in this private chat.
+
+/onboarding or /continue — continue your saved setup, one question at a time
+/status — check completed steps, missing details and your search schedule
+Upload a PDF, DOCX or text resume (up to 8 MiB); review each experience and confirm exact wording before it is used.
+Describe roles, skills, destinations, work authorization and relocation needs in plain language.
+/schedule 20:00 Africa/Tunis weekdays — preview your local search time
+/pause — preview pausing searches; /resume — review activation or resume searches
+/connect linkedin, /connect gmail or /connect tracker — open your private sign-in link
+/check linkedin, /check gmail or /check tracker — verify a connection now
+Google and LinkedIn connections are optional. A separate jobs Gmail can own your tracker and share it with your personal email. Email monitoring is optional.
+
+/jobs — see collected jobs; /details <job_id> — view a listing
+/interested <job_id> — research it; /apply <job_id> — prepare documents
+/inspect <job_id> — inspect your application page
+/upload <job_id> and /submit <job_id> — request separate exact approvals
+/tracker — synchronize or open your application tracker; /logout — close your browser session
+/retry — retry your last failed conversation request, with a fresh preview
+/support — get a safe report you can share with the owner
+
+You can stop here and return with /continue. New setup searches remain paused until final review and confirmation. Never send passwords, cookies or verification codes in chat."""
 
 
 class HermesResponseError(ValueError):
@@ -255,7 +296,7 @@ def _command(text: str) -> dict | None:
             return {"operation": "connect", "provider": provider, "purpose": purpose}
         return {"operation": "reply", "reply": "Use /connect tracker, /connect gmail, or /connect linkedin. Enter credentials only on the secure connection page."}
     if command in {"/help", "/start"}:
-        return {"operation": "reply", "reply": "Welcome to JobHunter. Upload your resume as PDF, DOCX, or text to begin. We will review the facts before using them. You can describe roles, destinations and work authorization, then choose your timezone and schedule. I recommend a separate jobs Gmail, with its tracker shared to your personal account; email monitoring is optional. Use /status to resume, /pause to pause searches, and /connect for account links. Never send passwords or verification codes here."}
+        return {"operation": "reply", "reply": HELP_TEXT}
     return None
 
 

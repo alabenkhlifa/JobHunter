@@ -65,6 +65,8 @@ class ApplicationTelegramHandler(TelegramHandler):
                     self.service.browser_manager.stop(member['profile_id'])
                 with self.service.store.connect() as db:
                     db.execute("UPDATE tokens SET consumed=1 WHERE user_id=? AND purpose IN ('browser_session','browser_connect','application_approval')", (actor_id,))
+                from .connections import clear_connection
+                clear_connection(self.service, actor_id, 'linkedin')
                 self._send(actor_id, 'Your browser session is closed. Its private login profile is retained for your next connection.')
             return
         return super()._handle_private(actor_id, message, callback)

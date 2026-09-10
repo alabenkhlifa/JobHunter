@@ -138,6 +138,18 @@ def test_independent_calls_do_not_retain_previous_candidate_context():
     assert "Candidate Second" in json.dumps(planner.call_args.args[0])
 
 
+def test_guided_roles_context_preserves_canonical_missing_search_phrase_question():
+    planner = Mock(return_value={"operation": "reply", "reply": "Should I search for Backend Engineer?"})
+    assistant = RestrictedHermesAssistant(planner)
+    question = "Your matching role is Backend Engineer. Which search phrases should collect jobs?"
+    assistant.plan("Continue", {"onboarding": {"next_step": "roles", "next_question": question},
+        "settings": {"search": {"keywords": [], "matching": {"preferred_roles": ["Backend Engineer"]}}}})
+    messages = planner.call_args.args[0]
+    context = json.loads(messages[1]["content"].split("\n", 1)[1])
+    assert context["onboarding"]["next_question"] == question
+    assert context["settings"]["search"]["keywords"] == []
+
+
 def test_late_experience_in_long_resume_reaches_planner_intact():
     planner = Mock(return_value={"operation": "reply", "reply": "What did you build in your first role?"})
     source = "Earlier experience. " * 1500 + "Late experience: maintained the payment service."

@@ -1,5 +1,6 @@
 """Configuration and receiver selection for shared owner integrations."""
 import sys
+import json
 import threading
 from unittest.mock import Mock
 
@@ -43,6 +44,18 @@ def test_standalone_mode_still_requires_explicit_model_settings(settings):
         cli.configured_service()
 
 
+@pytest.mark.parametrize('valid', [False, True])
+def test_google_availability_comes_from_valid_operator_web_client(settings, monkeypatch, valid):
+    monkeypatch.setenv('JOBHUNTER_OWNER_AUTH_SOCKET', str(settings / 'auth.sock'))
+    monkeypatch.setenv('JOBHUNTER_PUBLIC_URL', 'https://jobs.example.test')
+    path = settings / 'google-client.json'
+    path.write_text(json.dumps({'web': {'client_id': 'synthetic-client', 'client_secret': 'synthetic-secret',
+        'redirect_uris': ['https://jobs.example.test/oauth/google/callback' if valid else 'https://other.example.test/callback']}}))
+    monkeypatch.setenv('JOBHUNTER_GOOGLE_WEB_CLIENT', str(path))
+    service, _, _ = cli.configured_service()
+    assert service.google_enabled is valid
+
+
 def test_bad_receiver_mode_fails_before_initialization(settings, monkeypatch):
     monkeypatch.setenv('JOBHUNTER_TELEGRAM_MODE', 'both')
     configured = Mock()
@@ -56,7 +69,7 @@ def test_bad_receiver_mode_fails_before_initialization(settings, monkeypatch):
 def test_only_the_selected_telegram_receiver_is_started(settings, monkeypatch, mode, receiver):
     monkeypatch.setenv('JOBHUNTER_TELEGRAM_MODE', mode)
     (settings / 'service').mkdir()
-    service = Mock(root=settings, public_url='')
+    service = Mock(root=settings, public_url='', google_enabled=False)
     monkeypatch.setattr(cli, 'configured_service', lambda: (service, Mock(), Mock()))
     scheduler = Mock()
     monkeypatch.setattr('jobhunter_service.scheduler.Scheduler', Mock(return_value=scheduler))

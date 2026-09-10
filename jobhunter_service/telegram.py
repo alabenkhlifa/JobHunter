@@ -16,12 +16,14 @@ from urllib.parse import urlsplit
 
 import requests
 
-from .hermes import HermesResponseError, RestrictedHermesAssistant, contains_credentials
+from .hermes import HELP_TEXT, HermesResponseError, HermesUnavailableError, RestrictedHermesAssistant, contains_credentials
 from .resumes import MAX_UPLOAD_BYTES, ResumeImportError, import_resume
 
 _API_ROOT = "https://api.telegram.org"
 _ACTION_ID = re.compile(r"^[A-Za-z0-9_-]{12,48}$")
 _MAX_PREVIEW_CHARS = 24_000
+_ONBOARDING = re.compile(r"^jh:onboard:(acknowledge|skip|reopen|activate|check):(resume|roles|markets|schedule|delivery|linkedin|gmail|tracker|review):([0-9]{1,20})$")
+_RETRY = re.compile(r"^jh:retry:(JH-[A-F0-9]{12})$")
 
 
 class JobHunterService(Protocol):
@@ -35,6 +37,8 @@ class JobHunterService(Protocol):
     def get_update_offset(self) -> int: ...
     def acknowledge_update(self, update_id: int) -> None: ...
     def record_turn(self, actor_id: int, user_text: str, assistant_text: str) -> None: ...
+    def onboarding_status(self, actor_id: int, *, start: bool = False) -> dict: ...
+    def onboarding_action(self, actor_id: int, action: str, step: str, revision: int) -> dict: ...
 
 
 class TelegramAPIError(RuntimeError):
@@ -269,6 +273,31 @@ def _private_actor(update: dict) -> tuple[int, dict, dict | None] | None:
     return actor_id, message, callback
 
 
+def readable_fields(value, *, depth=0) -> str:
+    """Render every supplied value; lists explicitly replace their previous contents."""
+    prefix = "  " * depth
+    if isinstance(value, dict):
+        if not value:
+            return prefix + "No fields supplied."
+        lines = []
+        for key, item in value.items():
+            label = str(key).replace("_", " ")
+            if isinstance(item, (dict, list)):
+                lines.extend([prefix + label + ":", readable_fields(item, depth=depth + 1)])
+            else:
+                rendered = "Yes" if item is True else "No" if item is False else "Not set" if item is None else str(item) if item != "" else "(empty text)"
+                lines.append(prefix + label + ": " + rendered.replace("\n", "\n" + prefix + "  "))
+        return "\n".join(lines)
+    if isinstance(value, list):
+        lines = [prefix + "Replace the previous list with these entries:" if value else prefix + "Replace the previous list with no entries."]
+        for index, item in enumerate(value, 1):
+            lines.append(prefix + str(index) + ". " + ("" if isinstance(item, (dict, list)) else str(item)))
+            if isinstance(item, (dict, list)):
+                lines.append(readable_fields(item, depth=depth + 1))
+        return "\n".join(lines)
+    return prefix + str(value)
+
+
 class TelegramHandler:
     def __init__(self, service: JobHunterService, client: TelegramClient, assistant=None):
         self.service, self.client = service, client
@@ -280,6 +309,13 @@ class TelegramHandler:
 
     def _preview(self, actor_id: int, proposal: dict) -> None:
         action_id, preview = proposal.get("action_id"), proposal.get("preview")
+        if isinstance(proposal.get("patch"), dict):
+            summary = proposal.get("summary", "")
+            if not isinstance(summary, str):
+                raise ValueError("The settings summary is invalid. Request a fresh preview.")
+            preview = (summary + "\n\n" if summary else "") + "Exact changes:\n" + readable_fields(proposal["patch"])
+            if "next_run" in proposal:
+                preview += "\nNext search: " + str(proposal["next_run"] or "paused")
         if not isinstance(action_id, str) or not _ACTION_ID.fullmatch(action_id):
             raise ValueError("The settings preview has an invalid confirmation identifier.")
         if not isinstance(preview, str) or not preview.strip() or len(preview) > _MAX_PREVIEW_CHARS:
@@ -290,6 +326,115 @@ class TelegramHandler:
             "inline_keyboard": [[{"text": "Confirm changes", "callback_data": "jh:confirm:" + action_id}]]
         })
 
+    def _onboarding(self, actor_id, *, start=False):
+        method = getattr(self.service, "onboarding_status", None)
+        return method(actor_id, start=start) if callable(method) else None
+
+    def _context(self, actor_id):
+        state = self.service.snapshot(actor_id)
+        onboarding = self._onboarding(actor_id)
+        if onboarding is not None:
+            state["onboarding"] = onboarding
+        connections = getattr(self.service, "connection_status", None)
+        if callable(connections):
+            state["connection_status"] = connections(actor_id)
+        return state
+
+    def _guide(self, actor_id, state=None, *, checklist=False, introduction=""):
+        state = state if state is not None else self._onboarding(actor_id)
+        if not isinstance(state, dict):
+            self._send(actor_id, introduction + "\nUse /status to check your settings or tell me the next change.")
+            return
+        lines = [introduction] if introduction else []
+        steps = state.get("steps", [])
+        if checklist:
+            lines.append("Your setup checklist")
+            for step in steps:
+                marker = {"complete": "✓", "skipped": "—", "blocked": "!"}.get(step["state"], "○")
+                lines.append(f"{marker} {step['label']}: {step['state']}")
+        if not state.get("started"):
+            lines.append("Use /onboarding to review your setup one step at a time. Running searches change only after you confirm a schedule change.")
+        elif state.get("complete"):
+            lines.append("Your guided setup is complete. Use /status to check your schedule, /jobs for results, or describe a change.")
+        elif state.get("next_question"):
+            lines.append("Next: " + state["next_question"])
+        current = next((step for step in steps if step["id"] == state.get("next_step")), None)
+        if current and current.get("detail"):
+            lines.append(current["label"] + "\n" + current["detail"])
+        self._send(actor_id, "\n\n".join(lines) or "Use /onboarding to begin your saved setup.")
+        if not state.get("started") or not current:
+            return
+        labels = {"acknowledge": {"resume": "Done reviewing", "roles": "Keep current limits", "schedule": "Use this schedule",
+                                   "delivery": "Use these delivery chats"}.get(current["id"], "Confirm this step"),
+                  "skip": "Skip for now", "check": "Check connection", "reopen": "Review again", "activate": "Review activation"}
+        buttons = [{"text": labels[action], "callback_data": f"jh:onboard:{action}:{current['id']}:{state['revision']}"}
+                   for action in current.get("actions", []) if action in labels]
+        if buttons:
+            self.client.send_message(actor_id, "Choose when you are ready, or reply in your own words.",
+                                     {"inline_keyboard": [[button] for button in buttons]})
+
+    def _status(self, actor_id):
+        snapshot = self.service.snapshot(actor_id)
+        settings = snapshot.get("settings", snapshot.get("config", {}))
+        schedule = settings.get("schedule", {})
+        search = settings.get("search", {})
+        roles = search.get("matching", {}).get("preferred_roles", []) or search.get("keywords", [])
+        lines = ["Your JobHunter status", "Searches: " + ("running" if schedule.get("enabled") else "paused")]
+        if schedule.get("time"):
+            lines.append(f"Schedule: {schedule['time']} ({schedule.get('timezone', 'timezone not set')})")
+        if snapshot.get("next_run"):
+            lines.append("Next search: " + str(snapshot["next_run"]))
+        lines.append("Roles: " + (", ".join(roles) if roles else "not set"))
+        lines.append("Destinations: " + (", ".join(market.get("name", "Unnamed") for market in search.get("markets", [])) or "not set"))
+        connections = getattr(self.service, "connection_status", None)
+        if callable(connections):
+            for provider, details in connections(actor_id).items():
+                if provider in {"linkedin", "gmail", "tracker"}:
+                    lines.append(provider.title() + ": " + details.get("message", details.get("status", "unverified")))
+            lines.append("Use /check linkedin, /check gmail or /check tracker to verify a connection now.")
+        self._guide(actor_id, checklist=True, introduction="\n".join(lines))
+
+    def _plan(self, actor_id, text, *, kind="message", recovery=None):
+        from .recovery import clear_recovery, save_recovery
+        try:
+            plan = self.assistant.plan(text, self._context(actor_id))
+        except HermesUnavailableError:
+            saved = save_recovery(self.service, actor_id, text, kind=kind)
+            self.client.send_message(actor_id, "The conversation service is temporarily unavailable. Your saved settings are safe. "
+                       "Use /retry to retry this step, /status to continue with the checklist, or /support for a report.\n"
+                       "Support reference: " + saved["reference"], {"inline_keyboard": [[{
+                           "text": "Retry this request", "callback_data": "jh:retry:" + saved["reference"]}]]})
+            return
+        self._execute(actor_id, plan)
+        if not contains_credentials(text):
+            self.service.record_turn(actor_id, text if kind == "message" else "Uploaded resume for refinement",
+                                     plan.get("reply", {"propose": "Proposed changes await exact confirmation.",
+                                                        "connect": "A private connection link was provided.",
+                                                        "show": "Displayed the current setup checklist."}.get(plan["operation"], "")))
+        if recovery:
+            clear_recovery(self.service, actor_id, recovery["reference"])
+
+    def _support(self, actor_id):
+        from .recovery import get_recovery
+        recovery = get_recovery(self.service, actor_id)
+        state = self._onboarding(actor_id) or {}
+        report = ["JobHunter support report (share this with the owner if you want help)",
+                  f"Telegram user ID: {actor_id}", "Setup step: " + str(state.get("next_step") or "not started"),
+                  "Setup revision: " + str(state.get("revision", "unknown"))]
+        if recovery:
+            report.extend(["Reference: " + recovery["reference"], "Issue: conversation temporarily unavailable",
+                           "Retry attempts: " + str(recovery["attempts"])])
+        else:
+            report.append("No saved conversation failure. Describe the failed step when sharing this report.")
+        connections = getattr(self.service, "connection_status", None)
+        if callable(connections):
+            for provider, details in connections(actor_id).items():
+                if provider in {"linkedin", "gmail", "tracker"} and details.get("status") in {
+                        "connected", "configured", "unverified", "unavailable", "error"}:
+                    report.append(provider.title() + ": " + details["status"])
+        report.append("This report contains no resume, message history or credentials. It has not been sent to anyone else.")
+        self._send(actor_id, "\n".join(report))
+
     def _execute(self, actor_id: int, plan: dict) -> None:
         if plan["operation"] == "propose":
             self._preview(actor_id, self.service.propose(actor_id, plan["patch"]))
@@ -298,16 +443,13 @@ class TelegramHandler:
             parsed = urlsplit(link)
             if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
                 raise ValueError("The connection service did not return a secure link.")
-            self.client.send_message(actor_id, "Open your private connection link. Enter credentials only on the account provider's page; never send them to Telegram.", {
-                "inline_keyboard": [[{"text": "Connect " + plan["provider"].title(), "url": link}]]
+            label = "LinkedIn" if plan["provider"] == "linkedin" else "Gmail" if plan["purpose"] == "gmail" else "tracker"
+            self.client.send_message(actor_id, "Open your private connection link. Enter credentials only on the account provider's page; never send them to Telegram. "
+                                     "After signing in, return here and use /check " + ("linkedin" if plan["provider"] == "linkedin" else plan["purpose"]) + " to verify the connection.", {
+                "inline_keyboard": [[{"text": "Connect " + label, "url": link}]]
             })
         elif plan["operation"] == "show":
-            state = self.service.snapshot(actor_id)
-            # The facade owns snapshot sanitization. Do not expose uploaded
-            # source text or conversational history in a settings summary.
-            visible = {key: value for key, value in state.items()
-                       if key not in {"history", "conversation", "resume_source", "resume_draft"}}
-            self._send(actor_id, json.dumps(visible, ensure_ascii=False, indent=2, default=str))
+            self._status(actor_id)
         else:
             self._send(actor_id, plan["reply"])
 
@@ -328,6 +470,32 @@ class TelegramHandler:
         self.service.authorize(actor_id)
         if callback is not None:
             data = callback.get("data")
+            retry = _RETRY.fullmatch(data) if isinstance(data, str) else None
+            if retry:
+                from .recovery import begin_retry, callback_retry_id, get_recovery
+                pending = get_recovery(self.service, actor_id)
+                if not pending or pending["reference"] != retry[1]:
+                    raise ValueError("This retry expired or belongs to another request. Use /status to continue.")
+                recovery = begin_retry(self.service, actor_id, request_id=callback_retry_id(callback["id"]), reference=retry[1])
+                self._plan(actor_id, recovery["text"], kind=recovery["kind"], recovery=recovery)
+                try:
+                    self.client.answer_callback(callback["id"], "Retry processed")
+                except TelegramAPIError:
+                    pass
+                return
+            guided = _ONBOARDING.fullmatch(data) if isinstance(data, str) else None
+            if guided:
+                action, step, revision = guided.groups()
+                result = self.service.onboarding_action(actor_id, action, step, int(revision))
+                if "action_id" in result:
+                    self._preview(actor_id, result)
+                else:
+                    self._guide(actor_id, result)
+                try:
+                    self.client.answer_callback(callback["id"], "Step checked")
+                except TelegramAPIError:
+                    pass
+                return
             if not isinstance(data, str) or not data.startswith("jh:confirm:") or not _ACTION_ID.fullmatch(data[11:]):
                 raise ValueError("This action is unavailable. Use /status to continue.")
             self.service.confirm(actor_id, data[11:])
@@ -337,14 +505,49 @@ class TelegramHandler:
                 # Telegram expires callback acknowledgements quickly. Saving
                 # succeeded, so still send the durable outcome to the chat.
                 pass
-            self._send(actor_id, "Your changes are saved. Use /status to see your settings or tell me the next change.")
+            self._guide(actor_id, introduction="Your changes are saved.")
             return
+        command = text.strip().split(" ", 1)[0].split("@", 1)[0].lower()
+        if command in {"/start", "/onboarding", "/continue"}:
+            state = self._onboarding(actor_id, start=True)
+            running = self.service.snapshot(actor_id).get("settings", {}).get("schedule", {}).get("enabled", False)
+            self._guide(actor_id, state, introduction="Welcome to your private JobHunter setup. You can stop and return with /continue. "
+                        "We will confirm exact changes before saving. Never send passwords or verification codes here.\n"
+                        + ("Your existing searches remain running. Schedule changes need your confirmation." if running else
+                           "Searches are paused until you review and confirm activation."))
+            return
+        if command == "/help":
+            self._send(actor_id, HELP_TEXT)
+            return
+        if command in {"/status", "/settings", "/profile"}:
+            self._status(actor_id)
+            return
+        if command == "/support":
+            self._support(actor_id)
+            return
+        if command == "/check":
+            parts = text.split()
+            if len(parts) != 2 or parts[1].lower() not in {"linkedin", "gmail", "tracker"}:
+                raise ValueError("Use /check linkedin, /check gmail or /check tracker.")
+            self.service.check_connection(actor_id, parts[1].lower())
+            self._status(actor_id)
+            return
+        if command == "/retry":
+            from .recovery import begin_retry
+            recovery = begin_retry(self.service, actor_id, request_id=message.get("message_id"))
+            self._plan(actor_id, recovery["text"], kind=recovery["kind"], recovery=recovery)
+            return
+        if command == "/resume":
+            state = self._onboarding(actor_id)
+            if state and state.get("started") and not state.get("complete"):
+                self._guide(actor_id, state)
+                return
         if text.startswith("/confirm"):
             parts = text.split()
             if len(parts) != 2 or parts[0].split("@", 1)[0] != "/confirm" or not _ACTION_ID.fullmatch(parts[1]):
                 raise ValueError("Use the confirmation button below the complete settings preview.")
             self.service.confirm(actor_id, parts[1])
-            self._send(actor_id, "Your changes are saved. Use /status to see your settings.")
+            self._guide(actor_id, introduction="Your changes are saved.")
             return
         if "document" in message:
             document = message["document"]
@@ -355,25 +558,17 @@ class TelegramHandler:
                 raise ResumeImportError("Upload a PDF, DOCX, or UTF-8 text resume.")
             source = import_resume(self.client.download_document(document), filename, document.get("mime_type"))
             self.service.stage_resume(actor_id, source)
-            self._send(actor_id, "Your resume was imported as an unconfirmed draft. I will review one experience at a time and ask you to confirm exact public wording before using any facts.")
-            plan = self.assistant.plan(
-                "I uploaded my resume. Begin refinement with one focused question about my first experience. Do not confirm any facts.",
-                self.service.snapshot(actor_id))
-            self._execute(actor_id, plan)
-            self.service.record_turn(actor_id, "Uploaded resume: " + source["filename"],
-                                     plan.get("reply", "Resume changes await review and confirmation."))
+            snapshot = self.service.snapshot(actor_id)
+            if not snapshot.get("settings", {}).get("schedule", {}).get("enabled"):
+                self._onboarding(actor_id, start=True)
+            self._send(actor_id, "Your resume is saved as an unconfirmed draft. We will review one experience at a time. "
+                       "Confirm exact public wording before it is used; choose Done reviewing only when you have reviewed all experiences or explicitly want to stop refinement.")
+            self._plan(actor_id, "I uploaded my resume. Begin refinement with one focused question about my first experience. Do not confirm any facts.", kind="resume")
             return
         if not text:
             self._send(actor_id, "Send a text message or upload your resume as PDF, DOCX, or text.")
             return
-        plan = self.assistant.plan(text, self.service.snapshot(actor_id))
-        self._execute(actor_id, plan)
-        if not contains_credentials(text):
-            self.service.record_turn(actor_id, text, plan.get("reply", {
-                "propose": "Proposed changes await review and confirmation.",
-                "connect": "A private account connection link was provided.",
-                "show": "Displayed the candidate's current JobHunter settings.",
-            }.get(plan["operation"], "")))
+        self._plan(actor_id, text)
 
     def handle_update(self, update: dict, *, use_offset: bool = True) -> None:
         """Handle one update obtained from the authenticated Bot API poller.
@@ -398,12 +593,16 @@ class TelegramHandler:
         try:
             self._handle_private(actor_id, message, callback)
         except PermissionError:
-            self._send(actor_id, "You do not have access to that JobHunter action. Ask the owner to authorize your Telegram user ID: " + str(actor_id))
+            self._send(actor_id, "You do not have access to that JobHunter action. Use /status to check your own setup. "
+                       "If you have not been invited, ask the owner to authorize your Telegram user ID: " + str(actor_id))
         except (ValueError, ResumeImportError, HermesResponseError) as error:
             explanation = str(error)
-            if contains_credentials(explanation) or "api.telegram.org" in explanation or len(explanation) > 600:
+            if (contains_credentials(explanation) or "api.telegram.org" in explanation or len(explanation) > 600
+                    or re.search(r"/(?:home|etc|opt|Users|var)/|Traceback|Bearer\s", explanation)):
                 explanation = "The request could not be processed. Your credentials were not shared. Use /status to continue."
-            self._send(actor_id, explanation)
+            self._send(actor_id, explanation + "\nUse /status for your current step or /support for a safe report.")
+            if callback is not None:
+                self._guide(actor_id)
         # Network/transient failures deliberately do not acknowledge an update.
         if use_offset:
             self.service.acknowledge_update(update_id)

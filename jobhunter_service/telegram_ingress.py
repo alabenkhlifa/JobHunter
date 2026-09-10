@@ -23,6 +23,11 @@ from .telegram import _private_actor
 MAX_UPDATE_BYTES = 65536
 MAX_BACKOFF_SECONDS = 300
 _ADMIN_COMMAND = re.compile(r'^/jobhunter(?:@\w+)?(?:\s|$)', re.I)
+_ONBOARD_CALLBACK = re.compile(
+    r'jh:onboard:(?:acknowledge|skip|reopen|activate|check):'
+    r'(?:resume|roles|markets|schedule|delivery|linkedin|gmail|tracker|review):(?:0|[1-9][0-9]{0,19})'
+)
+_RETRY_CALLBACK = re.compile(r'jh:retry:JH-[A-F0-9]{12}')
 
 
 class IngressConflict(ValueError):
@@ -51,7 +56,9 @@ def _validate_update(update, owner_id):
         if (not isinstance(callback.get('id'), str) or not 1 <= len(callback['id']) <= 256
                 or not isinstance(callback.get('data'), str)
                 or not 1 <= len(callback['data'].encode('utf-8')) <= 64
-                or not callback['data'].startswith(('jh:confirm:', 'jh:application:'))):
+                or not (callback['data'].startswith(('jh:confirm:', 'jh:application:'))
+                        or _ONBOARD_CALLBACK.fullmatch(callback['data'])
+                        or _RETRY_CALLBACK.fullmatch(callback['data']))):
             raise ValueError('A supported JobHunter callback is required.')
     else:
         text = message.get('text')
@@ -138,8 +145,10 @@ class TelegramIngress:
                 db.execute('BEGIN IMMEDIATE')
                 db.execute("UPDATE telegram_ingress SET status='pending',lease_token=NULL,lease_until=NULL "
                            "WHERE status='processing' AND lease_until<=?", (now,))
-                # A failed update blocks later arrivals from that actor while
-                # allowing other candidates to continue during its backoff.
+                # Unexpected or delivery failures keep mutation order. The
+                # handler acknowledges model outages only after persisting a
+                # recovery intent and delivering its explicit retry notice.
+                # That completed receipt releases this actor's setup commands.
                 row = db.execute("SELECT q.* FROM telegram_ingress q WHERE q.status='pending' AND q.next_attempt<=? "
                     "AND NOT EXISTS (SELECT 1 FROM telegram_ingress earlier WHERE earlier.actor_id=q.actor_id "
                     "AND earlier.id<q.id AND earlier.status!='done') ORDER BY q.id LIMIT 1", (now,)).fetchone()

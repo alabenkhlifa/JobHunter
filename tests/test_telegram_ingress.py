@@ -12,6 +12,7 @@ import pytest
 
 from jobhunter_service.dispatch import ApplicationTelegramHandler
 from jobhunter_service.hermes import RestrictedHermesAssistant
+from jobhunter_service.recovery import get_recovery
 from jobhunter_service.service import JobHunterService
 from jobhunter_service.telegram import TelegramAPIError
 from jobhunter_service.telegram_ingress import IngressConflict, MAX_UPDATE_BYTES, TelegramIngress
@@ -185,6 +186,55 @@ def test_callback_identity_and_namespace_cannot_be_forged(system, mutate):
     assert receipt(service, 2) is None and client.sends == planner.calls == []
 
 
+@pytest.mark.parametrize('data', [
+    'jh:onboard:acknowledge:resume:0', 'jh:onboard:skip:gmail:10',
+    'jh:onboard:reopen:roles:2', 'jh:onboard:activate:review:99', 'jh:onboard:check:linkedin:5',
+])
+def test_bounded_onboarding_callbacks_enter_only_the_validated_private_queue(system, data):
+    service, _, ingress, client, planner, _ = system
+    assert ingress.enqueue(callback(data=data))['accepted']
+    assert receipt(service, 2)['actor_id'] == 11
+    assert client.sends == planner.calls == []
+
+
+@pytest.mark.parametrize('data', [
+    'jh:onboard:shell:resume:0', 'jh:onboard:check:owner:0', 'jh:onboard:check:resume',
+    'jh:onboard:check:resume:-1', 'jh:onboard:check:resume:01', 'jh:onboard:check:resume:1.0',
+    'jh:onboard:check:resume:123456789012345678901', 'jh:onboard:check:resume:0:11',
+    'jh:onboard:check:resume: 0',
+])
+def test_malformed_onboarding_callback_is_rejected_before_persistence(system, data):
+    service, _, ingress, client, planner, _ = system
+    with pytest.raises(ValueError):
+        ingress.enqueue(callback(data=data))
+    assert receipt(service, 2) is None and client.sends == planner.calls == []
+
+
+def test_onboarding_callback_cannot_claim_another_private_actor(system):
+    service, _, ingress, *_ = system
+    forged = callback(data='jh:onboard:acknowledge:resume:0')
+    forged['callback_query']['message']['chat']['id'] = 22
+    with pytest.raises(PermissionError):
+        ingress.enqueue(forged)
+    assert receipt(service, 2) is None
+
+
+@pytest.mark.parametrize('data', ['jh:retry:JH-012345ABCDEF', 'jh:retry:JH-ABCDEF012345'])
+def test_exact_retry_reference_callback_is_accepted_for_private_dispatch(system, data):
+    service, _, ingress, *_ = system
+    assert ingress.enqueue(callback(data=data))['accepted']
+    assert receipt(service, 2)['actor_id'] == 11
+
+
+@pytest.mark.parametrize('data', ['jh:retry:', 'jh:retry:JH-short', 'jh:retry:JH-abcdef012345',
+                                'jh:retry:JH-012345ABCDEF:22', 'jh:retry:../../owner'])
+def test_malformed_retry_reference_never_enters_queue(system, data):
+    service, _, ingress, *_ = system
+    with pytest.raises(ValueError):
+        ingress.enqueue(callback(data=data))
+    assert receipt(service, 2) is None
+
+
 def test_resume_document_is_downloaded_only_by_worker_and_remains_unconfirmed(system):
     service, _, ingress, client, planner, _ = system
     document = {'file_id': 'synthetic_telegram_file', 'file_name': 'resume.txt', 'mime_type': 'text/plain'}
@@ -247,12 +297,12 @@ def test_telegram_outage_retries_durably_with_bounded_backoff_and_no_terminal_dr
     assert len(client.sends) == 1
 
 
-def test_failed_actor_update_blocks_only_their_later_arrivals(system):
+def test_unexpected_failure_keeps_mutation_order_but_other_candidates_continue(system):
     service, handler, ingress, _, planner, _ = system
     original = handler.handle_update
     def outage(update, **kwargs):
         if update['update_id'] == 1:
-            raise RuntimeError('Synthetic model outage')
+            raise RuntimeError('Synthetic unexpected mutation failure')
         return original(update, **kwargs)
     handler.handle_update = outage
     ingress.enqueue(message(1, 11))
@@ -265,23 +315,188 @@ def test_failed_actor_update_blocks_only_their_later_arrivals(system):
     assert [actor for _, actor in planner.calls] == ['u22']
 
 
-def test_real_assistant_model_outage_stays_pending_and_recovers_without_new_user_message(system):
+def test_model_outage_is_visible_and_setup_commands_run_before_explicit_retry(system, monkeypatch):
     service, handler, ingress, client, _, clock = system
     calls = []
-    def planner(*args):
-        calls.append(args)
-        if len(calls) == 1:
+    available = [False]
+    def planner(messages, schema):
+        calls.append(messages)
+        if not available[0]:
             raise RuntimeError('Synthetic provider outage')
         return {'operation': 'reply', 'reply': 'Recovered scoped response'}
     handler.assistant = RestrictedHermesAssistant(planner)
+    monkeypatch.setattr(service, 'connect', lambda *args: 'https://jobs.example.test/connect/browser?t=synthetic')
     ingress.enqueue(message())
     assert ingress.drain_one()
-    assert receipt(service)['status'] == 'pending'
-    assert client.sends == []
-    clock[0] = receipt(service)['next_attempt']
-    assert ingress.drain_one()
     assert receipt(service)['status'] == 'done'
-    assert [text for _, text, _ in client.sends] == ['Recovered scoped response']
+    assert any('/retry' in text for _, text, _ in client.sends)
+    recovery = get_recovery(service, 11)
+    assert recovery['text'] == 'My job preferences'
+    for update_id, command in enumerate(('/status', '/continue', '/connect linkedin'), start=2):
+        ingress.enqueue(message(update_id, text=command))
+        assert ingress.drain_one()
+        assert receipt(service, update_id)['status'] == 'done'
+    assert len(calls) == 1, 'Setup commands must not invoke the unavailable model'
+    assert any('https://jobs.example.test/connect/browser' in json.dumps(markup)
+               for _, _, markup in client.sends if markup)
+    available[0] = True
+    ingress.enqueue(message(5, text='/retry'))
+    assert ingress.drain_one()
+    assert receipt(service, 5)['status'] == 'done'
+    assert len(calls) == 2 and calls[-1][-1]['content'] == 'My job preferences'
+    assert any(text == 'Recovered scoped response' for _, text, _ in client.sends)
+    assert get_recovery(service, 11) is None
+    ingress.enqueue(message(6, text='/retry'))
+    assert ingress.drain_one() and len(calls) == 2
+
+
+def test_explicit_retry_uses_current_confirmed_settings_and_never_auto_applies_a_patch(system):
+    service, handler, ingress, client, _, _ = system
+    calls = []
+    def planner(messages, schema):
+        calls.append(json.loads(messages[1]['content'].split('\n', 1)[1]))
+        if len(calls) == 1:
+            raise RuntimeError('Synthetic model outage')
+        return {'operation': 'propose', 'patch': {'search': {'keywords': ['Frontend designer']}}}
+    handler.assistant = RestrictedHermesAssistant(planner)
+    ingress.enqueue(message(text='Adjust my preferred role'))
+    assert ingress.drain_one() and receipt(service)['status'] == 'done'
+    # A normal candidate confirmation overtakes only the already acknowledged
+    # failed intent; there is no old model result waiting to overwrite it.
+    proposal = service.propose(11, {'schedule': {'time': '10:45'}})
+    ingress.enqueue(callback(2, data='jh:confirm:' + proposal['action_id']))
+    assert ingress.drain_one() and service.store.member(11)['revision'] == 1
+    ingress.enqueue(message(3, text='/retry'))
+    assert ingress.drain_one() and receipt(service, 3)['status'] == 'done'
+    assert calls[-1]['settings']['schedule']['time'] == '10:45'
+    assert service.store.member(11)['revision'] == 1
+    assert service.snapshot(11)['settings']['search']['keywords'] != ['Frontend designer']
+    callbacks = [button['callback_data'] for _, _, markup in client.sends if markup
+                 for row in markup.get('inline_keyboard', []) for button in row
+                 if button.get('callback_data', '').startswith('jh:confirm:')]
+    retry_confirmation = callbacks[-1]
+    ingress.enqueue(callback(4, data=retry_confirmation))
+    assert ingress.drain_one() and service.store.member(11)['revision'] == 2
+    ingress.enqueue(callback(5, data=retry_confirmation))
+    assert ingress.drain_one() and service.store.member(11)['revision'] == 2
+    assert service.snapshot(11)['settings']['search']['keywords'] == ['Frontend designer']
+
+
+def test_recovery_notice_delivery_failure_stays_queued_and_does_not_bypass_confirmation(system):
+    service, handler, ingress, client, _, clock = system
+    handler.assistant = RestrictedHermesAssistant(lambda *args: (_ for _ in ()).throw(RuntimeError('Synthetic outage')))
+    proposal = service.propose(11, {'schedule': {'time': '10:45'}})
+    ingress.enqueue(message())
+    ingress.enqueue(callback(2, data='jh:confirm:' + proposal['action_id']))
+    client.outage = True
+    assert ingress.drain_one()
+    assert receipt(service)['status'] == 'pending' and receipt(service, 2)['status'] == 'pending'
+    assert service.store.member(11)['revision'] == 0 and not ingress.drain_one()
+    failed = get_recovery(service, 11)
+    assert failed['attempts'] == 0
+    client.outage = False
+    clock[0] = receipt(service)['next_attempt']
+    assert ingress.drain_one() and receipt(service)['status'] == 'done'
+    assert get_recovery(service, 11)['reference'] == failed['reference']
+    assert ingress.drain_one() and service.store.member(11)['revision'] == 1
+
+
+def test_candidates_cannot_retry_or_view_another_candidates_failed_intent(system):
+    service, handler, ingress, client, _, _ = system
+    calls = []
+    def planner(messages, schema):
+        calls.append(messages)
+        raise RuntimeError('Synthetic provider failure')
+    handler.assistant = RestrictedHermesAssistant(planner)
+    ingress.enqueue(message(text='Candidate eleven private request'))
+    assert ingress.drain_one()
+    failed = get_recovery(service, 11)
+    ingress.enqueue(message(2, actor=22, text='/retry'))
+    ingress.enqueue(message(3, actor=22, text='/support'))
+    assert ingress.drain_one() and ingress.drain_one()
+    assert len(calls) == 1 and get_recovery(service, 22) is None
+    other_responses = [text for actor, text, _ in client.sends if actor == 22]
+    assert other_responses
+    assert all(failed['reference'] not in text and failed['text'] not in text for text in other_responses)
+
+
+def test_resume_outage_retry_uses_staged_source_without_redownloading_or_confirming(system):
+    service, handler, ingress, client, _, _ = system
+    contexts = []
+    def planner(messages, schema):
+        contexts.append(json.loads(messages[1]['content'].split('\n', 1)[1]))
+        if len(contexts) == 1:
+            raise RuntimeError('Synthetic model outage after resume import')
+        return {'operation': 'reply', 'reply': 'What did your first project do?'}
+    handler.assistant = RestrictedHermesAssistant(planner)
+    document = {'file_id': 'synthetic_telegram_file', 'file_name': 'resume.txt', 'mime_type': 'text/plain'}
+    ingress.enqueue(message(text='', document=document))
+    assert ingress.drain_one() and receipt(service)['status'] == 'done'
+    assert get_recovery(service, 11)['kind'] == 'resume'
+    ingress.enqueue(message(2, text='/retry'))
+    assert ingress.drain_one() and receipt(service, 2)['status'] == 'done'
+    assert client.downloads == [document]
+    assert contexts[0]['resume_source'] == contexts[1]['resume_source']
+    assert contexts[1]['resume_source']['text']
+    assert service.snapshot(11)['settings']['resume'] == {}
+    assert get_recovery(service, 11) is None
+
+
+def test_persistent_model_outage_has_bounded_explicit_retries_without_blocking_status(system):
+    service, handler, ingress, client, _, _ = system
+    calls = []
+    def planner(*args):
+        calls.append(args)
+        raise RuntimeError('Synthetic persistent provider outage')
+    handler.assistant = RestrictedHermesAssistant(planner)
+    ingress.enqueue(message())
+    assert ingress.drain_one()
+    for update_id in range(2, 6):
+        ingress.enqueue(message(update_id, text='/retry'))
+        assert ingress.drain_one() and receipt(service, update_id)['status'] == 'done'
+    assert len(calls) == 4  # Original request plus three explicit attempts.
+    assert get_recovery(service, 11)['attempts'] == 3
+    assert any('retry limit' in text.lower() for _, text, _ in client.sends)
+    ingress.enqueue(message(6, text='/status'))
+    assert ingress.drain_one() and receipt(service, 6)['status'] == 'done'
+    assert len(calls) == 4
+
+
+def test_inline_retry_is_private_reference_bound_and_recovers_after_delivery_retry(system):
+    service, handler, ingress, client, _, clock = system
+    calls = []
+    available = [False]
+    def planner(*args):
+        calls.append(args)
+        if not available[0]:
+            raise RuntimeError('Synthetic provider outage')
+        return {'operation': 'reply', 'reply': 'Recovered private reply'}
+    handler.assistant = RestrictedHermesAssistant(planner)
+    ingress.enqueue(message())
+    assert ingress.drain_one()
+    markup = next(markup for _, _, markup in client.sends if markup)
+    button = markup['inline_keyboard'][0][0]['callback_data']
+    assert button == 'jh:retry:' + get_recovery(service, 11)['reference']
+    # Even with the exact reference, a different candidate cannot retry it.
+    ingress.enqueue(callback(2, actor=22, data=button))
+    assert ingress.drain_one() and len(calls) == 1
+    assert get_recovery(service, 11)['attempts'] == 0
+    available[0] = True
+    ingress.enqueue(callback(3, data=button))
+    client.outage = True
+    assert ingress.drain_one() and receipt(service, 3)['status'] == 'pending'
+    assert get_recovery(service, 11)['attempts'] == 1
+    client.outage = False
+    clock[0] = receipt(service, 3)['next_attempt']
+    assert ingress.drain_one() and receipt(service, 3)['status'] == 'done'
+    assert get_recovery(service, 11) is None
+    assert [text for _, text, _ in client.sends].count('Recovered private reply') == 1
+    delivered_calls = len(calls)
+    assert ingress.enqueue(callback(3, data=button))['duplicate']
+    assert not ingress.drain_one() and len(calls) == delivered_calls
+    # A new click on the old button cannot repeat the already completed work.
+    ingress.enqueue(callback(4, data=button))
+    assert ingress.drain_one() and len(calls) == delivered_calls
 
 
 def test_invalid_model_response_is_a_visible_validation_error_and_not_retried(system):

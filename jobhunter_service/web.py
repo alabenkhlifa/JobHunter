@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 from aiohttp import ClientSession, ClientTimeout, TraceConfig, WSMsgType, web
 
 from .state import private_json
+from .browser import BrowserError
 
 
 _VIEWER_PATH = re.compile(r'(?:vnc\.html|websockify|(?:app|core|vendor)/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)')
@@ -40,6 +41,8 @@ async def safe_responses(request, handler):
         response = exc
     except PermissionError:
         response = web.Response(status=403, text='Access denied. Request a fresh connection link in your private JobHunter chat.')
+    except BrowserError as exc:
+        response = web.Response(status=503, text=str(exc) + ' Return to your private chat and request /connect linkedin again, or skip LinkedIn for now.')
     except (ValueError, KeyError):
         response = web.Response(status=400, text='Invalid request. Review your settings in your private JobHunter chat.')
     except Exception:
@@ -57,6 +60,9 @@ async def safe_responses(request, handler):
 
 
 def create_app(service, *, google_client=None, admin_token=None, telegram_ingress=None):
+    # This trusted adapter is the authority for actual consent availability.
+    # A public hostname alone does not make Google authorization available.
+    service.google_enabled = google_client is not None
     app = web.Application(middlewares=[safe_responses], client_max_size=65536)
 
     async def health(request):

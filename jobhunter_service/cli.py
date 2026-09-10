@@ -21,6 +21,7 @@ def telegram_mode():
 
 def configured_service():
     from .browser import DockerBrowserManager
+    from .connections import google_configured
     from .hermes_runner import HermesPlanner
     from .service import JobHunterService
     from .telegram import TelegramClient
@@ -42,7 +43,9 @@ def configured_service():
     browsers = DockerBrowserManager() if os.environ.get('JOBHUNTER_BROWSER_ENABLED') == 'true' else None
     service = JobHunterService(os.environ['JOBHUNTER_SERVICE_DATA_ROOT'],
         int(os.environ['JOBHUNTER_OWNER_TELEGRAM_USER_ID']),
-        public_url=os.environ.get('JOBHUNTER_PUBLIC_URL', ''), telegram_client=client, browser_manager=browsers)
+        public_url=os.environ.get('JOBHUNTER_PUBLIC_URL', ''), telegram_client=client, browser_manager=browsers,
+        google_enabled=google_configured(os.environ.get('JOBHUNTER_GOOGLE_WEB_CLIENT'),
+                                         os.environ.get('JOBHUNTER_PUBLIC_URL', '')))
     if shared_auth:
         from .hermes_runner import SharedOwnerPlanner
         planner = SharedOwnerPlanner(os.environ['JOBHUNTER_HERMES_PYTHON'],
@@ -71,7 +74,7 @@ def serve():
         from .telegram_ingress import TelegramIngress
         ingress = TelegramIngress(service, handler)
     google_client = None
-    if os.environ.get('JOBHUNTER_GOOGLE_WEB_CLIENT'):
+    if service.google_enabled:
         from jobhunter_integrations.web_oauth import GoogleOAuthClient
         google_client = GoogleOAuthClient(os.environ['JOBHUNTER_GOOGLE_WEB_CLIENT'],
                                          service.public_url + '/oauth/google/callback')

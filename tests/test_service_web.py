@@ -59,6 +59,31 @@ def viewer_cookie(service, actor=11, *, expires=None, ttl=600, profile_id=None):
     }, ttl=ttl)
 
 
+def test_browser_capacity_failure_explains_safe_recovery_without_reusing_link(service):
+    from jobhunter_service.browser import BrowserCapacityError
+    service.browser_manager.start.side_effect = BrowserCapacityError('Another application browser is in use.')
+    async def scenario():
+        async with TestClient(TestServer(create_app(service))) as client:
+            link = service.connect(11, 'linkedin')
+            parsed = urlsplit(link)
+            response = await client.get(parsed.path + '?' + parsed.query, allow_redirects=False)
+            assert response.status == 503
+            body = await response.text()
+            assert 'browser is in use' in body and '/connect linkedin' in body and 'skip' in body
+            assert parsed.query not in body
+            replay = await client.get(parsed.path + '?' + parsed.query, allow_redirects=False)
+            assert replay.status == 403
+    asyncio.run(scenario())
+
+
+def test_absent_google_adapter_disables_links_before_browser_navigation(service):
+    create_app(service)
+    with pytest.raises(ValueError, match='Google'):
+        service.connect(11, 'google', 'gmail')
+    create_app(service, google_client=Google())
+    assert service.connect(11, 'google', 'gmail').startswith(service.public_url + '/connect/google?')
+
+
 async def consent_state(client, service, user=11, kind="gmail"):
     link = service.connect(user, "google", kind)
     response = await client.get(urlsplit(link).path + "?" + urlsplit(link).query, allow_redirects=False)

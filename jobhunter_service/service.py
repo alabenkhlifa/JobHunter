@@ -52,7 +52,7 @@ def initial_settings(user_id):
 
 
 class JobHunterService:
-    def __init__(self, data_root, owner_id, *, public_url='', telegram_client=None, browser_manager=None):
+    def __init__(self, data_root, owner_id, *, public_url='', telegram_client=None, browser_manager=None, google_enabled=False):
         if type(owner_id) is not int or owner_id <= 0:
             raise ValueError('A positive owner Telegram user ID is required.')
         self.root = Path(data_root).expanduser().resolve()
@@ -67,6 +67,15 @@ class JobHunterService:
             raise ValueError('Public service URL must use HTTPS.')
         self.telegram_client = telegram_client
         self.browser_manager = browser_manager
+        self.google_enabled = bool(google_enabled)
+
+    def connection_status(self, actor_id):
+        from .connections import connection_status
+        return connection_status(self, actor_id)
+
+    def check_connection(self, actor_id, provider):
+        from .connections import check_connection
+        return check_connection(self, actor_id, provider)
 
     @contextmanager
     def mutation(self, actor_id):
@@ -150,7 +159,8 @@ class JobHunterService:
         member = self._member(actor_id)
         settings = json.loads(member['settings'])
         result = {'profile_id': member['profile_id'], 'revision': member['revision'], 'settings': settings,
-                  'next_run': None, 'onboarding': self.readiness(settings),
+                  'next_run': None, 'onboarding': self.onboarding_status(actor_id),
+                  'connections': self.connection_status(actor_id),
                   'recommended_accounts': 'Use a dedicated jobs Gmail and share its tracker and documents with your personal account.'}
         upcoming = next_run(settings['schedule'])
         if upcoming:
@@ -183,6 +193,75 @@ class JobHunterService:
         if not settings['search'].get('markets'):
             missing.append('destinations and work authorization')
         return {'ready': not missing, 'missing': missing}
+
+    def _onboarding_source_digest(self, actor_id):
+        from .onboarding import digest
+        path = self.profile_dir(self._member(actor_id)) / 'state' / 'resume_source.json'
+        if path.is_symlink():
+            raise PermissionError('The resume source cannot follow a symlink.')
+        if not path.exists():
+            return ''
+        if path.stat().st_size > 500000:
+            raise ValueError('The saved resume source is too large.')
+        return digest(json.loads(path.read_text()))
+
+    def onboarding_status(self, actor_id, *, start=False):
+        from . import onboarding
+        with self.mutation(actor_id):
+            member = self._member(actor_id)
+            with self.store.connect() as db:
+                if start:
+                    db.execute('BEGIN IMMEDIATE')
+                state = onboarding.load(db, actor_id)
+                if start and state is None:
+                    state = onboarding.fresh()
+                    onboarding.save(db, actor_id, state)
+            settings = json.loads(member['settings'])
+            result = onboarding.status(settings, state, member['revision'],
+                self._onboarding_source_digest(actor_id) if state is not None else '', self.connection_status(actor_id))
+            if state is None:
+                # Legacy callers retain their existing readiness contract until
+                # the candidate deliberately starts the guided workflow.
+                result.update(self.readiness(settings))
+            return result
+
+    def onboarding_action(self, actor_id, action, step, revision):
+        from . import onboarding
+        if (not isinstance(action, str) or not isinstance(step, str)
+                or action not in {'acknowledge', 'skip', 'reopen', 'check', 'activate'}
+                or step not in onboarding.STEPS or type(revision) is not int):
+            raise ValueError('Invalid onboarding action.')
+        with self.mutation(actor_id):
+            current = self.onboarding_status(actor_id)
+            if not current['started'] or revision != current['revision']:
+                raise ValueError('This onboarding button is stale. Open /onboarding for current progress.')
+            entry = next(item for item in current['steps'] if item['id'] == step)
+            if action not in entry['actions']:
+                raise ValueError('Finish the required confirmed settings before continuing this step.')
+            if action == 'check':
+                self.check_connection(actor_id, step)
+                return self.onboarding_status(actor_id)
+            if action == 'activate':
+                return self._propose(actor_id, {'schedule': {'enabled': True}}, onboarding_action='activate')
+            member = self._member(actor_id)
+            settings = json.loads(member['settings'])
+            if action == 'skip' and step in {'gmail', 'tracker'} and settings['accounts'][step]['enabled']:
+                return self._propose(actor_id, {'accounts': {step: {'enabled': False}}}, onboarding_action='skip:' + step)
+            with self.store.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                actual = db.execute("SELECT revision FROM members WHERE user_id=? AND status='active'", (actor_id,)).fetchone()
+                state = onboarding.load(db, actor_id)
+                if not actual or onboarding.revision(actual['revision'], state) != revision:
+                    raise ValueError('This onboarding button is stale. Open /onboarding again.')
+                values = onboarding.subjects(settings, self._onboarding_source_digest(actor_id))
+                if action == 'reopen':
+                    state['acknowledgements'].pop(step, None)
+                    state['acknowledgements'].pop('review', None)
+                    state['activated'] = None
+                else:
+                    onboarding.acknowledge(state, values, step, action)
+                onboarding.save(db, actor_id, state)
+            return self.onboarding_status(actor_id)
 
     def _validate(self, actor_id, settings):
         from jobhunter_matching import validate_config
@@ -254,23 +333,62 @@ class JobHunterService:
         return settings
 
     def propose(self, actor_id, patch):
+        with self.mutation(actor_id):
+            return self._propose(actor_id, patch)
+
+    def _propose(self, actor_id, patch, *, onboarding_action=None):
+        from . import onboarding
         member = self._member(actor_id)
         if not isinstance(patch, dict) or not patch:
             raise ValueError('A settings change is required.')
+        patch = copy.deepcopy(patch)
+        current = json.loads(member['settings'])
+        with self.store.connect() as db:
+            state = onboarding.load(db, actor_id)
+        source = self._onboarding_source_digest(actor_id) if state is not None else ''
+        metadata = {}
+        if state is not None:
+            progress = onboarding.status(current, state, member['revision'], source, self.connection_status(actor_id))
+            if onboarding_action == 'activate':
+                if not progress['ready_for_activation']:
+                    raise ValueError('Complete the guided review before requesting activation.')
+                metadata = {'onboarding_action': 'activate', 'onboarding_generation': state['generation'],
+                            'onboarding_binding': onboarding.binding(onboarding.subjects(current, source), state)}
+            elif onboarding_action and onboarding_action.startswith('skip:'):
+                metadata = {'onboarding_action': onboarding_action, 'onboarding_generation': state['generation']}
+            elif not progress['complete'] and not current['schedule']['enabled']:
+                # Canonical preview shows this pause; an LLM cannot activate a
+                # fresh guided profile by including enabled=true in a patch.
+                if merge(current, patch)['schedule'].get('enabled'):
+                    patch.setdefault('schedule', {})['enabled'] = False
+        updated = self._validate(actor_id, merge(current, patch))
+        if state is not None and current['schedule']['enabled'] and updated['schedule']['enabled']:
+            before, after = onboarding.subjects(current, source), onboarding.subjects(updated, source)
+            if before != after:
+                raise ValueError('Your search is running. First request and confirm a pause before changing guided setup settings.')
+        def canonical_patch(supplied, applied):
+            return {field: canonical_patch(value, applied[field]) if isinstance(value, dict) else copy.deepcopy(applied[field])
+                    for field, value in supplied.items()}
+        patch = canonical_patch(patch, updated)
         encoded = json.dumps(patch, ensure_ascii=False, indent=2)
         if len(encoded) > 20000:
             raise ValueError('Confirm smaller sections of this change separately.')
-        current = json.loads(member['settings'])
-        updated = self._validate(actor_id, merge(current, patch))
         action_id = secrets.token_urlsafe(18)
         with self.store.connect() as db:
             db.execute('INSERT INTO actions VALUES(?,?,?,?,?,0)',
-                       (action_id, actor_id, member['revision'], json.dumps({'settings': updated, 'patch': patch}), time.time() + 1800))
+                       (action_id, actor_id, member['revision'], json.dumps({'settings': updated, 'patch': patch, **metadata}), time.time() + 1800))
         preview = 'Review these exact changes before confirming:\n' + encoded
+        if onboarding_action == 'activate':
+            preview = progress['summary'] + '\n\n' + preview
+        response = {'action_id': action_id, 'patch': patch}
         if 'schedule' in patch:
             upcoming = next_run(updated['schedule'])
             preview += '\nNext run: ' + (upcoming.isoformat() if upcoming else 'paused')
-        return {'action_id': action_id, 'preview': preview}
+            response['next_run'] = upcoming.isoformat() if upcoming else None
+        if onboarding_action == 'activate':
+            response['summary'] = progress['summary']
+        response['preview'] = preview
+        return response
 
     def confirm(self, actor_id, action_id):
         with self.mutation(actor_id):
@@ -298,6 +416,34 @@ class JobHunterService:
                         if item.get('id') in proposed_ids:
                             item['confirmation'] = 'candidate-confirmed'
                 settings = self._validate(actor_id, settings)
+                from . import onboarding
+                state = onboarding.load(db, actor_id)
+                if state is not None:
+                    current_settings = json.loads(member_row['settings'])
+                    source = self._onboarding_source_digest(actor_id)
+                    before = onboarding.subjects(current_settings, source)
+                    after = onboarding.subjects(settings, source)
+                    progress = onboarding.status(current_settings, state, member_row['revision'], source,
+                                                 self.connection_status(actor_id))
+                    guided_action = action.get('onboarding_action')
+                    if guided_action:
+                        if action.get('onboarding_generation') != state['generation']:
+                            raise ValueError('Onboarding progress changed. Request a fresh preview.')
+                        if guided_action == 'activate' and (not progress['ready_for_activation']
+                                or action.get('onboarding_binding') != onboarding.binding(before, state)):
+                            raise ValueError('Review the current guided setup before activating it.')
+                    if (settings['schedule']['enabled'] and not current_settings['schedule']['enabled']
+                            and not progress['complete'] and guided_action != 'activate'):
+                        raise ValueError('Use the guided activation preview after completing your review.')
+                    if current_settings['schedule']['enabled'] and settings['schedule']['enabled'] and before != after:
+                        raise ValueError('Pause the running search before changing guided setup settings.')
+                    updated_state = onboarding.reconcile(state, before, after)
+                    if guided_action == 'activate':
+                        updated_state['activated'] = onboarding.binding(after, updated_state)
+                    elif guided_action and guided_action.startswith('skip:'):
+                        onboarding.acknowledge(updated_state, after, guided_action.split(':', 1)[1], 'skip')
+                    if updated_state != state:
+                        onboarding.save(db, actor_id, updated_state)
                 db.execute('UPDATE members SET settings=?,revision=revision+1 WHERE user_id=?', (json.dumps(settings), actor_id))
                 db.execute('UPDATE actions SET consumed=2 WHERE id=?', (action_id,))
                 db.execute('INSERT INTO audit(actor,operation,target,created_at) VALUES(?,?,?,?)',
@@ -332,6 +478,10 @@ class JobHunterService:
         private_json(previous_file, settings)
 
     def stage_resume(self, actor_id, resume):
+        with self.mutation(actor_id):
+            return self._stage_resume(actor_id, resume)
+
+    def _stage_resume(self, actor_id, resume):
         member = self._member(actor_id)
         if not isinstance(resume, dict) or not isinstance(resume.get('text'), str):
             raise ValueError('A safely extracted resume is required.')
@@ -340,6 +490,15 @@ class JobHunterService:
         source = {key: resume[key] for key in ('text', 'filename', 'sha256') if key in resume}
         source['untrusted'] = True
         private_json(self.profile_dir(member) / 'state' / 'resume_source.json', source)
+        from . import onboarding
+        with self.store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            state = onboarding.load(db, actor_id)
+            if state is not None:
+                state['acknowledgements'].pop('resume', None)
+                state['acknowledgements'].pop('review', None)
+                state['activated'] = None
+                onboarding.save(db, actor_id, state)
         return {'status': 'resume_received', 'message': 'Resume imported as source material. Confirm the proposed facts before they are saved to your profile.'}
 
     def connect(self, actor_id, provider, purpose=''):
@@ -347,6 +506,8 @@ class JobHunterService:
         if not self.public_url:
             raise ValueError('Secure account connection links are not configured by the operator yet.')
         if provider == 'google' and purpose in {'gmail', 'tracker'}:
+            if not self.google_enabled:
+                raise ValueError('Google connection is not available yet. You can skip Gmail and tracker while the owner completes setup.')
             member = self._member(actor_id)
             account = json.loads(member['settings'])['accounts'][purpose]['account']
             if not account:
