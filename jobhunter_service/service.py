@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
+from .presentation import DEFAULT_PRESENTATION as PRESENTATION_DEFAULTS
 from .scheduling import next_run, validate_schedule
 from .state import Store, private_json
 
@@ -23,6 +24,19 @@ def merge(old, patch):
     result = copy.deepcopy(old)
     for key, value in patch.items():
         result[key] = merge(result[key], value) if isinstance(value, dict) and isinstance(result.get(key), dict) else copy.deepcopy(value)
+    return result
+
+
+def validate_presentation(value):
+    """Normalize explicitly supplied presentation preferences; never templates."""
+    if not isinstance(value, dict) or set(value) - set(PRESENTATION_DEFAULTS):
+        raise ValueError('Telegram presentation only supports style, show_salary, show_match_reason and group_by_market.')
+    result = {**PRESENTATION_DEFAULTS, **value}
+    if not isinstance(result['style'], str) or result['style'] not in {'standard', 'compact'}:
+        raise ValueError('Telegram presentation style must be standard or compact.')
+    for field in ('show_salary', 'show_match_reason', 'group_by_market'):
+        if type(result[field]) is not bool:
+            raise ValueError(f'Telegram presentation {field} must be a boolean.')
     return result
 
 
@@ -193,8 +207,11 @@ class JobHunterService:
         if settings['schedule']['enabled'] and not self.readiness(settings)['ready']:
             raise ValueError('Confirm your resume, keywords and destinations before enabling the schedule.')
         telegram = settings['telegram']
-        if not isinstance(telegram, dict) or set(telegram) != {'destinations'}:
+        if (not isinstance(telegram, dict) or 'destinations' not in telegram
+                or set(telegram) - {'destinations', 'presentation'}):
             raise ValueError('Invalid Telegram settings.')
+        if 'presentation' in telegram:
+            telegram['presentation'] = validate_presentation(telegram['presentation'])
         destinations = telegram['destinations']
         if not isinstance(destinations, list) or not 1 <= len(destinations) <= 5:
             raise ValueError('Configure one to five Telegram destinations.')

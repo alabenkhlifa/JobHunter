@@ -156,6 +156,83 @@ def test_user_cannot_configure_owner_tools_paths_or_other_private_chats(service,
     assert service.snapshot(123)["revision"] == 0
 
 
+def test_optional_presentation_keeps_existing_profiles_unchanged(service):
+    activate(service)
+    assert 'presentation' not in service.snapshot(123)['settings']['telegram']
+    changed = confirm(service, 123, {'schedule': {'time': '10:30'}})
+    assert 'presentation' not in changed['settings']['telegram']
+
+
+def test_presentation_requires_confirmation_and_persists_only_for_its_candidate(service):
+    activate(service, 123)
+    activate(service, 456)
+    original = service.snapshot(123)['settings']
+    action = service.propose(123, {'telegram': {'presentation': {'style': 'compact', 'show_salary': True}}})
+    assert '"style": "compact"' in action['preview'] and '"show_salary": true' in action['preview']
+    assert service.snapshot(123)['settings'] == original
+    with pytest.raises(ValueError):
+        service.confirm(456, action['action_id'])
+    changed = service.confirm(123, action['action_id'])
+    expected = {'style': 'compact', 'show_salary': True, 'show_match_reason': False, 'group_by_market': False}
+    assert changed['settings']['telegram']['presentation'] == expected
+    assert changed['settings']['telegram']['destinations'] == original['telegram']['destinations']
+    assert changed['settings']['search'] == original['search']
+    assert 'presentation' not in service.snapshot(456)['settings']['telegram']
+    restarted = JobHunterService(service.root, OWNER, telegram_client=service.telegram_client)
+    assert restarted.snapshot(123)['settings']['telegram']['presentation'] == expected
+
+
+def test_sparse_presentation_edits_preserve_previously_confirmed_preferences(service):
+    activate(service)
+    confirm(service, 123, {'telegram': {'presentation': {'style': 'compact', 'group_by_market': True}}})
+    changed = confirm(service, 123, {'telegram': {'presentation': {'show_match_reason': True}}})
+    assert changed['settings']['telegram']['presentation'] == {
+        'style': 'compact', 'show_salary': False, 'show_match_reason': True, 'group_by_market': True}
+    changed = confirm(service, 123, {'telegram': {'presentation': {'style': 'standard', 'group_by_market': False}}})
+    assert changed['settings']['telegram']['presentation']['style'] == 'standard'
+    assert changed['settings']['telegram']['presentation']['group_by_market'] is False
+    assert changed['settings']['telegram']['presentation']['show_match_reason'] is True
+
+
+@pytest.mark.parametrize('presentation', [
+    None, [], 'compact', {'style': 'html'}, {'style': True}, {'style': ['compact']},
+    {'show_salary': 1}, {'show_salary': 'true'}, {'show_match_reason': 0},
+    {'group_by_market': None}, {'template': '{private_data}'}, {'parse_mode': 'HTML'},
+    {'show_credentials': True}, {'cap': 100},
+])
+def test_invalid_presentation_cannot_create_a_confirmation_or_mutate_settings(service, presentation):
+    activate(service)
+    original = service.snapshot(123)['settings']
+    with pytest.raises(ValueError, match='presentation'):
+        service.propose(123, {'telegram': {'presentation': presentation}})
+    assert service.snapshot(123)['settings'] == original
+    with service.store.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM actions WHERE user_id=123').fetchone()[0] == 0
+
+
+def test_natural_language_presentation_proposal_uses_the_existing_telegram_confirmation_flow(service):
+    from unittest.mock import Mock
+    from jobhunter_service.hermes import RestrictedHermesAssistant
+    from jobhunter_service.telegram import TelegramHandler
+
+    activate(service)
+    client = Mock()
+    plan = {'operation': 'propose', 'patch': {'telegram': {'presentation': {
+        'style': 'compact', 'show_salary': True, 'group_by_market': True}}}}
+    planner = Mock(return_value=plan)
+    handler = TelegramHandler(service, client, RestrictedHermesAssistant(planner))
+    handler.handle_update({'update_id': 1, 'message': {'from': {'id': 123, 'is_bot': False},
+        'chat': {'id': 123, 'type': 'private'}, 'text': 'Use a compact job digest grouped by destination and include salaries'}})
+    assert 'presentation' not in service.snapshot(123)['settings']['telegram']
+    button = client.send_message.call_args.args[2]['inline_keyboard'][0][0]['callback_data']
+    handler.handle_update({'update_id': 2, 'callback_query': {'id': 'synthetic-confirmation',
+        'from': {'id': 123, 'is_bot': False}, 'data': button,
+        'message': {'from': {'id': 999, 'is_bot': True}, 'chat': {'id': 123, 'type': 'private'}}}})
+    assert service.snapshot(123)['settings']['telegram']['presentation'] == {
+        'style': 'compact', 'show_salary': True, 'show_match_reason': False, 'group_by_market': True}
+    assert all(call.args[0] == 123 for call in client.send_message.call_args_list)
+
+
 def test_resume_upload_stays_untrusted_until_exact_fact_confirmation(service):
     activate(service, 123)
     activate(service, 456)

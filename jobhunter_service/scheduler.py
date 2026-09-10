@@ -59,17 +59,20 @@ class Scheduler:
         if process.returncode:
             raise RuntimeError('Collection or review failed. The profile remains available for its next run.')
 
-    def _digest(self, root, selected_ids, queued):
-        lines = [f'Job matches: {len(selected_ids)} selected, {queued} queued']
+    def _digest(self, root, selected_ids, queued, *, settings=None):
+        from .presentation import render_digest
+        jobs = []
         with closing(sqlite3.connect(root / 'jobs.db')) as db, db:
             db.row_factory = sqlite3.Row
             for job_id in selected_ids:
                 job = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
                 if job is None:
                     raise ValueError('A selected job is missing from this profile.')
-                lines.append(f"{job['title']} — {job['company']}\n{job['location']}\n{job['url']}\n/details {job_id}")
-        lines.append('Use /interested <job_id> to track a role, then /apply <job_id> to prepare documents.')
-        return '\n\n'.join(lines)
+                jobs.append(dict(job))
+        settings = settings or {}
+        return render_digest(jobs, queued,
+            presentation=settings.get('telegram', {}).get('presentation'),
+            markets=settings.get('search', {}).get('markets'))
 
     def run_next(self):
         with self.service.store.connect() as db:
@@ -116,7 +119,9 @@ class Scheduler:
                     current = self.service._member(user_id)
                     if current['revision'] != run['revision']:
                         raise ValueError('Profile changed before digest delivery.')
-                    self.delivery.enqueue(user_id, run_id, self._digest(root, result['selected_ids'], result['queued_count']), result['selected_ids'])
+                    self.delivery.enqueue(user_id, run_id,
+                        self._digest(root, result['selected_ids'], result['queued_count'], settings=settings),
+                        result['selected_ids'])
                 else:
                     evidence = result.get('availability', {})
                     self.client.send_message(user_id, 'No listings could be confirmed open. Uncertain checks remain queued for retry.' if evidence.get('unknown') or evidence.get('unchecked') else 'The review completed; no open jobs cleared your current requirements.')

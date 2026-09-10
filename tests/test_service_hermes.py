@@ -31,6 +31,31 @@ def test_planner_receives_only_current_candidate_and_no_owner_tools():
     assert schema["properties"]["operation"]["enum"] == ["propose", "connect", "show", "reply"]
 
 
+def test_natural_language_presentation_plan_exposes_supported_fields_without_adding_defaults():
+    proposed = {'operation': 'propose', 'patch': {'telegram': {'presentation': {'style': 'compact', 'show_salary': True}}}}
+    planner = Mock(return_value=proposed)
+    result = RestrictedHermesAssistant(planner).plan('Make my job messages compact and show salary', {
+        'settings': {'telegram': {'presentation': {'style': 'standard', 'group_by_market': True}}}})
+    assert result == proposed  # Only requested changes enter the preview.
+    messages, schema = planner.call_args.args
+    presentation = schema['properties']['patch']['properties']['telegram']['properties']['presentation']
+    assert presentation['additionalProperties'] is False
+    assert presentation['properties']['style']['enum'] == ['standard', 'compact']
+    assert {name for name, value in presentation['properties'].items() if value['type'] == 'boolean'} == {
+        'show_salary', 'show_match_reason', 'group_by_market'}
+    assert 'never invented values' in messages[0]['content']
+    assert 'group_by_market' in messages[1]['content']
+
+
+@pytest.mark.parametrize('presentation', [
+    {'style': 'markdown'}, {'show_salary': 'yes'}, {'group_by_market': 1},
+    {'show_match_reason': None}, {'template': 'custom'}, [],
+])
+def test_invalid_presentation_plan_is_rejected_before_a_confirmation_is_requested(presentation):
+    with pytest.raises(HermesResponseError, match='presentation'):
+        validate_plan({'operation': 'propose', 'patch': {'telegram': {'presentation': presentation}}})
+
+
 @pytest.mark.parametrize("plan", [
     {"operation": "confirm", "action_id": "abc"},
     {"operation": "admin", "target": 22},
