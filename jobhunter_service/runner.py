@@ -244,20 +244,27 @@ def review_prompt(manifest):
     """Messages for a model adapter with no tools or owner conversation memory."""
     envelope = {key: manifest[key] for key in ENVELOPE_KEYS - {"verdicts"}}
     envelope["verdicts"] = [{"job_id": "one listed candidate ID", "verdict": "send|hold|reject",
-                              "sponsorship": "offered|implied|doubtful|excluded",
+                              "sponsorship": "offered|implied|no_info|doubtful|excluded",
                               "reason": "at most ten factual words", "rank": 1}]
     system = (
         "Review job matches for only the candidate in this request. You have no tools, filesystem, "
         "browser, messaging, cron or administration access. Return exactly one JSON object using "
         "the envelope below. Preserve all envelope identity fields exactly. Include exactly one "
         "verdict for every candidate ID. Allowed verdicts: send, hold, reject. Sponsorship labels: "
-        "offered, implied, doubtful, excluded. Use offered only for explicit employer sponsorship "
-        "evidence in the listing; location or a large company is not evidence. Send ranks must be "
+        "offered, implied, no_info, doubtful, excluded. The label reports what this listing says, "
+        "never a guess from its country: offered for explicit employer sponsorship or relocation "
+        "evidence in the listing; implied for indirect but real evidence such as an international "
+        "relocation package or stated work-permit support; no_info when the listing is silent, "
+        "which is the normal case; doubtful only when the listing itself raises a specific barrier; "
+        "excluded when it rules sponsorship out. Location or a large company is not evidence, and "
+        "silence is not a barrier. Send ranks must be "
         "distinct positive integers; hold/reject ranks must be null. Reasons have at most ten words. "
         "Resume facts are only those the candidate confirmed. Do not invent experience, skills, "
         "salary, relocation support or permission to work. Apply the configured preferred/excluded "
         "roles, technologies, seniority, and scoring preferences, regardless of profession. "
-        "Work authorization is per destination. For authorized destinations a no-sponsorship "
+        "Work authorization is per destination, and the pipeline applies it after you: label what the "
+        "listing says and do not hold a job for a sponsorship question the destination policy "
+        "already answers. For authorized destinations a no-sponsorship "
         "posting can qualify. Sponsorship-required destinations require explicit offered "
         "sponsorship to send; hold implied or uncertain sponsorship. Unknown authorization must "
         "be held even if the employer offers sponsorship. Respect relocation requirements "

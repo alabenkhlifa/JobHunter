@@ -521,7 +521,7 @@ def select_sendable(reviewed, *, per_market=3, cap=12, markets=None):
         job for job in reviewed
         if job.get("ai_verdict") == "send"
         and (jobhunter_matching.review_sendable(job, markets) if markets is not None
-             else job.get("ai_sponsorship") in ("offered", "implied"))
+             else job.get("ai_sponsorship") in SENDABLE_SPONSORSHIP)
     ]
 
     by_market = {}
@@ -814,6 +814,16 @@ WEIGHTS = {
 
 SEND_CUTOFF = 45
 BANDS = ((75, "excellent"), (60, "good"), (SEND_CUTOFF, "normal"))
+
+# The AI review's sponsorship read. Silence is the normal case, not a warning:
+# 97.7% of the corpus says nothing, so it gets its own value instead of being
+# folded into a market-shaped guess that reads the same silence as "implied"
+# in the Gulf and "doubtful" in Switzerland. `no_info` sends -- the collection
+# filter already drops postings demanding an existing permit, and the digest
+# shows the read on every job, so the risk is displayed rather than hidden
+# behind a hold. Only a barrier the posting itself states blocks delivery.
+SPONSORSHIP_READS = ("offered", "implied", "no_info", "doubtful", "excluded")
+SENDABLE_SPONSORSHIP = ("offered", "implied", "no_info")
 
 
 def band(total):

@@ -100,6 +100,13 @@ def test_format_digest_message_shows_sponsorship_read():
     assert "<b>✅ Visa offered</b>" in msg
 
 
+def test_digest_distinguishes_a_silent_posting_from_an_inferred_one():
+    # no_info is the 97.7% case and it sends, so the reader has to be able to
+    # tell "the listing did not say" from "the review inferred it".
+    msg = scraper.format_digest_message([job(ai_sponsorship="no_info")], 0, [])
+    assert "<b>🛂 Visa not mentioned</b>" in msg
+
+
 def test_digest_bolds_company_and_unconfirmed_visa_and_empty_markets():
     msg = scraper.format_digest_message([job(company="AT&T")], 0, [])
     assert "<b>AT&amp;T</b>" in msg

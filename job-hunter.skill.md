@@ -215,13 +215,43 @@ For each candidate job, the scraper fetches the full description and extracts:
    the full text; distinguish explicit evidence from a sponsorship inference.
    For each one it judges: whether the description reads as a real backend
    architecture/tech-lead role or a title dressed as one, whether the company
-   looks real, and the sponsorship read (`offered`/`implied`/`doubtful`/
-   `excluded` — required on every job regardless of verdict, since sponsorship
-   is his one hard deal-breaker and a market-and-context judgment the
-   description alone answers, not a phrase match). It returns a JSON array of
+   looks real, and the sponsorship read. That read reports what **this
+   listing** says, never a guess from its country: `offered` for explicit
+   employer sponsorship or relocation support; `implied` for indirect but real
+   evidence such as an international relocation package or stated work-permit
+   support; `no_info` when the listing is silent, which is the normal case at
+   roughly 98% of postings; `doubtful` only when the listing itself raises a
+   specific barrier ("you must be eligible to work in Switzerland", EU/EFTA
+   preference); `excluded` when it rules sponsorship out. It is required on
+   every job regardless of verdict, since sponsorship is his one hard
+   deal-breaker. `offered`, `implied` and `no_info` all send.
+   Silence is not a barrier and "sponsorship unconfirmed" is not a hold
+   reason: collection already drops postings that demand an existing permit or
+   EU/EFTA nationality, so anything reaching review has passed that wall, and
+   the digest prints the read on every job so the risk is shown rather than
+   hidden behind a hold. Reading the same silence as `implied` in the Gulf and
+   `doubtful` in Switzerland is one market prior applied twice; the market is
+   already in the digest heading. It returns a JSON array of
    `{job_id, verdict, reason, sponsorship, rank}` — verdict is
    `send`/`hold`/`reject`, `reason` at most ten words, `rank` a positive
-   integer unique across the batch's `send` entries, 1 = best — on stdin to
+   integer unique across the batch's `send` entries, 1 = best.
+5b. **Top up the empty markets before sending.** Pipe that array to
+   `~/.hermes/scripts/jobhunter_review.py --plan`, which writes nothing and
+   sends nothing: it prints JSON naming the markets this review would leave
+   empty and how many candidates each still has to review. The first batch is
+   40 slots balanced across markets, so a market with a deep queue can produce
+   no approval at all and show up as `⚠️ No matches` while dozens of its jobs
+   sit unreviewed — that is the hole this step fills. For every entry in
+   `empty_markets` whose `reviewable` count is above zero, run
+   `~/.hermes/scripts/jobhunter_collect_candidates.py --top-up <markets>`
+   (comma-separated, and it neither scrapes nor writes) to get that market's
+   next slice of the same queue, review those the same way, and append their
+   verdicts to the first array. Renumber `rank` so every `send` across both
+   rounds still has a distinct rank. Do this at most once per run: a market
+   whose second round also approves nothing is genuinely empty tonight, and
+   `--plan` cannot check whether a listing is still open, so a market it counts
+   can still fall empty on the availability check. Send the combined array on
+   stdin to
    `~/.hermes/scripts/jobhunter_review.py`, which persists every field
    (`scraper.record_review`), then calls `scraper.send_reviewed_digest` even
    when the new batch contains no approved sends. That function combines the
@@ -240,7 +270,7 @@ For each candidate job, the scraper fetches the full description and extracts:
    Never suppress collection, review, or
    delivery errors; report them even if a partial digest reached Telegram.
    Queue selection excludes any `send` whose sponsorship reads `doubtful` or
-   `excluded` under this owner's policy. It allocates one job per market per
+   `excluded` under this owner's policy; `no_info` sends. It allocates one job per market per
    round (Dubai and Abu Dhabi count separately), for a default floor of 3,
    then shares unused places up to a global cap of 12. A strong market can
    receive more than 3. Current approvals retain their batch order; older
@@ -279,8 +309,9 @@ For each candidate job, the scraper fetches the full description and extracts:
    the digest. Empty markets share one bold `⚠️ No matches` line, except those
    with unresolved checks, which use `⏳ Availability not confirmed`. These
    labels describe this delivery, not an exhaustive absence of jobs. Scores use
-   🔥 for 80+, ⭐ for 70–79, and 👍 below 70. Visa labels are bold: an inferred
-   sponsorship read displays `❓ Visa unconfirmed`; an explicit offer displays
+   🔥 for 80+, ⭐ for 70–79, and 👍 below 70. Visa labels are bold: a silent
+   listing displays `🛂 Visa not mentioned`; an inferred sponsorship read
+   displays `❓ Visa unconfirmed`; an explicit offer displays
    `✅ Visa offered`. The live queue count appears once in the summary; it
    includes eligible unreviewed and held jobs, not only approved sends.
 8. A bare numeric reply that follows the digest (e.g. "2") refers to that job
@@ -419,6 +450,12 @@ python3 scraper.py --list-queued [--limit N]
 
 # Recheck and send eligible stored approvals without a new review batch (Pi)
 printf '[]\n' | ~/.hermes/scripts/jobhunter_review.py
+
+# Which markets a verdict array would leave empty — writes nothing, sends nothing (Pi)
+printf '[]\n' | ~/.hermes/scripts/jobhunter_review.py --plan
+
+# Next queue slice for markets a review round left empty — no scrape, no write (Pi)
+~/.hermes/scripts/jobhunter_collect_candidates.py --top-up switzerland,jeddah
 
 # Send message via Telegram
 python3 scraper.py --send-msg "<html message>"

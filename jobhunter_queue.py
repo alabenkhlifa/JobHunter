@@ -123,7 +123,7 @@ def _sendable(job, markets):
         return False
     if markets is not None:
         return jobhunter_matching.review_sendable(job, markets)
-    return job.get("ai_sponsorship") in ("offered", "implied")
+    return job.get("ai_sponsorship") in job_scoring.SENDABLE_SPONSORSHIP
 
 
 def merge_reviewed_queue(eligible_candidates, newly_reviewed=(), *, markets=None):
@@ -182,3 +182,65 @@ def select_reviewed_queue(eligible_candidates, newly_reviewed=(), *, per_market=
     """Combine current verdicts with approved backlog, then select the digest."""
     merged = merge_reviewed_queue(eligible_candidates, newly_reviewed, markets=markets)
     return select_ranked(merged, per_market=per_market, cap=cap, markets=markets)
+
+
+def _wanted(wanted_markets):
+    names = {str(name).strip().lower() for name in wanted_markets}
+    if not names or "" in names or "unknown" in names:
+        raise ValueError("wanted_markets must be nonempty known market names")
+    return names
+
+
+def delivery_plan(eligible_candidates, newly_reviewed=(), *, per_market=3, cap=12, markets=None):
+    """Which markets this review leaves empty, and how much queue each has left.
+
+    A dry run for the caller's own review loop: it names the markets that would
+    receive nothing so a second round can spend its slots there, before any
+    digest is composed. `reviewable` counts what a top-up could still look at --
+    eligible, not already in this batch, not rejected. Purely arithmetic: it
+    cannot run the source availability checks, so a market counted here can
+    still end up empty once closed listings are dropped.
+    """
+    _limits(per_market, cap)
+    if markets is not None:
+        markets = jobhunter_matching.validate_markets(markets)
+    selected = select_reviewed_queue(eligible_candidates, newly_reviewed,
+                                     per_market=per_market, cap=cap, markets=markets)
+    counts = {}
+    for job in selected:
+        counts[job["market"]] = counts.get(job["market"], 0) + 1
+
+    batch = set(_index(newly_reviewed))
+    plan = {}
+    for job in _index(eligible_candidates).values():
+        market = _market(job, markets)
+        if market == "unknown":
+            continue
+        if markets is not None and jobhunter_matching.eligibility_reason(job, markets):
+            continue
+        entry = plan.setdefault(market, {"selected": counts.get(market, 0),
+                                         "eligible": 0, "reviewable": 0})
+        entry["eligible"] += 1
+        if job["id"] not in batch and job.get("ai_verdict") != "reject":
+            entry["reviewable"] += 1
+    for market, count in counts.items():
+        plan.setdefault(market, {"selected": count, "eligible": 0, "reviewable": 0})
+    return {"markets": plan,
+            "empty_markets": sorted(name for name, entry in plan.items() if not entry["selected"])}
+
+
+def top_up_order(candidates, wanted_markets, *, exclude_ids=(), per_market=3, cap=12,
+                 markets=None):
+    """Review order for only the markets a first round left empty.
+
+    Same balancing and priority as candidate_review_order over a narrowed pool,
+    so a second round spends its slots where the digest has a hole instead of
+    re-reading the candidates the first round already judged.
+    """
+    wanted = _wanted(wanted_markets)
+    excluded = {str(job_id) for job_id in exclude_ids}
+    if markets is not None:
+        markets = jobhunter_matching.validate_markets(markets)
+    rows = [job for job in _index(candidates).values()
+            if str(job["id"]) not in excluded and _market(job, markets) in wanted]
+    return candidate_review_order(rows, markets=markets, per_market=per_market, cap=cap)

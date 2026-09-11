@@ -810,7 +810,7 @@ def mark_notified(conn, job_ids):
 
 
 _AI_VERDICTS = ("send", "hold", "reject")
-_AI_SPONSORSHIP = ("offered", "implied", "doubtful", "excluded")
+_AI_SPONSORSHIP = job_scoring.SPONSORSHIP_READS
 
 
 def prepare_review_candidate(job, *, now=None):
@@ -893,6 +893,30 @@ def record_review(conn, verdicts):
     conn.row_factory = sqlite3.Row
     eligible = {row["id"]: row["location"] for row in get_review_candidates(conn)}
 
+    written = []
+    for entry in validated_verdicts(verdicts, eligible):
+        status_update = ", status = 'rejected'" if entry["ai_verdict"] == "reject" else ""
+        conn.execute(
+            f"UPDATE jobs SET ai_verdict = ?, ai_verdict_reason = ?, "
+            f"ai_sponsorship = ?, ai_rank = ?{status_update} WHERE id = ?",
+            (entry["ai_verdict"], entry["ai_verdict_reason"], entry["ai_sponsorship"],
+             entry["ai_rank"], entry["id"]),
+        )
+        if entry["ai_verdict"] == "send":
+            location = eligible[entry["id"]]
+            written.append(dict(entry, location=location,
+                                market=job_scoring.market_region(location, markets=CONFIG.get("markets"))))
+    conn.commit()
+    return written
+
+
+def validated_verdicts(verdicts, eligible):
+    """Accepted review entries in queue field shape; nothing is written here.
+
+    One rejected entry is dropped on its own, but a batch that breaks its own
+    contract -- a repeated job ID, or two sends claiming the same rank -- is
+    refused whole, since neither half can be trusted to be the intended one.
+    """
     seen_ids = set()
     seen_ranks = set()
     for entry in verdicts:
@@ -906,7 +930,7 @@ def record_review(conn, verdicts):
                 return []
             seen_ranks.add(rank)
 
-    written = []
+    accepted = []
     for entry in verdicts:
         job_id = entry.get("job_id")
         verdict = entry.get("verdict")
@@ -915,27 +939,14 @@ def record_review(conn, verdicts):
             continue
         if verdict not in _AI_VERDICTS or sponsorship not in _AI_SPONSORSHIP:
             continue
-
-        reason = " ".join(str(entry.get("reason") or "").split()[:10])
-        status_update = ", status = 'rejected'" if verdict == "reject" else ""
-        rank = entry.get("rank") if verdict == "send" else None
-        conn.execute(
-            f"UPDATE jobs SET ai_verdict = ?, ai_verdict_reason = ?, "
-            f"ai_sponsorship = ?, ai_rank = ?{status_update} WHERE id = ?",
-            (verdict, reason, sponsorship, rank, job_id),
-        )
-        if verdict == "send":
-            written.append({
-                "id": job_id,
-                "market": job_scoring.market_region(eligible[job_id], markets=CONFIG.get("markets")),
-                "location": eligible[job_id],
-                "ai_verdict": verdict,
-                "ai_verdict_reason": reason,
-                "ai_sponsorship": sponsorship,
-                "ai_rank": rank,
-            })
-    conn.commit()
-    return written
+        accepted.append({
+            "id": job_id,
+            "ai_verdict": verdict,
+            "ai_verdict_reason": " ".join(str(entry.get("reason") or "").split()[:10]),
+            "ai_sponsorship": sponsorship,
+            "ai_rank": entry.get("rank") if verdict == "send" else None,
+        })
+    return accepted
 
 
 
@@ -951,6 +962,30 @@ def reviewed_queue(conn, newly_reviewed=(), *, context_digest=None):
         valid = {row[0] for row in conn.execute('SELECT job_id FROM jobhunter_review_context WHERE context_digest=?', (context_digest,))}
         candidates = [dict(row, ai_verdict='') if row['id'] not in valid else row for row in candidates]
     return jobhunter_queue.merge_reviewed_queue(candidates, newly_reviewed, markets=CONFIG.get('markets'))
+
+
+def plan_reviewed_digest(conn, verdicts=(), *, context_digest=None):
+    """Report the markets these verdicts would leave empty, without sending.
+
+    Persists nothing and contacts nothing: the caller runs this between review
+    rounds, tops up the empty markets from their own queue, then sends one
+    digest from the combined verdicts. Availability is not checked here, so a
+    market with a selection can still fall empty when its listing is closed.
+    """
+    import jobhunter_queue
+    conn.row_factory = sqlite3.Row
+    feedback = get_feedback_summary(conn, initialize=False)
+    rows = get_review_candidates(conn)
+    candidates = [apply_feedback_learning(row, feedback, matching=CONFIG.get('matching'))
+                  for row in rows]
+    if CONFIG.get('matching', {}).get('preset') == 'generic':
+        conn.execute('CREATE TABLE IF NOT EXISTS jobhunter_review_context (job_id TEXT PRIMARY KEY, context_digest TEXT NOT NULL)')
+        valid = {row[0] for row in conn.execute('SELECT job_id FROM jobhunter_review_context WHERE context_digest=?', (context_digest,))}
+        candidates = [dict(row, ai_verdict='') if row['id'] not in valid else row for row in candidates]
+    reviewed = validated_verdicts(verdicts, {row['id']: row['location'] for row in rows})
+    return jobhunter_queue.delivery_plan(candidates, reviewed,
+                                         markets=CONFIG.get('markets'),
+                                         **CONFIG.get('delivery', {}))
 
 
 def send_reviewed_digest(token, chat_id, conn, newly_reviewed=()):
@@ -2224,6 +2259,7 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None, 
     visa_labels = {
         "offered": "✅ Visa offered",
         "implied": "❓ Visa unconfirmed",
+        "no_info": "🛂 Visa not mentioned",
         "doubtful": "⚠️ Visa doubtful",
         "excluded": "🚫 No sponsorship",
     }

@@ -193,3 +193,21 @@ def test_record_review_works_on_a_connection_without_a_row_factory():
     ).fetchone()
     assert written_verdict == "send"
     assert rank == 3
+
+
+def test_record_review_persists_a_silent_posting_as_no_info():
+    conn = make_conn([("j1", {})])
+    written = scraper.record_review(conn, [verdict("j1", "send", sponsorship="no_info")])
+    row = conn.execute("SELECT ai_sponsorship FROM jobs WHERE id = 'j1'").fetchone()
+    assert row["ai_sponsorship"] == "no_info"
+    assert [entry["id"] for entry in written] == ["j1"]
+
+
+def test_plan_reviewed_digest_names_the_empty_markets_without_writing_anything():
+    conn = make_conn([("j1", {}), ("j2", {"location": "Zurich, Switzerland"})])
+    scraper.init_feedback_tracking(conn)
+    plan = scraper.plan_reviewed_digest(conn, [verdict("j1", "send", sponsorship="no_info")])
+    assert plan["empty_markets"] == ["switzerland"]
+    assert plan["markets"]["switzerland"]["reviewable"] == 1
+    rows = conn.execute("SELECT ai_verdict FROM jobs").fetchall()
+    assert [row["ai_verdict"] for row in rows] == ["", ""]
