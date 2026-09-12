@@ -139,12 +139,40 @@ def test_fetched_knockout_is_saved_and_not_fetched_next_run(collection, descript
     assert state["skip_counts"]["already_seen"] == 1
 
 
-def test_default_buckets_are_five_linkedin_and_two_foundit(monkeypatch):
+@pytest.mark.parametrize("location,allowed", [("Dubai, UAE", True), ("Sharjah, UAE", False)])
+def test_gulftalent_uses_existing_collection_filters_and_persistence(collection, location, allowed):
+    state, fetch = collection
+    job = collection_job(id="gulftalent-12345", source="GulfTalent", location=location,
+                         url="https://www.gulftalent.com/uae/jobs/java-architect-12345")
+    result = scraper.evaluate_job(job, **state)
+    assert (result is not None) is allowed
+    saved = state["conn"].execute("SELECT id, source FROM jobs").fetchall()
+    assert saved == ([("gulftalent-12345", "GulfTalent")] if allowed else [])
+    assert fetch.call_count == int(allowed)
+
+
+def test_gulftalent_missing_description_is_retried_after_access_recovers(collection):
+    state, fetch = collection
+    job = collection_job(id="gulftalent-12345", source="GulfTalent",
+                         url="https://www.gulftalent.com/uae/jobs/java-architect-12345")
+    description = fetch.return_value
+    fetch.return_value = ""
+    assert scraper.evaluate_job(job, **state) is None
+    assert state["conn"].execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+    assert state["skip_counts"]["missing_description"] == 1
+    fetch.return_value = description
+    assert scraper.evaluate_job(job, **state) is not None
+    assert state["conn"].execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+
+
+def test_default_buckets_use_regions_for_linkedin_and_countries_for_gulf_boards(monkeypatch):
     monkeypatch.setattr(scraper, "CONFIG", scraper.DEFAULT_CONFIG)
     buckets = scraper.build_collection_buckets(mock.Mock())
     assert set(buckets) == {"LinkedIn/" + region for region in scraper.CONFIG["regions"]} | {
-        "Foundit/United Arab Emirates", "Foundit/Saudi Arabia"}
+        "Foundit/United Arab Emirates", "Foundit/Saudi Arabia",
+        "GulfTalent/United Arab Emirates", "GulfTalent/Saudi Arabia"}
     assert len(buckets["Foundit/United Arab Emirates"]["generators"]) == len(scraper.CONFIG["keywords"])
+    assert len(buckets["GulfTalent/United Arab Emirates"]["generators"]) == len(scraper.CONFIG["keywords"])
 
 
 @pytest.mark.parametrize("city,country", [

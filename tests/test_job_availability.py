@@ -17,6 +17,8 @@ LINKEDIN = {"id": "li-12345", "source": "LinkedIn", "title": "Backend Engineer",
             "url": "https://ae.linkedin.com/jobs/view/backend-engineer-example-team-12345?trackingId=unused"}
 FOUNDIT = {**LINKEDIN, "id": "foundit-98765", "source": "Foundit",
            "url": "https://www.founditgulf.com/job/backend-engineer-example-team-98765"}
+GULFTALENT = {**LINKEDIN, "id": "gulftalent-54321", "source": "GulfTalent",
+              "url": "https://www.gulftalent.com/uae/jobs/backend-engineer_54321"}
 
 
 class Response:
@@ -357,3 +359,76 @@ def test_persisting_check_rejects_wrong_job_url_and_fabricated_closed_evidence(t
         db.execute("UPDATE jobs SET url='https://www.linkedin.com/jobs/view/99999'")
         with pytest.raises(ValueError, match="changed"):
             availability.recordcheck(db, LINKEDIN, result)
+
+
+def gulf_page(*, identifier="54321", description=DESCRIPTION, status="", application=True,
+              path=None, widget_attrs="", extra=""):
+    # Public mobile markup inspected locally; all listing data is synthetic.
+    path = path if path is not None else (
+        f"/register?journey=apply-mobile&amp;return=/apply/{identifier}&amp;job_id={identifier}&amp;is_external=0")
+    widget = (f'<div class="react-job-application-button-mobile" path="{path}" {widget_attrs}></div>'
+              if application else "")
+    return (f'<title>Backend Engineer | GulfTalent</title><link rel="canonical" '
+            f'href="https://www.gulftalent.com/uae/jobs/backend-engineer_{identifier}">'
+            '<div class="header"><nav><a href="/register">Register</a></nav>'
+            '<div class="container-fluid status"><div data-cy="mobile-header"><h1>Backend Engineer</h1></div></div>'
+            '<div class="container-fluid subheader"><a class="mobile-company-link"><h2>Example Team</h2></a>'
+            f'<p>{status}</p>{widget}</div></div><div id="content"><div class="job-description">{description}</div>'
+            f'{extra}</div>')
+
+
+def test_gulftalent_identified_listing_with_job_bound_application_entry_is_open():
+    result = run(gulf_page(), GULFTALENT)
+    assert (result["state"], result["reason"], result["matched"]) == (
+        "open", "source_application_enabled", True)
+
+
+@pytest.mark.parametrize("path", ["", "/register", "/apply/54321",
+    "/register?journey=apply-mobile&amp;return=/apply/11111&amp;job_id=54321",
+    "/register?journey=apply-mobile&amp;return=/apply/54321&amp;job_id=11111",
+    "/register?journey=apply-mobile&amp;return=/apply/54321&amp;job_id=54321&amp;job_id=11111",
+    "https://example.test/register?journey=apply-mobile&amp;return=/apply/54321&amp;job_id=54321",
+])
+def test_gulftalent_generic_or_mismatched_application_entries_remain_unknown(path):
+    assert run(gulf_page(path=path), GULFTALENT)["state"] == "unknown"
+
+
+@pytest.mark.parametrize("attrs", ['hidden', 'aria-hidden="true"', 'disabled',
+                                   'aria-disabled="true"', 'style="display:none"'])
+def test_gulftalent_hidden_and_disabled_application_entries_remain_unknown(attrs):
+    assert run(gulf_page(widget_attrs=attrs), GULFTALENT)["state"] == "unknown"
+
+
+def test_gulftalent_checks_require_matching_identity_company_and_description():
+    for changes in ({"title": "Other Role"}, {"company": "Other Company"},
+                    {"id": "gulftalent-11111"}, {"id": "foundit-54321"}):
+        assert run(gulf_page(), {**GULFTALENT, **changes})["state"] == "unknown"
+    assert run(gulf_page(identifier="11111"), GULFTALENT)["state"] == "unknown"
+    assert run(gulf_page(description=""), GULFTALENT)["state"] == "unknown"
+    assert run(gulf_page(status="This job has expired"), GULFTALENT)["state"] == "closed"
+
+
+def test_gulftalent_recommendation_widget_does_not_prove_main_job_is_open():
+    widget = '<div class="react-job-application-button-mobile" path="/register?journey=apply-mobile&amp;return=/apply/54321&amp;job_id=54321"></div>'
+    assert run(gulf_page(application=False, extra=widget), GULFTALENT)["state"] == "unknown"
+
+
+@pytest.mark.parametrize("separator", ["-", "_"])
+@pytest.mark.parametrize("country", ["uae", "saudi-arabia", "qatar", "kuwait", "bahrain", "oman"])
+def test_gulftalent_url_identity_accepts_gulf_countries_and_both_slug_formats(country, separator):
+    assert availability._url_identity(f"https://www.gulftalent.com/{country}/jobs/backend{separator}54321") == (
+        "gulftalent", "54321")
+
+
+@pytest.mark.parametrize("status", [403, 429, 404, 500])
+def test_gulftalent_http_failures_do_not_retry_through_another_endpoint(status):
+    transport = Transport(Response(gulf_page(), status=status))
+    result = availability.check(GULFTALENT, transport, NOW)
+    assert result["state"] == "unknown" and result["reason"] == "http_unavailable"
+    assert len(transport.requests) == 1
+
+
+def test_gulftalent_redirect_to_login_is_not_followed():
+    transport = Transport(Response(status=302, headers={"Location": "/candidates/login"}))
+    assert availability.check(GULFTALENT, transport, NOW)["reason"] == "unsafe_redirect"
+    assert len(transport.requests) == 1

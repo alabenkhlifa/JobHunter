@@ -17,7 +17,7 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -1311,6 +1311,8 @@ def create_session():
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    # GulfTalent blocks are terminal for this collection run, including 429.
+    session.mount("https://www.gulftalent.com/", HTTPAdapter(max_retries=0))
 
     session.headers.update({
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1523,6 +1525,127 @@ def scrape_foundit(session, keyword, location):
         yield page_jobs
 
 
+# Country IDs from GulfTalent's public search filter response (September 2026).
+GULFTALENT_COUNTRIES = {
+    "United Arab Emirates": "10111111000000",
+    "Saudi Arabia": "10111112000000",
+    "Kuwait": "10111113000000",
+    "Qatar": "10111114000000",
+    "Bahrain": "10111115000000",
+    "Oman": "10111116000000",
+}
+GULFTALENT_LOCATION_ALIASES = {
+    "United Arab Emirates": ("uae", "dubai", "abu dhabi", "sharjah", "ajman", "fujairah", "ras al khaimah", "umm al quwain"),
+    "Saudi Arabia": ("ksa", "riyadh", "jeddah", "jiddah", "dammam", "khobar", "dhahran", "mecca", "makkah", "medina"),
+    "Kuwait": ("kuwait city",), "Qatar": ("doha",),
+    "Bahrain": ("manama",), "Oman": ("muscat", "salalah"),
+}
+GULFTALENT_HEADERS = {"Accept": "application/json", "User-Agent": "JobHunter/1.0 (public job collection)"}
+
+
+def gulftalent_country(location):
+    parts = {part.strip().casefold() for part in str(location).split(",")}
+    matches = [country for country, aliases in GULFTALENT_LOCATION_ALIASES.items()
+               if parts.intersection((country.casefold(), *aliases))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def parse_gulftalent_job(row, country):
+    """Normalize a search result, trusting only a matching public listing URL."""
+    import jobhunter_availability as availability
+    if not isinstance(row, dict):
+        return None
+    identifier = str(row.get("position_id", ""))
+    title = row.get("title")
+    link = row.get("link")
+    if (not re.fullmatch(r"\d{1,20}", identifier) or not isinstance(title, str) or not title.strip()
+            or not isinstance(link, str) or str(row.get("country_id")) not in (GULFTALENT_COUNTRIES[country], "1")):
+        return None
+    try:
+        url = urljoin("https://www.gulftalent.com", link)
+    except ValueError:
+        return None
+    job = {"id": f"gulftalent-{identifier}", "source": "GulfTalent", "url": url}
+    listing = availability._listing(job)
+    if listing is None:
+        return None
+    # Remote postings use country_id=1 even when the displayed location and
+    # listing route identify the queried country. Keep the actual location;
+    # query membership alone never establishes candidate eligibility.
+    country_slug = "uae" if country == "United Arab Emirates" else country.lower().replace(" ", "-")
+    if not urlsplit(listing.url).path.startswith(f"/{country_slug}/jobs/"):
+        return None
+    posted = row.get("posted_date_ts")
+    date_posted = ""
+    if type(posted) in (int, float) and posted > 0:
+        try:
+            date_posted = datetime.fromtimestamp(posted, tz=timezone.utc).isoformat()
+        except (ValueError, OverflowError, OSError):
+            pass
+    company = row.get("company_name") or row.get("jb_company_name")
+    return {**job, "url": listing.url, "title": title.strip(),
+            "company": company.strip() if isinstance(company, str) and company.strip() else "Unknown",
+            "location": normalize_location(row.get("location")), "query_country": country,
+            "date_posted": date_posted}
+
+
+def scrape_gulftalent(session, keyword, location):
+    """Yield anonymous API results using the site's dynamic search contract."""
+    country = gulftalent_country(location)
+    if country is None:
+        return
+    seen_ids, seen_pages = set(), set()
+    offset, limit = 0, 25
+    for page in range(CONFIG["max_pages"]):
+        if getattr(session, "_gulftalent_blocked", False) is True:
+            return
+        params = {
+            "config[filters]": "DISABLED", "config[isDynamicSearchV2]": "true",
+            "filters[country][0]": GULFTALENT_COUNTRIES[country],
+            "filters[search_keyword]": keyword, "search_keyword": keyword,
+            "include_scraped": 1, "limit": limit, "offset": offset,
+            "search_order": "r", "version": 2,
+        }
+        log.info(f"GulfTalent: '{keyword}' in '{country}' page {page + 1}")
+        try:
+            resp = rate_limited_get(session, "https://www.gulftalent.com/api/jobs/search",
+                                    params=params, headers=GULFTALENT_HEADERS)
+        except requests.RequestException:
+            log.warning("GulfTalent request failed")
+            return
+        if resp.status_code in (403, 429):
+            session._gulftalent_blocked = True
+        if resp.status_code != 200:
+            log.warning(f"GulfTalent returned {resp.status_code}; stopping pagination")
+            return
+        try:
+            data = resp.json()
+        except ValueError:
+            log.warning("GulfTalent returned non-JSON response")
+            return
+        results = data.get("results") if isinstance(data, dict) else None
+        rows = results.get("data") if isinstance(results, dict) else None
+        if not isinstance(rows, list):
+            log.warning("GulfTalent returned an unexpected result structure")
+            return
+        if not rows:
+            return
+        fingerprint = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
+        if fingerprint in seen_pages:
+            return
+        seen_pages.add(fingerprint)
+        page_jobs = []
+        for row in rows:
+            job = parse_gulftalent_job(row, country)
+            if job is not None and job["id"] not in seen_ids:
+                seen_ids.add(job["id"])
+                page_jobs.append(job)
+        offset += len(rows)
+        yield page_jobs
+        if len(rows) < limit:
+            return
+
+
 # ── Job Details ──────────────────────────────────────────────────────────────
 
 RECRUITER_METADATA_FIELDS = [
@@ -1651,6 +1774,10 @@ def readable_text(el):
 def fetch_job_description(session, job):
     """Fetch the full job description from the job detail page."""
     try:
+        if job["source"] == "GulfTalent":
+            import jobhunter_availability as availability
+            if getattr(session, "_gulftalent_blocked", False) is True or availability._listing(job) is None:
+                return ""
         if job["source"] == "Foundit":
             # Use Foundit's job detail API
             job_id = job["id"].replace("foundit-", "")
@@ -1676,7 +1803,10 @@ def fetch_job_description(session, job):
                     pass
             return ""
 
-        resp = rate_limited_get(session, job["url"])
+        headers = {"User-Agent": GULFTALENT_HEADERS["User-Agent"]} if job["source"] == "GulfTalent" else {}
+        resp = rate_limited_get(session, job["url"], **({"headers": headers} if headers else {}))
+        if job["source"] == "GulfTalent" and resp.status_code in (403, 429):
+            session._gulftalent_blocked = True
 
         if resp.status_code != 200:
             log.debug(f"Could not fetch details for {job['url']}: {resp.status_code}")
@@ -1686,6 +1816,11 @@ def fetch_job_description(session, job):
         # LinkedIn detail page
         if job["source"] == "LinkedIn":
             desc_el = soup.find("div", class_="show-more-less-html__markup")
+            if desc_el:
+                return readable_text(desc_el)
+
+        if job["source"] == "GulfTalent":
+            desc_el = soup.select_one("#content .job-description")
             if desc_el:
                 return readable_text(desc_el)
 
@@ -2627,6 +2762,7 @@ def notify_new_jobs(token, chat_id, jobs, *, conn=None):
 SCRAPERS = [
     ("LinkedIn", scrape_linkedin),
     ("Foundit", scrape_foundit),
+    ("GulfTalent", scrape_gulftalent),
 ]
 
 
@@ -2656,7 +2792,7 @@ def parse_args():
 
 
 def build_collection_buckets(session):
-    """One LinkedIn bucket per region, one Foundit bucket per Gulf country."""
+    """LinkedIn region buckets and distinct supported countries per Gulf board."""
     buckets = {}
     for scraper_name, scraper_fn in SCRAPERS:
         regions = CONFIG["regions"]
@@ -2668,6 +2804,13 @@ def build_collection_buckets(session):
                 for location in locations:
                     country = FOUNDIT_LOCATION_MAP.get(location, location)
                     if country in ("United Arab Emirates", "Saudi Arabia"):
+                        regions[country] = [country]
+        if scraper_name == "GulfTalent":
+            regions = {}
+            for locations in CONFIG["regions"].values():
+                for location in locations:
+                    country = gulftalent_country(location)
+                    if country:
                         regions[country] = [country]
         for region, locations in regions.items():
             buckets[f"{scraper_name}/{region}"] = {
@@ -2770,6 +2913,11 @@ def evaluate_job(job, *, conn, session, seen_titles, skip_counts):
 
     log.info(f"Fetching details: {job['title']}")
     desc = fetch_job_description(session, job)
+    if job.get("source") == "GulfTalent" and not desc.strip():
+        # Do not persist an incomplete role as seen (or as a location/fit
+        # knockout). It must be eligible for collection after access recovers.
+        skip_counts["missing_description"] += 1
+        return None
     job["description"] = desc
     if country:
         resolved = resolve_description_city(desc, country)

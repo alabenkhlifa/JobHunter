@@ -12,7 +12,7 @@ from datetime import datetime, time as day_time, timedelta, timezone
 import json
 import re
 import time
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 import requests
@@ -27,6 +27,7 @@ LINKEDIN_HOSTS = frozenset({"linkedin.com", "www.linkedin.com", *(
     "ae sa uk de fr nl ch be es it ie sg ca us in au nz no se dk fi pt at pl cz lu ro gr tr za qa kw bh om eg ma tn".split()
 )})
 FOUNDIT_HOSTS = frozenset({"www.founditgulf.com", "founditgulf.com"})
+GULFTALENT_HOSTS = frozenset({"www.gulftalent.com", "gulftalent.com"})
 REASONS = frozenset({"unsupported_listing", "identity_mismatch", "request_failed", "http_unavailable",
                      "unsafe_redirect", "response_too_large", "request_limit", "login_or_challenge",
                      "missing_description", "listing_unverified", "no_open_evidence", "closed_marker",
@@ -83,6 +84,11 @@ def _url_identity(value):
         detail = re.fullmatch(r"/middleware/jobdetail/(\d{1,20})/?", parsed.path)
         if match or detail:
             return "foundit", (match or detail).group(1)
+    if host in GULFTALENT_HOSTS:
+        match = re.fullmatch(
+            r"/(?:uae|saudi-arabia|qatar|kuwait|bahrain|oman)/jobs/[^/?#]+[-_](\d{1,20})/?", parsed.path)
+        if match:
+            return "gulftalent", match.group(1)
     return None
 
 
@@ -95,9 +101,11 @@ def _listing(job):
     if declared and declared != source:
         return None
     local_id = str(job.get("id") or "")
-    if source == "linkedin" and local_id.startswith("foundit-") or source == "foundit" and local_id.startswith(("li-", "linkedin-")):
+    prefixes = {"linkedin": ("li-", "linkedin-"), "foundit": ("foundit-",), "gulftalent": ("gulftalent-",)}
+    if any(local_id.startswith(values) for other, values in prefixes.items() if other != source):
         return None
-    local_match = re.fullmatch(r"(?:li|linkedin)-(\d+)", local_id) if source == "linkedin" else re.fullmatch(r"foundit-(\d+)", local_id)
+    prefix = "(?:li|linkedin)" if source == "linkedin" else source
+    local_match = re.fullmatch(prefix + r"-(\d+)", local_id)
     if local_match and local_match.group(1) != source_id:
         return None
     # Unrecognized local IDs may be database hashes. The public URL still has
@@ -106,6 +114,9 @@ def _listing(job):
         return Listing(source, source_id, f"https://www.linkedin.com/jobs/view/{source_id}",
                        f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{source_id}")
     parsed = _parsed_url(job["url"])
+    if source == "gulftalent":
+        url = f"https://www.gulftalent.com{parsed.path.rstrip('/')}"
+        return Listing(source, source_id, url, url)
     url = f"https://www.founditgulf.com{parsed.path.rstrip('/')}"
     return Listing(source, source_id, url,
                    f"https://www.founditgulf.com/middleware/jobdetail/{source_id}")
@@ -229,10 +240,13 @@ CLOSED = re.compile(r"^(?:(?:this|the) (?:job|job posting|position|vacancy) (?:i
 APPLY = re.compile(r"^(?:apply|apply now|apply for this job|apply on company (?:site|website)|"
                    r"easy apply|quick apply)$", re.I)
 HEADER_SELECTORS = {"linkedin": ".top-card-layout, .topcard, .jobs-unified-top-card, .job-details-jobs-unified-top-card",
+                    "gulftalent": ".gulftalent-job-header",
                     "foundit": ".job-detail-header, .job-details-header, .jd-header, .job-header, [data-testid='job-header']"}
 DESCRIPTION_SELECTORS = {"linkedin": ".show-more-less-html__markup, .description__text, .jobs-description-content__text",
+                         "gulftalent": "#content .job-description",
                          "foundit": ".job-description, .job-details-description, .jobDescription, [itemprop='description']"}
 COMPANY_SELECTORS = {"linkedin": ".topcard__org-name-link, .top-card-layout__first-subline a, .job-details-jobs-unified-top-card__company-name",
+                     "gulftalent": ".mobile-company-link h2",
                      "foundit": ".company-name, .companyName, [itemprop='hiringOrganization']"}
 
 
@@ -263,6 +277,17 @@ def _html_check(body, listing, job, now):
     # for the main job. Matching structured data was collected before pruning.
     for node in soup.select("script, style, template, aside, [class*='similar-jobs'], [class*='related-jobs'], [class*='recommended-jobs'], .jobs-you-may-like, [data-testid='recommended-jobs']"):
         node.decompose()
+    if listing.source == "gulftalent":
+        # The public mobile page separates the title and company/application
+        # entry point into sibling sections. Exclude site navigation and the
+        # second application widget below the description/recommendations.
+        status = soup.select_one(".header > .container-fluid.status")
+        subheader = soup.select_one(".header > .container-fluid.subheader")
+        if status is not None and subheader is not None and status.parent is subheader.parent:
+            wrapper = soup.new_tag("section", attrs={"class": "gulftalent-job-header"})
+            status.insert_before(wrapper)
+            wrapper.append(status.extract())
+            wrapper.append(subheader.extract())
     header = soup.select_one(HEADER_SELECTORS[listing.source])
     if header is None:
         header = soup.select_one("main > header, article > header")
@@ -308,6 +333,8 @@ def _html_check(body, listing, job, now):
     if any(_description(node.get("description")) and _expired(node.get("validThrough"), now) for node in schemas):
         return "closed", "expired_valid_through", True
     if header_match:
+        if listing.source == "gulftalent" and _gulftalent_application_enabled(header, listing):
+            return "open", "source_application_enabled", True
         for node in header.select("button, a"):
             if node.has_attr("disabled") or node.get("aria-disabled") == "true" or not _visible(node):
                 continue
@@ -316,6 +343,27 @@ def _html_check(body, listing, job, now):
             if APPLY.fullmatch(label) and (node.name == "button" or href and not href.startswith("#") and _parsed_url(urljoin(listing.url, href))):
                 return "open", "application_control", True
     return "unknown", "no_open_evidence", True
+
+
+def _gulftalent_application_enabled(header, listing):
+    """Recognize the source's job-bound React application entry configuration.
+
+    This checks only the public listing. It never visits registration or apply.
+    A generic register link, or another job's widget, is not open evidence.
+    """
+    for node in header.select(".react-job-application-button-mobile[path]"):
+        if not _visible(node) or node.has_attr("disabled") or node.get("aria-disabled") == "true":
+            continue
+        path = str(node.get("path", "")).strip()
+        parsed = _parsed_url(urljoin(listing.url, path))
+        if not parsed or parsed.hostname not in GULFTALENT_HOSTS or parsed.path != "/register":
+            continue
+        query = parse_qs(parsed.query)
+        if (query.get("job_id") == [listing.source_id]
+                and query.get("return") == [f"/apply/{listing.source_id}"]
+                and query.get("journey") == ["apply-mobile"]):
+            return True
+    return False
 
 
 def _foundit_json(body, listing, job):
