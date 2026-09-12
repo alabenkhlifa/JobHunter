@@ -157,12 +157,36 @@ CONFIG = {
         "swiss work permit", "valid work permit for switzerland",
         "must hold a valid work permit", "existing work permit",
     ],
-    # Eight-year requirements were judged too senior in the collection audit.
+    # Roles demanding more required years than this never reach review; he
+    # called the 8-year roles too senior, so the cap is one below them.
     "max_experience": 7,
     "max_job_age_days": 7,
     # One number, the rubric's: a profile config may override it, but the
     # default it starts from must not drift from job_scoring.SEND_CUTOFF.
     "score_threshold": job_scoring.SEND_CUTOFF,
+    # A posting that promises visa sponsorship is his best shot and rare (3 of
+    # 5,732 stored descriptions), so it is reviewed at a lower keyword bar.
+    "sponsored_score_threshold": 35,
+    # Stamped on every verdict. Bump it when the review rules in the skill
+    # change: a hold judged under an older rubric competes again as unseen.
+    "review_rubric": "2026-09-12",
+    # What the reviewer judges against before any feedback example. Plain
+    # text for the model; the code never parses it.
+    "review_preferences": {
+        "languages": ["French", "English", "Arabic"],
+        "target_roles": ["Software Architect", "Application/Cloud Solutions Architect (hands-on)",
+                         "Tech Lead", "Senior Backend Engineer"],
+        "primary_stacks": ["Java", "Spring Boot", "Node.js/NestJS", "TypeScript"],
+        "rejected_stacks": [".NET/C# as the main stack", "PHP", "Ruby",
+                            "mobile (iOS/Android/Flutter)", "frontend-only"],
+        "avoid_roles": ["infrastructure/network/DNS", "data science/ML research/AI training",
+                        "L1/L2/application support", "QA/SDET", "scrum master/project manager",
+                        "vendor pre-sales/enterprise solutions architect (customer-facing)",
+                        "SAP/ERP/PLM/MDM specialist", "building/interior architect"],
+        "max_experience_years": 7,
+        "notes": "Cloud-native platforms on AWS/Azure, microservices, event-driven design, "
+                 "leading small teams. Not director-level, not 10+ engineers, not budget ownership.",
+    },
     # Date-filtered pages cover the day's postings; stopping at 25 matches
     # cut an arbitrary slice from each bucket before its pages were read.
     "min_matching_jobs": 0,  # 0 disables the per-bucket match limit
@@ -285,11 +309,16 @@ def init_db():
             ai_verdict TEXT DEFAULT '',
             ai_verdict_reason TEXT DEFAULT '',
             ai_sponsorship TEXT DEFAULT '',
-            ai_rank INTEGER
+            ai_rank INTEGER,
+            ai_reviewed_at TEXT DEFAULT '',
+            ai_rubric TEXT DEFAULT '',
+            sponsorship_signal TEXT DEFAULT '',
+            sponsorship_evidence TEXT DEFAULT ''
         )
     """)
     init_application_tracking(conn)
     init_feedback_tracking(conn)
+    ensure_review_columns(conn)
     # Migration for existing databases
     for ddl in [
         "ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'",
@@ -310,6 +339,24 @@ def init_db():
             pass  # Column already exists
     conn.commit()
     return conn
+
+
+REVIEW_COLUMNS = (
+    "ai_reviewed_at TEXT DEFAULT ''",
+    "ai_rubric TEXT DEFAULT ''",
+    "sponsorship_signal TEXT DEFAULT ''",
+    "sponsorship_evidence TEXT DEFAULT ''",
+)
+
+
+def ensure_review_columns(conn):
+    """Add the verdict-stamp and sponsorship pre-read columns where missing."""
+    for ddl in REVIEW_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {ddl}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+    conn.commit()
 
 
 def is_job_seen(conn, job_id):
@@ -354,10 +401,7 @@ def load_recent_duplicate_keys(conn, max_age_days, min_score):
 
 
 def description_hash(description):
-    # 402 of 754 same-title/company groups have distinct descriptions. The
-    # first 400 normalized characters distinguish generic roles cheaply.
-    normalized = " ".join(str(description or "").lower().split())[:400]
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return job_scoring.description_hash(description)
 
 
 def remember_if_sent(seen_titles, title_key, score, min_score, description=""):
@@ -667,6 +711,8 @@ def get_feedback_summary(conn, *, initialize=True):
     """Return compact counts showing what the user tends to skip or like."""
     if initialize:
         init_feedback_tracking(conn)
+    elif not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_feedback'").fetchone():
+        return {"by_action": {}, "by_reason": {}}
     by_action = _dict_counts(
         conn.execute(
             """
@@ -689,16 +735,6 @@ def get_feedback_summary(conn, *, initialize=True):
         ).fetchall()
     )
     return {"by_action": by_action, "by_reason": by_reason}
-
-
-def _feedback_reason_count(summary, *needles):
-    reasons = summary.get("by_reason", {}) if summary else {}
-    total = 0
-    for reason, count in reasons.items():
-        text = str(reason or "").lower()
-        if any(needle in text for needle in needles):
-            total += int(count)
-    return total
 
 
 def apply_feedback_learning(job, feedback_summary, *, matching=None):
@@ -728,55 +764,10 @@ def apply_feedback_learning(job, feedback_summary, *, matching=None):
                     feedback_adjusted_score=int(item.get("score") or 0) + adjustment,
                     feedback_learning_notes=", ".join(notes) if notes else "neutral")
         return item
-    text = " ".join(
-        str(item.get(key) or "")
-        for key in (
-            "title",
-            "company",
-            "description",
-            "tech_required",
-            "tech_nice_to_have",
-            "credibility_notes",
-        )
-    ).lower()
-    adjustment = 0
-    notes = []
-
-    wrong_stack_count = _feedback_reason_count(feedback_summary, "wrong stack", "not backend")
-    if wrong_stack_count and any(term in text for term in ("frontend", "front-end", "react", "mobile", "ios", "android", "qa", "sdet", "devops", "sre")):
-        delta = -min(6, 2 * wrong_stack_count)
-        adjustment += delta
-        notes.append(f"wrong_stack:{delta}")
-
-    junior_count = _feedback_reason_count(feedback_summary, "too junior", "low seniority", "junior")
-    if junior_count and any(term in text for term in ("junior", "entry level", "entry-level", "graduate", "trainee", "0-3 years", "1-3 years")):
-        delta = -min(6, 3 * junior_count)
-        adjustment += delta
-        notes.append(f"too_junior:{delta}")
-
-    senior_count = _feedback_reason_count(feedback_summary, "too senior", "over-scoped")
-    if senior_count and any(term in text for term in ("15+", "12+", "director", "vp", "chief", "head of")):
-        delta = -min(4, 2 * senior_count)
-        adjustment += delta
-        notes.append(f"too_senior:{delta}")
-
-    low_quality_count = _feedback_reason_count(feedback_summary, "low-quality", "low quality", "suspicious", "duplicate")
-    if low_quality_count and any(term in text for term in ("unknown staffing", "aggregator", "vague", "confidential", "staffing", "recruitment")):
-        delta = -min(5, 2 * low_quality_count)
-        adjustment += delta
-        notes.append(f"low_quality:{delta}")
-
-    interested_count = int((feedback_summary or {}).get("by_action", {}).get("interested", 0) or 0)
-    backend_interest_count = _feedback_reason_count(feedback_summary, "backend", "strong backend", "architecture")
-    if interested_count and any(term in text for term in ("backend", "back-end", "microservices", "api", "spring boot", "java", "kotlin", "platform", "architect")):
-        delta = min(5, 1 + backend_interest_count)
-        adjustment += delta
-        notes.append(f"interested_backend:+{delta}")
-
-    base_score = int(item.get("score") or 0)
-    item["feedback_adjustment"] = adjustment
-    item["feedback_adjusted_score"] = base_score + adjustment
-    item["feedback_learning_notes"] = ", ".join(notes) if notes else "neutral"
+    # The owner's reviewer learns from get_feedback_examples and
+    # CONFIG["review_preferences"] instead of word-list adjustments, which
+    # shifted almost every job by the same amount and penalised Java
+    # architect posts for mentioning React in a nice-to-have list.
     return item
 
 
@@ -790,8 +781,8 @@ def save_job(conn, job):
            (id, title, company, location, url, source, score, date_posted, date_scraped, notified,
             description, tech_required, tech_nice_to_have, min_experience, salary, work_model,
             score_breakdown, recruiter_name, recruiter_company, recruiter_profile_url,
-            company_website, credibility_notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            company_website, credibility_notes, sponsorship_signal, sponsorship_evidence)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             job["id"],
             job["title"],
@@ -815,9 +806,30 @@ def save_job(conn, job):
             metadata["recruiter_profile_url"],
             metadata["company_website"],
             metadata["credibility_notes"],
+            *job_scoring.sponsorship_signal(job.get("description", "")),
         ),
     )
     conn.commit()
+
+
+def backfill_sponsorship(conn):
+    """Pre-read rows stored before the sponsorship columns existed. Idempotent."""
+    ensure_review_columns(conn)
+    # ALTER TABLE gives old rows '' rather than NULL, and '' is also the
+    # legitimate silent read, so silent rows are rescanned: cheap and idempotent.
+    rows = conn.execute(
+        "SELECT id, description FROM jobs WHERE sponsorship_signal IS NULL "
+        "OR (sponsorship_signal = '' AND IFNULL(sponsorship_evidence, '') = '')"
+    ).fetchall()
+    report = {"scanned": len(rows), "offered": 0, "excluded": 0}
+    for job_id, description in rows:
+        signal, evidence = job_scoring.sponsorship_signal(description)
+        if signal:
+            report[signal] += 1
+        conn.execute("UPDATE jobs SET sponsorship_signal = ?, sponsorship_evidence = ? WHERE id = ?",
+                     (signal, evidence, job_id))
+    conn.commit()
+    return report
 
 
 def mark_notified(conn, job_ids):
@@ -862,6 +874,18 @@ def prepare_review_candidate(job, *, now=None):
         return candidate, "excluded role"
     if requires_local_presence(candidate["description"], job=candidate):
         return candidate, "requires existing local presence or work authorization"
+    if not candidate.get("sponsorship_signal") and not candidate.get("sponsorship_evidence"):
+        signal, evidence = job_scoring.sponsorship_signal(candidate["description"])
+        candidate["sponsorship_signal"], candidate["sponsorship_evidence"] = signal, evidence
+    if candidate.get("sponsorship_signal") == "excluded" and CONFIG.get("matching", {}).get("preset") != "generic":
+        # Invited profiles judge authorization per market in jobhunter_matching.
+        return candidate, "posting rules out sponsorship"
+    if (CONFIG.get("matching", {}).get("preset") != "generic"
+            and candidate.get("ai_sponsorship") == "offered"
+            and not job_scoring.quote_in_text(candidate.get("sponsorship_evidence"), candidate["description"])):
+        # Legacy approvals had no quote field; they cannot take a verified
+        # sponsorship slot merely because an old reviewer wrote "offered".
+        candidate["ai_sponsorship"] = "no_info"
     reason = job_scoring.knockout(
         candidate,
         allowed_locations=tuple(loc.lower() for loc in CONFIG.get("allowed_locations", ())),
@@ -875,14 +899,20 @@ def get_review_candidates(conn, *, now=None):
     """All currently eligible candidates; callers rank before applying a cap."""
     conn.row_factory = sqlite3.Row
     generic = CONFIG.get("matching", {}).get("preset") == "generic"
+    threshold = CONFIG["score_threshold"]
+    sponsored_threshold = min(threshold, CONFIG.get("sponsored_score_threshold", threshold))
     rows = conn.execute(
         "SELECT * FROM jobs WHERE notified = 0 AND status = 'new'" + ("" if generic else " AND score >= ?"),
-        () if generic else (CONFIG["score_threshold"],),
+        () if generic else (sponsored_threshold,),
     ).fetchall()
     now = now or datetime.now(timezone.utc)
     candidates = []
     for row in rows:
         candidate, reason = prepare_review_candidate(dict(row), now=now)
+        if reason is None and not generic and candidate["score"] < threshold:
+            # Only a promised visa earns a read below the keyword bar.
+            if candidate.get("sponsorship_signal") != "offered":
+                continue
         if reason is None:
             if generic:
                 # A preference edit can promote a previously low-scoring job.
@@ -899,27 +929,41 @@ def get_review_candidates(conn, *, now=None):
     return candidates
 
 
-def record_review(conn, verdicts):
+def record_review(conn, verdicts, *, report=None):
     """Persist the agent's verdicts, validated against today's real candidates.
 
     Re-queries eligible candidates itself rather than trusting the batch of
     ids it's handed -- notification state, score, freshness and current hard
-    filters must still pass. Writes only the four ai_* columns; never
-    score or score_breakdown. Returns the written send-verdict rows, each
+    filters must still pass. Persists verdicts, review stamps, evidence and
+    rejection status; never changes score or score_breakdown. Returns the written send-verdict rows, each
     carrying the market select_sendable needs.
     """
     conn.row_factory = sqlite3.Row
-    eligible = {row["id"]: row["location"] for row in get_review_candidates(conn)}
+    candidates = get_review_candidates(conn)
+    eligible = {row["id"]: row["location"] for row in candidates}
+    strict = CONFIG.get("matching", {}).get("preset") != "generic"
+    descriptions = {row["id"]: row.get("description") or "" for row in candidates} if strict else None
+    ensure_review_columns(conn)
+    stamp = datetime.now(timezone.utc).isoformat()
 
     written = []
-    for entry in validated_verdicts(verdicts, eligible):
+    for entry in validated_verdicts(verdicts, eligible, report=report, descriptions=descriptions):
         status_update = ", status = 'rejected'" if entry["ai_verdict"] == "reject" else ""
         conn.execute(
             f"UPDATE jobs SET ai_verdict = ?, ai_verdict_reason = ?, "
-            f"ai_sponsorship = ?, ai_rank = ?{status_update} WHERE id = ?",
+            f"ai_sponsorship = ?, ai_rank = ?, ai_reviewed_at = ?, ai_rubric = ?{status_update} WHERE id = ?",
             (entry["ai_verdict"], entry["ai_verdict_reason"], entry["ai_sponsorship"],
-             entry["ai_rank"], entry["id"]),
+             entry["ai_rank"], stamp, CONFIG.get("review_rubric", ""), entry["id"]),
         )
+        if entry.get("evidence"):
+            # A verified quote the pre-read missed becomes the stored evidence,
+            # so the fast lane and the weekly pattern review learn from it.
+            row = conn.execute("SELECT sponsorship_signal FROM jobs WHERE id = ?", (entry["id"],)).fetchone()
+            if row is not None and row[0] != "offered":
+                conn.execute("UPDATE jobs SET sponsorship_signal = 'offered', sponsorship_evidence = ? WHERE id = ?",
+                             (entry["evidence"], entry["id"]))
+                if report is not None:
+                    report.append({"job_id": entry["id"], "note": "reviewer quote the pre-read missed; add its wording to job_scoring"})
         if entry["ai_verdict"] == "send":
             location = eligible[entry["id"]]
             written.append(dict(entry, location=location,
@@ -928,23 +972,40 @@ def record_review(conn, verdicts):
     return written
 
 
-def validated_verdicts(verdicts, eligible):
+_LEGACY_SPONSORSHIP = {"implied": "no_info", "doubtful": "no_info"}
+
+
+def _note(report, job_id, note):
+    if report is not None:
+        report.append({"job_id": job_id, "note": note})
+
+
+def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None):
     """Accepted review entries in queue field shape; nothing is written here.
 
     One rejected entry is dropped on its own, but a batch that breaks its own
     contract -- a repeated job ID, or two sends claiming the same rank -- is
     refused whole, since neither half can be trusted to be the intended one.
+    Every drop or rewrite is appended to `report` so the wrapper can print it
+    instead of losing a verdict silently.
+
+    With `descriptions` (the owner's strict path) the reads collapse to
+    offered / no_info / excluded: legacy implied and doubtful become no_info,
+    and `offered` must carry an `evidence` quote found in the posting, or it
+    is downgraded -- a promise the reviewer cannot point to is a guess.
     """
     seen_ids = set()
     seen_ranks = set()
     for entry in verdicts:
         job_id = entry.get("job_id")
         if job_id in seen_ids:
+            _note(report, job_id, "batch refused: repeated job id")
             return []
         seen_ids.add(job_id)
         if entry.get("verdict") == "send":
             rank = entry.get("rank")
             if rank in seen_ranks:
+                _note(report, job_id, f"batch refused: rank {rank} used twice among sends")
                 return []
             seen_ranks.add(rank)
 
@@ -954,15 +1015,33 @@ def validated_verdicts(verdicts, eligible):
         verdict = entry.get("verdict")
         sponsorship = entry.get("sponsorship")
         if job_id not in eligible:
+            _note(report, job_id, "not in today's eligible pool; verdict dropped")
             continue
-        if verdict not in _AI_VERDICTS or sponsorship not in _AI_SPONSORSHIP:
+        if verdict not in _AI_VERDICTS:
+            _note(report, job_id, f"unknown verdict {verdict!r}; entry dropped")
             continue
+        if sponsorship not in _AI_SPONSORSHIP:
+            _note(report, job_id, f"unknown sponsorship {sponsorship!r}; entry dropped")
+            continue
+        evidence = ""
+        if descriptions is not None:
+            if sponsorship in _LEGACY_SPONSORSHIP:
+                _note(report, job_id, f"legacy read {sponsorship} recorded as no_info")
+                sponsorship = _LEGACY_SPONSORSHIP[sponsorship]
+            if sponsorship == "offered":
+                quote = " ".join(str(entry.get("evidence") or "").split())
+                if job_scoring.quote_in_text(quote, descriptions.get(job_id, "")):
+                    evidence = quote[:job_scoring.SPONSORSHIP_EVIDENCE_LIMIT]
+                else:
+                    _note(report, job_id, "offered without a quote found in the posting; recorded as no_info")
+                    sponsorship = "no_info"
         accepted.append({
             "id": job_id,
             "ai_verdict": verdict,
             "ai_verdict_reason": " ".join(str(entry.get("reason") or "").split()[:10]),
             "ai_sponsorship": sponsorship,
             "ai_rank": entry.get("rank") if verdict == "send" else None,
+            "evidence": evidence,
         })
     return accepted
 
@@ -982,7 +1061,7 @@ def reviewed_queue(conn, newly_reviewed=(), *, context_digest=None):
     return jobhunter_queue.merge_reviewed_queue(candidates, newly_reviewed, markets=CONFIG.get('markets'))
 
 
-def plan_reviewed_digest(conn, verdicts=(), *, context_digest=None):
+def plan_reviewed_digest(conn, verdicts=(), *, context_digest=None, report=None):
     """Report the markets these verdicts would leave empty, without sending.
 
     Persists nothing and contacts nothing: the caller runs this between review
@@ -997,10 +1076,15 @@ def plan_reviewed_digest(conn, verdicts=(), *, context_digest=None):
     candidates = [apply_feedback_learning(row, feedback, matching=CONFIG.get('matching'))
                   for row in rows]
     if CONFIG.get('matching', {}).get('preset') == 'generic':
-        conn.execute('CREATE TABLE IF NOT EXISTS jobhunter_review_context (job_id TEXT PRIMARY KEY, context_digest TEXT NOT NULL)')
-        valid = {row[0] for row in conn.execute('SELECT job_id FROM jobhunter_review_context WHERE context_digest=?', (context_digest,))}
+        exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobhunter_review_context'").fetchone()
+        valid = {row[0] for row in conn.execute('SELECT job_id FROM jobhunter_review_context WHERE context_digest=?', (context_digest,))} if exists else set()
         candidates = [dict(row, ai_verdict='') if row['id'] not in valid else row for row in candidates]
-    reviewed = validated_verdicts(verdicts, {row['id']: row['location'] for row in rows})
+    # Planning accepted an unquoted offer that recording downgraded, so the
+    # same review selected different jobs before and after it was saved.
+    strict = CONFIG.get('matching', {}).get('preset') != 'generic'
+    descriptions = {row['id']: row.get('description') or '' for row in rows} if strict else None
+    reviewed = validated_verdicts(verdicts, {row['id']: row['location'] for row in rows},
+                                  report=report, descriptions=descriptions)
     return jobhunter_queue.delivery_plan(candidates, reviewed,
                                          markets=CONFIG.get('markets'),
                                          **CONFIG.get('delivery', {}))
@@ -1043,6 +1127,58 @@ def mark_interested(conn, job_id):
     )
     conn.commit()
     return True
+
+
+def skip_job(conn, job_id, reason):
+    """A negative text reply after a digest: leave the queue, keep the why."""
+    cur = conn.execute("UPDATE jobs SET status = 'skipped' WHERE id = ?", (job_id,))
+    if cur.rowcount == 0:
+        conn.commit()
+        return False
+    record_job_feedback(conn, job_id, "skip",
+                        reason=" ".join(str(reason or "not interested").split()) or "not interested",
+                        source="telegram_text")
+    return True
+
+
+_FEEDBACK_TEST_TITLES = re.compile(r"\bcta\b|\btest\b", re.IGNORECASE)
+
+
+def get_feedback_examples(conn, limit=30, *, initialize=True):
+    """His most recent interested/skipped jobs, one row per job, newest first.
+
+    Precedent for the reviewer: what a rejected .NET role or an approved Java
+    lead looks like, with the reason he gave. Counting reasons and matching
+    word lists (the previous approach) could not learn that.
+    """
+    if initialize:
+        init_feedback_tracking(conn)
+    elif not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_feedback'").fetchone():
+        return []
+    rows = conn.execute(
+        """
+        SELECT f.job_id, f.action, f.reason, f.created_at,
+               j.title, j.company, j.location, j.tech_required, j.min_experience, j.score
+        FROM job_feedback f JOIN jobs j ON j.id = f.job_id
+        WHERE f.action IN ('interested', 'skip')
+        ORDER BY f.created_at DESC, f.id DESC
+        """
+    ).fetchall()
+    examples, seen = [], set()
+    for row in rows:
+        job_id, action, reason, created, title, company, location, tech, years, score = tuple(row)
+        if job_id in seen or _FEEDBACK_TEST_TITLES.search(str(title or "")):
+            continue
+        seen.add(job_id)
+        examples.append({
+            "id": job_id, "action": action, "reason": reason or "",
+            "title": title, "company": company, "location": location,
+            "tech_required": tech or "", "min_experience": years if years is not None else -1,
+            "score": score, "date": str(created or "")[:10],
+        })
+        if len(examples) >= limit:
+            break
+    return examples
 
 
 def get_job_by_id(conn, job_id):
@@ -2286,13 +2422,18 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None, 
     today = today or datetime.now(timezone.utc)
     if today.tzinfo is None:
         today = today.replace(tzinfo=timezone.utc)
+    def display_order(j):
+        return (-(j.get("score") or 0), j.get("ai_rank") or float("inf"), j.get("id") or "")
+
+    # A verified promise of a visa leads the digest: his best shots, shown
+    # together and first, whatever market they are in.
+    offered = sorted((job for job in sent if job.get("ai_sponsorship") == "offered"), key=display_order)
     by_market = {}
     for job in sent:
-        by_market.setdefault(job["market"], []).append(job)
+        if job.get("ai_sponsorship") != "offered":
+            by_market.setdefault(job["market"], []).append(job)
     for jobs in by_market.values():
-        jobs.sort(key=lambda j: (
-            -(j.get("score") or 0), j.get("ai_rank") or float("inf"), j.get("id") or "",
-        ))
+        jobs.sort(key=display_order)
 
     lines = [
         f"<b>Job matches · {today.strftime('%-d %b')}</b>",
@@ -2311,13 +2452,17 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None, 
     markets = CONFIG.get("markets") if markets is None else markets
     market_order = [m["name"].lower() for m in markets] if markets is not None else DIGEST_MARKET_ORDER
     market_labels = {m["name"].lower(): html.escape(m["name"].upper()) for m in markets} if markets is not None else DIGEST_MARKET_LABELS
-    for market in market_order:
-        jobs = by_market.get(market, [])
+    covered = {job["market"] for job in offered}
+    sections = ([("\U0001f3af VISA SPONSORSHIP", None, offered, True)] if offered else []) + [
+        (market_labels[market], market, by_market.get(market, []), False) for market in market_order]
+    for label, section_market, jobs, show_market in sections:
         if not jobs:
-            empty_markets.append(market.title())
+            if section_market not in covered:
+                empty_markets.append(section_market.title())
             continue
-        lines.append(f"<b>{market_labels[market]}</b>")
+        lines.append(f"<b>{label}</b>")
         for job in jobs:
+            market = job["market"]
             title = _digest_text(job.get("title") or "Untitled role", 64)
             url = str(job.get("url") or "").strip()
             try:
@@ -2330,7 +2475,8 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None, 
             lines.append(f"<b>{number}. {title}</b>")
             company = _digest_text(job.get("company") or "Company not listed", 32)
             age = _digest_age(job.get("date_posted"), today)
-            lines.append(f"<b>{company}</b>" + (f" · {age}" if age else ""))
+            place = f" · {html.escape(str(market).title())}" if show_market else ""
+            lines.append(f"<b>{company}</b>{place}" + (f" · {age}" if age else ""))
             score = _digest_text(job.get("score"), 3)
             raw_score = job.get("score") or 0
             score_icon = "🔥" if raw_score >= 80 else "⭐" if raw_score >= 70 else "👍"
@@ -2495,6 +2641,10 @@ def parse_args():
     parser.add_argument("--send-doc", metavar="PATH", help="Send document via Telegram")
     parser.add_argument("--send-msg", metavar="TEXT", help="Send message via Telegram")
     parser.add_argument("--mark-interested", metavar="ID", help="Mark job as interested in DB")
+    parser.add_argument("--skip", metavar="ID", help="Mark a digest job skipped with the reason from --reason")
+    parser.add_argument("--reason", metavar="TEXT", default=None, help="Why the job was skipped (with --skip)")
+    parser.add_argument("--backfill-sponsorship", action="store_true",
+                        help="Pre-read stored descriptions for visa sponsorship wording; idempotent")
     parser.add_argument("--job-stats", action="store_true", help="Print JSON backlog/status counters")
     parser.add_argument("--archive-stale-days", type=int, metavar="DAYS", help="Archive unnotified new jobs older than DAYS")
     parser.add_argument("--dry-run", action="store_true", help="Preview write actions such as --archive-stale-days")
@@ -2588,7 +2738,7 @@ def evaluate_job(job, *, conn, session, seen_titles, skip_counts):
         return None
     title_key = job_scoring.duplicate_key(job, matching=CONFIG.get("matching"), markets=CONFIG.get("markets"))
     generic = CONFIG.get("matching", {}).get("preset", "default") == "generic"
-    short_title = not generic and len(title_key.split("|", 1)[0].split()) <= 2
+    short_title = not generic and job_scoring.short_duplicate_title(title_key)
     if title_key in seen_titles and not short_title:
         skip_counts["repost"] += 1
         log.info(f"Skipped (repost of a title already stored): {job['title']} @ {job['company']}")
@@ -2699,6 +2849,23 @@ def main():
         jobs = list_queued_jobs(conn, limit=args.limit, revalidate=True)
         conn.close()
         print(json.dumps(jobs, indent=2))
+        return
+
+    if args.skip:
+        conn = init_db()
+        updated = skip_job(conn, args.skip, args.reason)
+        conn.close()
+        if not updated:
+            print(json.dumps({"ok": False, "error": f"Job not found: {args.skip}"}), file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps({"ok": True, "job_id": args.skip, "reason": args.reason or "not interested"}))
+        return
+
+    if args.backfill_sponsorship:
+        conn = init_db()
+        report = backfill_sponsorship(conn)
+        conn.close()
+        print(json.dumps(report))
         return
 
     if args.mark_interested:

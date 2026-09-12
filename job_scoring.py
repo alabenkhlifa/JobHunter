@@ -4,6 +4,7 @@ Pure functions over plain dicts shaped like rows of the `jobs` table. This
 module imports nothing from scraper.py so it can be tested without a database.
 """
 
+import hashlib
 import re
 from datetime import datetime, timezone
 
@@ -428,6 +429,17 @@ def _words(text):
 # German postings tag the title with "(m/w/d)" and variants. The same role
 # posted with and without the tag must land on one key, so strip it first.
 _GENDER_MARKER = re.compile(r"\(?\b[mwfdx](?:\s*/\s*[mwfdx]){1,3}\b\)?")
+
+
+def description_hash(description):
+    # 402 of 754 same-title/company groups contained different roles. Share
+    # the collection fingerprint with review so those roles survive both.
+    normalized = " ".join(str(description or "").lower().split())[:400]
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def short_duplicate_title(key):
+    return len(key.split("|", 1)[0].split()) <= 2
 
 
 def duplicate_key(job, *, matching=None, markets=None):
@@ -926,6 +938,131 @@ BANDS = ((75, "excellent"), (60, "good"), (SEND_CUTOFF, "normal"))
 # behind a hold. Only a barrier the posting itself states blocks delivery.
 SPONSORSHIP_READS = ("offered", "implied", "no_info", "doubtful", "excluded")
 SENDABLE_SPONSORSHIP = ("offered", "implied", "no_info")
+
+# Keyword pre-read of the posting's own words on sponsorship, computed at
+# collection and stored beside the description. It is a fast lane into the
+# review batch and evidence for the reviewer, never the judge: an explicit
+# reviewer quote that exists in the description is accepted even when no
+# pattern here saw the wording. `excluded` is a barrier the posting states;
+# `offered` is a package the posting promises; "" is silence or an unrelated
+# use of the word (MBA sponsorship, company-sponsored events).
+SPONSORSHIP_EVIDENCE_LIMIT = 240
+
+_VISA_WORDS = r"(?:visas?|work[ -]permits?|residence[ -]permits?|sponsorship|relocation)"
+# Patterns were audited against every sentence in the 5,732-description
+# corpus that mentions visas, permits, sponsorship or relocation; each group
+# below names the wording that produced it. Order matters: a sentence that is
+# not about the hire at all is dropped first, then a refusal or requirement,
+# and only then an offer, because most false offers were refusals or ATS
+# "Relocation Provided: No" fields sitting in the same sentence.
+_SPONSORSHIP_UNRELATED = [re.compile(p, re.IGNORECASE) for p in (
+    r"\bsponsorship for an export licen[sc]e\b|\bexport (?:laws?|control)",
+    r"\bmastercard\b|\bvisa\s*/\s*mastercard\b|\bvisa cards?\b|\bvisanet\b",
+    r"\binsurance premium\b[^.!?]{0,120}\bresidence visa\b",
+    r"\b(?:company description|our mission|is a (?:specialized )?platform)\b[^.!?]{0,200}"
+    r"\b(?:visa[- ]sponsored (?:career )?opportunities|curated job listings|visa assistance)\b",
+    r"\bvisa processing\s*:\s*[a-z]+\b",
+    r"\brelocation (?:assistance |package )?(?:provided|assistance|package)\b\s*:?\s*(?:no|none)\b",
+)]
+_SPONSORSHIP_OFFERED = [re.compile(p, re.IGNORECASE) for p in (
+    r"\bvisa sponsorship\b",
+    r"\bsponsor(?:s|ed|ing)?\b[^.]{0,40}?\b(?:employment |work |residence |residency )?visas?\b",
+    r"\bvisas?\b[^.]{0,20}?\bsponsor(?:ed|ship)?\b",
+    r"\bsponsorship\b[^.]{0,30}?\b(?:available|provided|offered|included)\b",
+    r"\b(?:family|employment|work|residence|residency|company(?:[- ]provided)?|employer[- ]provided) visas?\b",
+    r"\bvisas? paid\b",
+    r"\bvisas?\b[^.]{0,40}?\b(?:provided|arranged|covered|included|support(?:ed)?)\b",
+    r"\bvisa (?:support|assistance|processing|and flights?|, flights?)\b",
+    # Benefits, salary and package enumerations that list the visa as an item.
+    r"\b(?:benefits?|perks?|we offer|what'?s on offer|what we offer|salary(?: package)?|remuneration|package)\b"
+    r"[^.!?]{0,200}?\bvisas?\b",
+    r"\brelocation\s*(?:/\s*shipping\s*)?(?:packages?|support|assistance|allowance|benefits?|bonus|budget|costs?|expenses|provided|offered|included|covered)\b",
+    r"\+\s*full relocation\b|\bfull (?:family )?relocation\b",
+    r"\b(?:allowance|bonus|leave|scheme|plan)\s+relocat",
+    r"\bwe offer\b[^.!?]{0,160}\bbenefits\b[^.!?]{0,160}\brelocation\b",
+    r"\b(?:will|can|we|they)\s+(?:fully |also )?support\s+(?:the |your )?relocation\b",
+    r"\bwork[ -]permit (?:support|sponsorship|assistance|provided|arranged|included)\b",
+    r"\b(?:we|company|employer|client) (?:will |can |do )?(?:sponsor|provide|arrange|cover)\b[^.]{0,40}?" + _VISA_WORDS,
+    r"\b(?:the (?:employer|company|client)|(?:the )?package)\b[^.!?]{0,60}\b(?:covers?|pays? for|includes?)\b[^.!?]{0,80}\b(?:visas?|relocation)\b",
+    r"\bhelp(?:s)? you with (?:your )?relocation\b|\bwilling to relocate (?:the )?(?:right )?(?:candidate|you)\b",
+    r"\brelocation and (?:immigration|employment|visa) support\b",
+    r"\bsupport for \w*\s*residency\b|\bassistance with the \w*\s*golden visa\b",
+    r"\b(?:immigration|visa|relocation) (?:sponsorship|assistance)\b[^.\n]{0,15}[:?]+\s*yes\b",
+    r"\brelocation\s+(?:for [^.!?]{0,40})?available\b|\bcan consider relocation for\b",
+)]
+_SPONSORSHIP_EXCLUDED = [re.compile(p, re.IGNORECASE) for p in (
+    r"\bno (?:visa )?sponsorship\b",
+    r"\bno relocation\b",
+    r"\bnot a position for which sponsorship\b",
+    r"\b(?:relocation and )?visa sponsorship will not be (?:supported|provided|offered)\b",
+    r"\b(?:not|cannot|can't|unable to|won't|will not|do(?:es)? not|not able to|not in a position to) (?:currently |be able to )?(?:sponsor|provide|offer|support)\b[^.]{0,40}?" + _VISA_WORDS,
+    r"\b" + _VISA_WORDS + r"\b[^.]{0,60}?\b(?:is |are )?not (?:available|provided|offered|possible|included|supported)\b",
+    r"\bwithout (?:company |employer |corporate )?sponsorship\b",
+    r"\bmust (?:already )?(?:have|hold|possess)\b[^.]{0,30}?\b(?:right to work|valid (?:work|residence|residency|uae|swiss) (?:visa|permit)|work authori[sz]ation)\b",
+    r"\b(?:must hold|holder of|must be a \w+ national)\b[^.!?]{0,90}\b(?:residency visa|residence visa|iqama|premium residency)\b",
+    r"\bvisa\b[^.!?]{0,15}:\s*yes\s*\(\s*self\s*\)",
+    r"\bpreference will be given to\b[^.!?]{0,90}\bvalid work visas?\b",
+    r"\brequirements?\b[^.!?]{0,30}\bvalid \w*\s*residenc[ey] visa\b",
+    r"\bright to work in (?:the )?\w+",
+    r"\b(?:legally )?authori[sz]ed to work\b|\blegally authori[sz]ed\s*=\s*has citizenship\b",
+    r"^\s*(?:eu|uk|us|eea|swiss)(?:\s+(?:or|/)\s*(?:eu|uk|us|eea|swiss))?\s+work authori[sz]ation\b",
+    r"\bonly\b[^.!?]{0,90}\b(?:nationals?|citizens?)\b[^.!?]{0,90}\bwork[- ]?permits?\b",
+    r"\bdue to work permit restrictions\b|\bvalid b\s*/\s*c work permits?\b",
+    r"\bvisa requirements?\s*:\s*valid visa\b",
+    r"\bmust (?:currently be|have|hold|already hold)\b[^.!?]{0,70}\b(?:transferable|visit|proper|valid|own) visas?\b",
+    r"\btemporary visas? such as\b|\bneed sponsorship for work authori[sz]ation\b",
+    r"\bnecessary visa criteria for\b",
+    r"\b(?:local candidates only|candidates already in|already (?:based|residing|living) in)\b",
+)]
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?;])\s+|\n{2,}|\n(?=\s*[-•*])")
+
+
+def _sentences(text):
+    text = str(text or "")
+    for raw in _SENTENCE_SPLIT.split(text):
+        sentence = " ".join(raw.split())
+        if sentence:
+            yield sentence
+
+
+def _evidence(sentence, match):
+    if len(sentence) <= SPONSORSHIP_EVIDENCE_LIMIT:
+        return sentence
+    start = max(0, match.start() - SPONSORSHIP_EVIDENCE_LIMIT // 3)
+    return sentence[start:start + SPONSORSHIP_EVIDENCE_LIMIT].strip()
+
+
+def sponsorship_signal(text):
+    """("offered" | "excluded" | "", evidence sentence) from the posting's words.
+
+    An explicit refusal anywhere outranks an offer elsewhere: a stated barrier
+    is exactly what the collection filter exists to respect. The evidence is
+    the sentence that decided it, shortened around the match when a posting
+    runs its whole benefits list into one sentence.
+    """
+    offered = None
+    for sentence in _sentences(text):
+        if any(pattern.search(sentence) for pattern in _SPONSORSHIP_UNRELATED):
+            continue
+        for pattern in _SPONSORSHIP_EXCLUDED:
+            match = pattern.search(sentence)
+            if match:
+                return "excluded", _evidence(sentence, match)
+        if offered is None:
+            for pattern in _SPONSORSHIP_OFFERED:
+                match = pattern.search(sentence)
+                if match:
+                    offered = _evidence(sentence, match)
+                    break
+    return ("offered", offered) if offered else ("", "")
+
+
+def quote_in_text(quote, text):
+    """Whether a reviewer's quoted evidence actually appears in the posting."""
+    needle = " ".join(str(quote or "").lower().split())
+    if not needle:
+        return False
+    return needle in " ".join(str(text or "").lower().split())
 
 
 def band(total):

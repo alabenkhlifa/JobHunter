@@ -9,6 +9,7 @@ can never be introduced by a review update.
 """
 
 import math
+from datetime import datetime, timezone
 
 import job_scoring
 import jobhunter_matching
@@ -82,20 +83,65 @@ def _balanced(rows, *, key, per_market, cap):
     return selected + spillover[:cap - len(selected)]
 
 
-def candidate_review_order(candidates, markets=None, per_market=3, cap=40):
-    """Balance a current eligible review pool before its expensive AI cutoff.
+def _parse_when(value):
+    try:
+        when = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
-    Each available market receives a candidate before any gets a second when
-    the cap permits it. If even one each cannot fit, the best market heads win
-    by review priority, current score and stable ID. Unseen jobs precede old
-    approvals, then holds/uncertain decisions, within each market and spillover.
-    A held row requires a fresh AI verdict; this ordering never approves it.
-    Complete descriptions and all other candidate fields are preserved.
+
+def _expire_hold(job, *, now, rubric, hold_days):
+    """A hold judged under another rubric, or long enough ago, is unseen again.
+
+    The 15 best Swiss roles sat a week behind fresh junk because an obsolete
+    "sponsorship unconfirmed" hold outranked nothing and outlived its rule.
+    The old verdict stays visible as `previous_verdict`; nothing is written.
+    """
+    if job.get("ai_verdict") != "hold" or now is None:
+        return
+    reviewed = _parse_when(job.get("ai_reviewed_at"))
+    stale = (rubric is not None and (job.get("ai_rubric") or "") != rubric) \
+        or reviewed is None or now - reviewed > _days(hold_days)
+    if stale:
+        job["previous_verdict"] = "hold"
+        job["ai_verdict"] = ""
+
+
+def _days(value):
+    from datetime import timedelta
+    return timedelta(days=value)
+
+
+def _days_left(job, *, now, max_age_days):
+    posted = _parse_when(job.get("date_posted")) or _parse_when(job.get("date_scraped"))
+    if posted is None:
+        return None
+    return max_age_days - (now - posted).days
+
+
+EXPIRY_BOOST = 10
+
+
+def candidate_review_order(candidates, markets=None, per_market=3, cap=40, *, now=None,
+                           rubric=None, hold_days=2, max_age_days=7, expiry_days=2):
+    """Order a current eligible review pool before its expensive AI cutoff.
+
+    A posting that promises a visa comes first regardless of market or score.
+    Then each available market gets a floor of `per_market` candidates, and
+    the remaining slots go to the best candidates anywhere: Switzerland with
+    sixty good roles must not share the batch evenly with a market holding
+    six weak ones. Within that, unseen rows (and holds expired by `hold_days`
+    or a changed `rubric`, when `now` is given) precede old approvals, then
+    fresh holds; a posting within `expiry_days` of leaving the freshness
+    window is boosted so it is read before it disappears. One copy per
+    cross-posted role. A held row requires a fresh AI verdict; this ordering
+    never approves it. Complete descriptions and all other fields survive.
     """
     _limits(per_market, cap)
     if markets is not None:
         markets = jobhunter_matching.validate_markets(markets)
-    rows = []
+    rows, seen_keys = [], set()
     for job in _index(candidates).values():
         if not _pending(job) or job.get("ai_verdict") == "reject":
             continue
@@ -104,16 +150,42 @@ def candidate_review_order(candidates, markets=None, per_market=3, cap=40):
             continue
         if markets is not None and jobhunter_matching.eligibility_reason(job, markets):
             continue
+        if markets is None:
+            _expire_hold(job, now=now, rubric=rubric, hold_days=hold_days)
         rows.append(job)
-    def priority(job):
-        if not job.get("ai_verdict"):
-            return (0, *_score_order(job))
-        return (1 if _sendable(job, markets) else 2, *_score_order(job))
 
-    # Review capacity is spread across every round, not only the delivery
-    # floor: three early rejections must not leave a market without a chance
-    # while a high-volume market consumes the remaining expensive review slots.
-    return _balanced(rows, key=priority, per_market=max(per_market, cap), cap=cap)
+    def priority(job):
+        boost = 0
+        if markets is None and now is not None:
+            left = _days_left(job, now=now, max_age_days=max_age_days)
+            if left is not None and left <= expiry_days:
+                boost = EXPIRY_BOOST
+        tier = 0 if not job.get("ai_verdict") else (1 if _sendable(job, markets) else 2)
+        return (tier, -(_score(job) + boost), str(job["id"]))
+
+    rows.sort(key=priority)
+    if markets is not None:
+        # The owner's new sponsorship priority must not change an invited
+        # candidate's existing market allocation and authorization policy.
+        return _balanced(rows, key=priority, per_market=max(per_market, cap), cap=cap)
+    if markets is None:
+        deduped = []
+        for job in rows:
+            key = job_scoring.duplicate_key(job)
+            # Collection kept distinct Architect roles at Virtusa, but review
+            # dropped them again. Apply the same short-title fingerprint here.
+            key = (key, job_scoring.description_hash(job.get("description"))
+                   if job_scoring.short_duplicate_title(key) else None)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped.append(job)
+        rows = deduped
+
+    sponsored = [job for job in rows if job.get("sponsorship_signal") == "offered"][:cap]
+    others = [job for job in rows if job.get("sponsorship_signal") != "offered"]
+    return sponsored + _balanced(others, key=priority, per_market=per_market,
+                                 cap=cap - len(sponsored)) if cap > len(sponsored) else sponsored
 
 
 def _sendable(job, markets):
@@ -173,7 +245,13 @@ def select_ranked(reviewed, *, per_market=3, cap=12, markets=None):
         job["market"] = _market(job, markets)
         if _sendable(job, markets):
             rows.append(job)
-    selected = _balanced(rows, key=_rank_order, per_market=per_market, cap=cap)
+    if markets is not None:
+        return sorted(_balanced(rows, key=_rank_order, per_market=per_market, cap=cap), key=_rank_order)
+    # A verified promise of a visa is his best shot: it takes a place before
+    # any market floor or spillover, and only the global cap bounds it.
+    offered = sorted((job for job in rows if job.get("ai_sponsorship") == "offered"), key=_rank_order)[:cap]
+    others = [job for job in rows if job.get("ai_sponsorship") != "offered"]
+    selected = offered + _balanced(others, key=_rank_order, per_market=per_market, cap=cap - len(offered))
     return sorted(selected, key=_rank_order)
 
 
@@ -230,7 +308,7 @@ def delivery_plan(eligible_candidates, newly_reviewed=(), *, per_market=3, cap=1
 
 
 def top_up_order(candidates, wanted_markets, *, exclude_ids=(), per_market=3, cap=12,
-                 markets=None):
+                 markets=None, **ordering):
     """Review order for only the markets a first round left empty.
 
     Same balancing and priority as candidate_review_order over a narrowed pool,
@@ -243,4 +321,4 @@ def top_up_order(candidates, wanted_markets, *, exclude_ids=(), per_market=3, ca
         markets = jobhunter_matching.validate_markets(markets)
     rows = [job for job in _index(candidates).values()
             if str(job["id"]) not in excluded and _market(job, markets) in wanted]
-    return candidate_review_order(rows, markets=markets, per_market=per_market, cap=cap)
+    return candidate_review_order(rows, markets=markets, per_market=per_market, cap=cap, **ordering)

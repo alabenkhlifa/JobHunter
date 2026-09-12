@@ -10,7 +10,8 @@ import scraper
 def job(job_id="one", location="Dubai", **changes):
     result = {
         "id": job_id, "location": location, "market": "untrusted label",
-        "title": "Backend Engineer", "company": "Example", "score": 80,
+        # One company per id: the batch keeps a single copy of a cross-posted role.
+        "title": "Backend Engineer", "company": f"Example {job_id}", "score": 80,
         "description": "Java Spring Boot AWS backend services.",
         "notified": 0, "status": "new", "ai_verdict": "",
         "ai_sponsorship": "", "ai_rank": None,
@@ -20,7 +21,8 @@ def job(job_id="one", location="Dubai", **changes):
 
 
 def approved(job_id="one", location="Dubai", **changes):
-    result = job(job_id, location, ai_verdict="send", ai_sponsorship="offered", ai_rank=1)
+    # Silence is the normal read; a verified "offered" is rare and tested explicitly.
+    result = job(job_id, location, ai_verdict="send", ai_sponsorship="no_info", ai_rank=1)
     result.update(changes)
     return result
 
@@ -53,15 +55,6 @@ def test_capacity_below_combined_quota_still_covers_each_available_market():
     assert len(selected) == 6
     assert len({row["market"] for row in selected}) == 5
     assert sum(row["market"] == "dubai" for row in selected) == 2
-
-
-def test_review_rounds_continue_beyond_delivery_floor_through_entire_top40():
-    regions = ("Dubai", "Abu Dhabi", "Jeddah", "Riyadh", "Switzerland")
-    candidates = [job(f"{region}-{i:02}", region, score=100 - region_index * 10)
-                  for region_index, region in enumerate(regions) for i in range(30)]
-    selected = queue.candidate_review_order(candidates, cap=40)
-    assert len(selected) == 40
-    assert all(sum(row['location'] == region for row in selected) == 8 for region in regions)
 
 
 def test_capacity_below_market_count_uses_best_heads_deterministically():

@@ -165,19 +165,32 @@ survives 0-100 on five weighted dimensions: stack 35, role 30, seniority 15,
 employer 12, freshness 8.
 - **Threshold**: score >= 45 to qualify as a match (`score_threshold`). A
   knocked-out job scores 0 and its breakdown names the reason
-- **Bands**: excellent 75+, good 60+, normal 45+; below 45 is never sent
+- **Bands**: excellent 75+, good 60+, normal 45+. The owner's
+  `sponsored_score_threshold` (35) admits promised-visa postings below 45;
+  they still require an eligible `send` review before delivery.
 
 ## Filters (applied before scoring)
 1. **Excluded titles**: test engineer, qa, sdet, senior architect,
    senior cloud architect, senior lead
    software engineer, machine learning, ml engineer, ml architect, plus the
-   infra, data, security, embedded and frontend lists in `exclude_terms`
+   infra, data, security, embedded and frontend lists in `exclude_terms`,
+   and the junk that used to reach review: DNS, building/interior architect,
+   mobile/iOS/Android developer, ETL, data scientist, support, scrum master,
+   project/product manager, pre-sales
 2. **Job age**: posted within last 7 days only
 3. **Location**: only keeps jobs whose displayed location matches one of the
    configured regions
 4. **Local presence**: skips jobs requiring existing UAE/Saudi residency, an
    existing Swiss permit or EU/EFTA nationality, or that won't sponsor visas
 5. **Experience**: skips jobs requiring more than 7 years
+6. **Sponsorship pre-read**: `job_scoring.sponsorship_signal` reads every
+   stored description once. A stated refusal ("we cannot sponsor", "must
+   hold a valid permit") is `excluded` and never reaches review. A promise
+   ("visa sponsorship", "we sponsor the employment visa", "relocation
+   package", "family visas, flights") is `offered`, stored with the matching
+   sentence in `sponsorship_evidence`, and reviewed at the relaxed
+   `sponsored_score_threshold` (35 instead of 45). Run
+   `scraper.py --backfill-sponsorship` once after deploying a pattern change.
 
 ## Job Enrichment
 For each candidate job, the scraper fetches the full description and extracts:
@@ -199,44 +212,68 @@ For each candidate job, the scraper fetches the full description and extracts:
    - Saves to SQLite database
    - Does **not** notify directly
 5. Hermes cron reviews unnotified candidates with an LLM against the local
-   candidate profile, feedback-adjusted score, and `feedback_learning_notes`.
-   The collector applies feedback to the full eligible pool, then uses
-   `jobhunter_queue.candidate_review_order` to balance up to 40 candidates
-   across available markets. Each market gets a candidate before any gets a
-   second when the cap permits. Balancing continues through all 40 review
-   slots: five markets with enough candidates receive eight each. When a
-   market runs out, the remaining slots go to markets with candidates left.
-   Unseen candidates precede prior
-   approvals, then repeated holds, within that ordering. The collector retains
-   `ai_verdict`, `ai_verdict_reason`, `ai_sponsorship` and `ai_rank`; inspect
-   earlier decisions without treating them as a new approval.
+   candidate profile, `review_preferences` and `feedback_examples`.
+   `review_preferences.languages` lists French, English and Arabic. These
+   languages are not barriers for him, including French-language Swiss postings.
+   `review_preferences` (from `scraper.CONFIG`) is the rulebook: target
+   roles, primary stacks (Java/Spring, Node/NestJS, TypeScript), rejected
+   stacks (.NET/C# as the main stack, PHP, Ruby, mobile, frontend-only),
+   roles to avoid (infra/network, data science/ML research, support, QA,
+   scrum/project management, vendor pre-sales solutions architect, SAP/ERP/
+   PLM/MDM, building architect) and the 7-year cap. `feedback_examples` is
+   precedent: his last 30 interested/skipped jobs with title, company, tech,
+   required years and the reason he gave. A candidate that resembles a
+   skipped example ("Backend Developer (.NET) — wrong stack") is judged the
+   way he judged it; one that resembles an interested example is a strong
+   sign. The reviewer must not invent a preference the rulebook or the
+   examples do not support.
+   The collector orders the eligible pool with
+   `jobhunter_queue.candidate_review_order`: candidates whose posting
+   promises a visa (`sponsorship_signal` = `offered`) come first, whatever
+   their market or score; then each market gets a floor of three; the rest
+   of the 40 slots go to the best candidates anywhere, so a deep market is
+   not held to the same share as a thin one. Within that, unseen candidates
+   precede prior approvals, then holds. A hold older than two days, or judged
+   under an older `review_rubric`, competes again as unseen: its old verdict
+   is shown as `previous_verdict` with its reason, and `ai_verdict` is empty.
+   A posting within two days of leaving the freshness window is boosted so it
+   is read before it expires. Deduplication shares collection's rule: a
+   normalized title of at most two words also needs an identical description
+   fingerprint; distinct Architect roles remain separate. The collector
+   retains `ai_verdict`, `ai_verdict_reason`, `ai_sponsorship`, `ai_rank`,
+   `ai_reviewed_at` and `ai_rubric`; inspect earlier decisions without
+   treating them as a new approval.
    Read each complete `description`, including requirements and benefits near
-   the end. Apply `review_constraints.max_experience` to mandatory experience
-   requirements even when extracted metadata is missing or outdated. Check
+   the end. Apply `review_constraints.max_experience` (7) to mandatory
+   experience requirements even when extracted metadata is missing or
+   outdated; a role asking eight or more years is too senior, as are
+   director-level scope, teams of ten or more, or budget ownership. Check
    work authorization, relocation, language and specialist requirements in
    the full text; distinguish explicit evidence from a sponsorship inference.
    For each one it judges: whether the description reads as a real backend
    architecture/tech-lead role or a title dressed as one, whether the company
-   looks real, and the sponsorship read. That read reports what **this
-   listing** says, never a guess from its country: `offered` for explicit
-   employer sponsorship or relocation support; `implied` for indirect but real
-   evidence such as an international relocation package or stated work-permit
-   support; `no_info` when the listing is silent, which is the normal case at
-   roughly 98% of postings; `doubtful` only when the listing itself raises a
-   specific barrier ("you must be eligible to work in Switzerland", EU/EFTA
-   preference); `excluded` when it rules sponsorship out. It is required on
-   every job regardless of verdict, since sponsorship is his one hard
-   deal-breaker. `offered`, `implied` and `no_info` all send.
-   Silence is not a barrier and "sponsorship unconfirmed" is not a hold
-   reason: collection already drops postings that demand an existing permit or
-   EU/EFTA nationality, so anything reaching review has passed that wall, and
-   the digest prints the read on every job so the risk is shown rather than
-   hidden behind a hold. Reading the same silence as `implied` in the Gulf and
-   `doubtful` in Switzerland is one market prior applied twice; the market is
-   already in the digest heading. It returns a JSON array of
-   `{job_id, verdict, reason, sponsorship, rank}` — verdict is
-   `send`/`hold`/`reject`, `reason` at most ten words, `rank` a positive
-   integer unique across the batch's `send` entries, 1 = best.
+   looks real, and the sponsorship read. That read has three values and
+   reports what **this listing** says, never a guess from its country:
+   `offered` when the posting promises visa sponsorship, a work/employment/
+   residence visa, work-permit support or a relocation package to the hire;
+   `excluded` when it rules sponsorship out or demands existing
+   authorization; `no_info` when it is silent, which is the normal case.
+   `offered` must come with `evidence`: the exact sentence from the
+   description that makes the promise, copied verbatim. The script checks the
+   quote exists in the posting; an `offered` without a matching quote is
+   recorded as `no_info` and reported, so never label from memory or from the
+   company's reputation. The candidate's `sponsorship_evidence` field, when
+   present, is the pre-read's sentence and is the natural quote. A quote the
+   pre-read missed is welcome and is logged for the pattern list.
+   Sponsorship is never a hold reason: silence is not a barrier, collection
+   already drops postings that demand an existing permit, and the digest
+   prints the read on every job so the risk is shown rather than hidden.
+   `offered` and `no_info` send; `excluded` does not. It returns a JSON array
+   of `{job_id, verdict, reason, sponsorship, evidence, rank}` — verdict is
+   `send`/`hold`/`reject`, `reason` at most ten words, `evidence` the quoted
+   sentence (empty unless `offered`), `rank` a positive integer unique across
+   the batch's `send` entries, 1 = best. A promised-visa candidate that fits
+   is his best shot: rank it first.
 5b. **Top up the empty markets before sending.** Pipe that array to
    `~/.hermes/scripts/jobhunter_review.py --plan`, which writes nothing and
    sends nothing: it prints JSON naming the markets this review would leave
@@ -271,8 +308,15 @@ For each candidate job, the scraper fetches the full description and extracts:
    checks. Never describe unknown or unchecked listings as confirmed closed.
    Never suppress collection, review, or
    delivery errors; report them even if a partial digest reached Telegram.
-   Queue selection excludes any `send` whose sponsorship reads `doubtful` or
-   `excluded` under this owner's policy; `no_info` sends. It allocates one job per market per
+   Planning uses the same quote validation as recording and reports corrections
+   in `review_notes`. The send wrapper prints those notes to stderr even when
+   delivery fails. Each note names an entry it dropped or
+   rewrote (unknown id, legacy `implied`/`doubtful` label, `offered` without
+   a verifiable quote) with the reason. Read them; a dropped verdict is a
+   mistake in the array, not noise.
+   Queue selection excludes any `send` whose sponsorship reads `excluded`;
+   `no_info` sends. A verified `offered` takes a place first, bounded only by
+   the global cap. It then allocates one job per market per
    round (Dubai and Abu Dhabi count separately), for a default floor of 3,
    then shares unused places up to a global cap of 12. A strong market can
    receive more than 3. Current approvals retain their batch order; older
@@ -296,7 +340,11 @@ For each candidate job, the scraper fetches the full description and extracts:
    from the AI verdict. To retry only the eligible approved queue without a
    new review batch, pass an empty JSON array to `jobhunter_review.py`.
 7. That digest is ONE message for the whole night, not one message per job
-   (`scraper.format_digest_message` composes it). Entries are grouped under a
+   (`scraper.format_digest_message` composes it). Jobs whose read is a
+   verified `offered` open the digest under a `🎯 VISA SPONSORSHIP` heading,
+   each with its market on the company line; they take places before any
+   market floor and only the global cap of 12 bounds them. The remaining
+   entries are grouped under a
    fixed market order — Dubai, Abu Dhabi, Jeddah, Riyadh, Switzerland
    (`scraper.DIGEST_MARKET_ORDER`) — sorted by score descending inside each
    market, breaking ties by `ai_rank` then job ID,
@@ -312,8 +360,8 @@ For each candidate job, the scraper fetches the full description and extracts:
    with unresolved checks, which use `⏳ Availability not confirmed`. These
    labels describe this delivery, not an exhaustive absence of jobs. Scores use
    🔥 for 80+, ⭐ for 70–79, and 👍 below 70. Visa labels are bold: a silent
-   listing displays `🛂 Visa not mentioned`; an inferred sponsorship read
-   displays `❓ Visa unconfirmed`; an explicit offer displays
+   listing displays `🛂 Visa not mentioned`; a legacy inferred read still
+   displays `❓ Visa unconfirmed`; a verified explicit offer displays
    `✅ Visa offered`. The live queue count appears once in the summary; it
    includes eligible unreviewed and held jobs, not only approved sends.
 8. A bare numeric reply that follows the digest (e.g. "2") refers to that job
@@ -333,6 +381,15 @@ For each candidate job, the scraper fetches the full description and extracts:
     The existing "interested" trigger is unchanged: once a specific job is in
     view — from a numbered reply or from the user naming it — that word works
     exactly as documented below.
+11. A negative reply is feedback and must be recorded. When he answers the
+    digest with judgments — "1 too senior, 2 wrong stack, 4 wrong role and
+    stack", "all of them are bad", "not interested in 3" — resolve each
+    number to its job id from the digest you sent, and run
+    `python3 scraper.py --skip <job_id> --reason "<his words for that job>"`
+    once per job (reason "not interested" when he gave none). That marks the
+    job skipped and stores the reason; tomorrow's `feedback_examples` show it
+    to the reviewer as precedent. Confirm in one short line what was
+    recorded; do not argue with the judgment or re-pitch the job.
 
 ### When user replies "interested" for a job:
 Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; scripts handle rendering, state tracking, and browser-page inspection.
@@ -467,6 +524,12 @@ python3 scraper.py --send-doc <file_path> [caption]
 
 # Mark job as interested
 python3 scraper.py --mark-interested <job_id>
+
+# Record a negative digest reply with his reason (feedback precedent for the reviewer)
+python3 scraper.py --skip <job_id> --reason "too senior"
+
+# Store the visa-sponsorship pre-read for older rows; run once after deploy or a pattern change
+python3 scraper.py --backfill-sponsorship
 
 # Render resume PDF
 python3 render_pdf.py resume <input.json> <output.pdf>

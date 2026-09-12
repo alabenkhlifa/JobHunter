@@ -74,7 +74,7 @@ def test_record_review_writes_a_send_verdict_and_returns_it():
     row = conn.execute("SELECT * FROM jobs WHERE id = 'j1'").fetchone()
     assert row["ai_verdict"] == "send"
     assert row["ai_verdict_reason"] == "test reason"
-    assert row["ai_sponsorship"] == "implied"
+    assert row["ai_sponsorship"] == "no_info"  # legacy "implied" collapses on the owner path
     assert row["ai_rank"] == 2
     assert row["status"] == "new"
     assert len(written) == 1

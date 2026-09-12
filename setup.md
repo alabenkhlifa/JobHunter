@@ -278,7 +278,13 @@ python scraper.py --collect-only
 python scraper.py --get-job <job_id>
 python scraper.py --list-queued --limit 10
 python scraper.py --mark-interested <job_id>
+python scraper.py --skip <job_id> --reason "wrong stack"
+python scraper.py --backfill-sponsorship
 ```
+
+`--skip` records a digest job he judged negatively, with his words as the reason; the reviewer sees recent skips and interests as precedent. `--backfill-sponsorship` stores the visa-sponsorship pre-read for rows collected before the columns existed; run it once after deploying and after any pattern change.
+
+Deploy the JobHunter release together with the matching `jobhunter_collect_candidates.py`, `jobhunter_review.py`, and installed job-hunter skill from the RaspberryPi checkout. The collector must supply sponsorship evidence, review timestamps, `review_preferences` (including French, English and Arabic), and feedback examples. Run collector `--check` and reviewer `--plan` against the deployed pair before collecting or sending; both open the existing database read-only. Planning validates sponsorship quotes exactly as recording does and returns any `review_notes`.
 
 `--list-queued` powers the owner's “more” reply and performs fresh source checks before returning jobs. It does not grant an AI approval. Run it again to retry uncertain checks; fewer than the requested limit can mean checks were inconclusive or the check budget was reached.
 

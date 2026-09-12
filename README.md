@@ -101,7 +101,7 @@ python scraper.py --collect-only
 
 LinkedIn uses `linkedin_time_range: "r172800"` (past two days). `min_matching_jobs: 0` disables the per-bucket match limit so collection reads all available pages up to `max_pages`; a positive value restores early stopping. A match-count limit cuts an arbitrary slice from date-filtered postings.
 
-The Hermes daily collector balances up to 40 review candidates across available markets after applying feedback. Unreviewed candidates precede repeated holds. Delivery combines the new approvals with still-eligible approvals from earlier batches; the default is three places per market with unused places shared, up to 12 jobs. Freshness, score and hard filters still apply, and a held job needs a new approval before it can enter a digest.
+The owner's Hermes collector reviews up to 40 candidates: promised-visa postings first, then a floor of three per market, then the strongest remaining candidates. `review_preferences` and recent feedback examples guide the review; `review_preferences.languages` includes French, English and Arabic. Sponsored postings enter review from `sponsored_score_threshold` (35), while other postings need 45. Holds older than two days or an earlier `review_rubric` compete again but still require a new approval. Verified visa offers lead delivery, followed by market floors and shared unused places, up to 12 jobs. Invited profiles retain their existing allocation and work-authorization policy.
 
 Before delivery, JobHunter checks the source listing for the same role and current application availability. Confirmed closure marks an unsent job `unavailable`; timeouts, blocked pages and ambiguous results remain pending for retry. Checks also run for individual cards, delivery retries and the owner's “more” list:
 
@@ -121,6 +121,18 @@ Mark a job as interested:
 
 ```bash
 python scraper.py --mark-interested <job_id>
+```
+
+Record a negative text reply (marks the job skipped and stores the reason as reviewer precedent):
+
+```bash
+python scraper.py --skip <job_id> --reason "too senior"
+```
+
+Pre-read stored descriptions for visa-sponsorship wording once after deploying a pattern change (idempotent):
+
+```bash
+python scraper.py --backfill-sponsorship
 ```
 
 Telegram CTA flow:
