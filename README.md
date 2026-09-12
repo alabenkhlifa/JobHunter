@@ -99,6 +99,8 @@ Collect jobs:
 python scraper.py --collect-only
 ```
 
+LinkedIn uses `linkedin_time_range: "r172800"` (past two days). `min_matching_jobs: 0` disables the per-bucket match limit so collection reads all available pages up to `max_pages`; a positive value restores early stopping. A match-count limit cuts an arbitrary slice from date-filtered postings.
+
 The Hermes daily collector balances up to 40 review candidates across available markets after applying feedback. Unreviewed candidates precede repeated holds. Delivery combines the new approvals with still-eligible approvals from earlier batches; the default is three places per market with unused places shared, up to 12 jobs. Freshness, score and hard filters still apply, and a held job needs a new approval before it can enter a digest.
 
 Before delivery, JobHunter checks the source listing for the same role and current application availability. Confirmed closure marks an unsent job `unavailable`; timeouts, blocked pages and ambiguous results remain pending for retry. Checks also run for individual cards, delivery retries and the owner's “more” list:

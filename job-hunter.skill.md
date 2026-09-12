@@ -126,14 +126,16 @@ Do not change confirmation or visibility flags to make a fact eligible. Ask the 
 A confirmed role-family variant is a complete candidate-approved presentation, not newly inferred evidence. It may deliberately consolidate or omit master-profile experiences and sections. Identity and contact fields always come from the master profile; every other intended public section must be present in the renderer-compatible variant snapshot because unspecified master sections are not inherited. A legacy variant requires at least one matching `match_terms` phrase. A variant with `role_terms` is eligible only when the job title matches that role family; supporting `match_terms` then rank eligible variants. Architecture-titled jobs require a matching role-scoped confirmed variant and must not use generic fallback tailoring. `max_pages` must pass before `package_generated` is recorded. Preserve selected variant wording and order exactly and never expose its matching or confirmation metadata in generated documents.
 
 ## Scraping Strategy
-The scraper uses **breadth-first round-robin** across one bucket per
-scraper/region pair (10 today: LinkedIn and Foundit x Dubai, Abu Dhabi, Jeddah,
-Riyadh, Switzerland):
-- Collects up to **25 matching jobs per bucket** (`min_matching_jobs`)
-- Foundit is a Gulf board, so its Switzerland bucket returns nothing and exits
-  after the first empty page
-- Fetches page 1 of every keyword before going to page 2
-- Evaluates jobs after each page fetch to stop early
+The scraper uses **breadth-first round-robin** across five LinkedIn region
+buckets and two Foundit country buckets (United Arab Emirates and Saudi Arabia).
+Foundit city queries returned identical pages within each country; the Gulf
+board has no Swiss listings.
+- `linkedin_time_range` defaults to `"r172800"` (past two days), sent as `f_TPR`
+- `min_matching_jobs` defaults to **0**, disabling the per-bucket match limit:
+  stopping at 25 cut an arbitrary slice from date-filtered postings
+- A positive `min_matching_jobs` restores early stopping per bucket
+- Fetches page 1 of every keyword before going to page 2, up to `max_pages`
+- Evaluates jobs after each page fetch
 - Scrapers are generators that yield one page at a time
 
 ### Search Keywords
@@ -166,8 +168,8 @@ employer 12, freshness 8.
 - **Bands**: excellent 75+, good 60+, normal 45+; below 45 is never sent
 
 ## Filters (applied before scoring)
-1. **Excluded titles**: test engineer, qa, sdet, staff engineer, staff
-   software engineer, senior architect, senior cloud architect, senior lead
+1. **Excluded titles**: test engineer, qa, sdet, senior architect,
+   senior cloud architect, senior lead
    software engineer, machine learning, ml engineer, ml architect, plus the
    infra, data, security, embedded and frontend lists in `exclude_terms`
 2. **Job age**: posted within last 7 days only
@@ -175,7 +177,7 @@ employer 12, freshness 8.
    configured regions
 4. **Local presence**: skips jobs requiring existing UAE/Saudi residency, an
    existing Swiss permit or EU/EFTA nationality, or that won't sponsor visas
-5. **Experience**: skips jobs requiring more than 8 years
+5. **Experience**: skips jobs requiring more than 7 years
 
 ## Job Enrichment
 For each candidate job, the scraper fetches the full description and extracts:

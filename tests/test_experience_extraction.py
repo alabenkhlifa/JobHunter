@@ -1,3 +1,4 @@
+import pytest
 import scraper
 
 
@@ -131,3 +132,26 @@ def test_another_persons_years_are_not_a_requirement():
     text = "The pod is led by a Senior Portfolio Manager with 15+ years of experience."
 
     assert scraper.extract_min_experience(text) == -1
+
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Minimum of eight (8) years", 8), ("Minimum eight(8) years", 8),
+    ("Experience: (3-7) years", 3), ("Experience: (8-12) years", 8),
+    ("(8–12) years of experience", 8), ("5 Jahre Berufserfahrung", 5),
+    ("Erfahrung von 5 Jahren", 5), ("5 ans d'expérience", 5),
+    ("5 années d’expérience", 5), ("Several years of experience", -1),
+    ("Minimum of eight to twelve years of experience", 8),
+    ("5 Jahre Unternehmensgeschichte", -1),
+])
+def test_word_numbers_parenthesised_ranges_and_non_english_years(text, expected):
+    assert scraper.extract_min_experience(text) == expected
+
+
+@pytest.mark.parametrize("word,value", list(zip(
+    "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen".split(),
+    range(1, 16),
+)))
+def test_every_spelled_year_number(word, value):
+    assert scraper.extract_min_experience(f"Minimum {word} years of experience") == value
+    assert scraper.extract_min_experience(f"Minimum {word} ({value}) years of experience") == value

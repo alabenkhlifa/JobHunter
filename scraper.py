@@ -56,7 +56,22 @@ CONFIG = {
     "allowed_locations": list(job_scoring.DEFAULT_MARKETS),
     "exclude_terms": [
         "test engineer", "qa engineer", "quality assurance",
-        "staff software engineer", "staff engineer", "manual test", "sdet",
+        "manual test", "sdet",
+        # Junk that scored 45-55 and consumed review slots: a building
+        # architect, a DNS lead, an ETL developer, a mobile developer.
+        "dns", "building architect", "interior", "landscape architect",
+        "mobile developer", "mobile engineer", "ios developer", "android developer",
+        "etl developer", "etl engineer", "data scientist", "data analyst",
+        "support engineer", "application support", "technical support", "l1 ", "l2 ",
+        "scrum master", "project manager", "product manager", "delivery manager",
+        "pre-sales", "presales", "sales engineer", "account manager",
+        # Seen in the replayed batch: vendor-product and research titles.
+        "android engineer", "ios engineer", "quant", "research engineer",
+        "reliability engineer", "mlops engineer",
+        "sap ", " sap", "s/4hana", "murex", "power bi", "salesforce", "servicenow",
+        "dynamics 365", "director", "cto", "chief technology",
+        "d365", "m365", "microsoft 365", "sharepoint", "ict ", "business applications",
+        "workday", "oracle fusion",
         # "senior architect" on Gulf boards is usually a building architect;
         # the software ones read "senior software architect" and still pass.
         "senior architect", "senior cloud architect",
@@ -142,14 +157,16 @@ CONFIG = {
         "swiss work permit", "valid work permit for switzerland",
         "must hold a valid work permit", "existing work permit",
     ],
-    "max_experience": 8,
+    # Eight-year requirements were judged too senior in the collection audit.
+    "max_experience": 7,
     "max_job_age_days": 7,
     # One number, the rubric's: a profile config may override it, but the
     # default it starts from must not drift from job_scoring.SEND_CUTOFF.
     "score_threshold": job_scoring.SEND_CUTOFF,
-    # Per scraper/region bucket. Keep this high so one good match does not stop
-    # the scrape early; the LLM review can rank/reject multiple good offers.
-    "min_matching_jobs": 25,
+    # Date-filtered pages cover the day's postings; stopping at 25 matches
+    # cut an arbitrary slice from each bucket before its pages were read.
+    "min_matching_jobs": 0,  # 0 disables the per-bucket match limit
+    "linkedin_time_range": "r172800",  # past two days
     "rate_limit": {"min": 2, "max": 5},
     "db_path": "./data/jobs.db",
     "log_path": "./data/scraper.log",
@@ -301,7 +318,7 @@ def is_job_seen(conn, job_id):
 
 
 def load_recent_duplicate_keys(conn, max_age_days, min_score):
-    """Duplicate keys of every job sent inside the freshness window.
+    """Duplicate keys and description hashes inside the freshness window.
 
     The spec's duplicate knockout is "same normalised title at the same
     company inside the freshness window", so the seen set has to outlive the
@@ -325,27 +342,28 @@ def load_recent_duplicate_keys(conn, max_age_days, min_score):
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
     rows = conn.execute(
-        "SELECT title, company, location FROM jobs WHERE date_scraped >= ? AND score >= ?",
+        "SELECT title, company, location, description FROM jobs WHERE date_scraped >= ? AND score >= ? AND score > 0",
         (cutoff, min_score),
     ).fetchall()
-    return {
-        job_scoring.duplicate_key({"title": t, "company": c, "location": loc},
-                                  matching=CONFIG.get("matching"), markets=CONFIG.get("markets"))
-        for t, c, loc in rows
-    }
+    keys = {}
+    for title, company, location, description in rows:
+        job = {"title": title, "company": company, "location": location}
+        key = job_scoring.duplicate_key(job, matching=CONFIG.get("matching"), markets=CONFIG.get("markets"))
+        keys.setdefault(key, set()).add(description_hash(description))
+    return keys
 
 
-def remember_if_sent(seen_titles, title_key, score, min_score):
-    """Record a title for the duplicate guard only once it has been sent.
+def description_hash(description):
+    # 402 of 754 same-title/company groups have distinct descriptions. The
+    # first 400 normalized characters distinguish generic roles cheaply.
+    normalized = " ".join(str(description or "").lower().split())[:400]
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
-    The in-run add and load_recent_duplicate_keys must apply the same rule:
-    deduplication suppresses repeat sends, and nothing below the cutoff has a
-    send to repeat. Recording every scored key meant that within one night a
-    copy knocked out at 0 killed a later sendable copy of the same role before
-    its description was fetched - the seed's defect, with a one-night window.
-    """
-    if score >= min_score:
-        seen_titles.add(title_key)
+
+def remember_if_sent(seen_titles, title_key, score, min_score, description=""):
+    """Use the seed's score cutoff for in-run duplicates too."""
+    if score > 0 and score >= min_score:
+        seen_titles.setdefault(title_key, set()).add(description_hash(description))
 
 
 def init_application_tracking(conn):
@@ -1205,12 +1223,14 @@ def scrape_linkedin(session, keyword, location):
     """Generator that yields one page of jobs at a time (list per page)."""
     base_url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 
+    # All 2,211 audited pages returned 10 cards; a stride of 25 skipped 15.
+    start = 0
     for page in range(CONFIG["max_pages"]):
-        start = page * 25
         params = {
             "keywords": keyword,
             "location": location,
             "start": start,
+            "f_TPR": CONFIG.get("linkedin_time_range", "r172800"),
         }
 
         log.info(f"LinkedIn: '{keyword}' in '{location}' page {page + 1}")
@@ -1242,7 +1262,8 @@ def scrape_linkedin(session, keyword, location):
                 company_el = card.find("h4", class_="base-search-card__subtitle")
                 location_el = card.find("span", class_="job-search-card__location")
                 link_el = card.find("a", class_="base-card__full-link")
-                date_el = card.find("time", class_="job-search-card__listdate")
+                # 42% of stored dates were missing: sub-day cards use --new.
+                date_el = card.find("time", class_=re.compile(r"^job-search-card__listdate"))
 
                 if not title_el or not link_el:
                     continue
@@ -1265,6 +1286,7 @@ def scrape_linkedin(session, keyword, location):
                 continue
 
         log.info(f"LinkedIn: found {len(page_jobs)} cards on page {page + 1}")
+        start += len(cards)
         yield page_jobs
 
 
@@ -1272,11 +1294,11 @@ def scrape_linkedin(session, keyword, location):
 
 FOUNDIT_LOCATION_MAP = {
     "UAE": "United Arab Emirates",
-    "Dubai": "Dubai, United Arab Emirates",
-    "Abu Dhabi": "Abu Dhabi, United Arab Emirates",
+    "Dubai": "United Arab Emirates",
+    "Abu Dhabi": "United Arab Emirates",
     "Saudi Arabia": "Saudi Arabia",
-    "Riyadh": "Riyadh, Saudi Arabia",
-    "Jeddah": "Jeddah, Saudi Arabia",
+    "Riyadh": "Saudi Arabia",
+    "Jeddah": "Saudi Arabia",
 }
 
 
@@ -1351,6 +1373,7 @@ def scrape_foundit(session, keyword, location):
                     "location": normalize_location(j.get("locations", location)),
                     "url": job_url,
                     "source": "Foundit",
+                    "query_country": location_param,
                     "date_posted": date_posted,
                 })
             except (KeyError, AttributeError) as e:
@@ -1655,16 +1678,24 @@ _EXPERIENCE_WINDOW = 220
 # A range yields its low end, so "12 - 18 + years" asks for 12. The "(?!ly)"
 # keeps "yearly" out; no word boundary follows, because mojibake in the corpus
 # glues the next token on ("5 yearsu2019 experience", "8 yearsof experience").
+# English word/digit pairs and parenthesised ranges were missed, as were
+# the German/French year words on 176 of 387 Swiss postings.
+_NUMBER_WORDS = dict(zip(
+    "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen".split(),
+    range(1, 16),
+))
+_NUMBER = r"(?:\d{1,3}|(?:" + "|".join(_NUMBER_WORDS) + r")(?:\s*\(\d{1,2}\))?)"
+_YEAR_WORD = r"(?:year\(s\)|years?|yrs?|Jahren?|ans|années)(?!ly)"
 _YEARS_PHRASE = re.compile(
-    r"(?P<low>\d{1,3})\s*\+?\s*(?:-|to)\s*\d{1,3}\s*\+?\s*(?:years?|yrs?|year\(s\))(?!ly)"
-    r"|(?P<single>\d{1,3})\s*\+?\s*(?:years?|yrs?|year\(s\))(?!ly)",
+    rf"(?<!\w)\(?(?P<low>{_NUMBER})\s*\+?\s*(?:-|to)\s*{_NUMBER}\s*\+?\s*\)?\s*{_YEAR_WORD}"
+    rf"|(?<!\w)(?P<single>{_NUMBER})\s*\+?\s*{_YEAR_WORD}",
     re.I,
 )
 MIN_EXPERIENCE_YEARS, MAX_EXPERIENCE_YEARS = 0, 30
 
 # "exper" covers experience, experienced, expertise and the "experince" typo
 # three postings carry; "\bexp\b" covers the "4 to 7 years exp" shorthand.
-_EXPERIENCE_WORD = re.compile(r"exper|\bexp\b|background|track\s+record", re.I)
+_EXPERIENCE_WORD = re.compile(r"exper|\bexp\b|background|track\s+record|erfahrung|expérience", re.I)
 
 # What the years belong to, when they are not the candidate's. The first group
 # never describes a person, so an adjective may sit in front of it
@@ -1894,7 +1925,9 @@ def extract_min_experience(text):
     text = str(text).translate(_EXPERIENCE_FOLD)
     candidates = []
     for match in _YEARS_PHRASE.finditer(text):
-        value = int(match.group("low") or match.group("single"))
+        number = match.group("low") or match.group("single")
+        first = re.match(r"\w+", number.lower()).group()
+        value = int(first) if first.isdigit() else _NUMBER_WORDS[first]
         if not (MIN_EXPERIENCE_YEARS <= value <= MAX_EXPERIENCE_YEARS):
             continue
         before, after = _experience_context(text, match.start(), match.end())
@@ -2047,7 +2080,17 @@ def is_excluded(job):
     if matching and matching.get("preset", "generic") == "generic":
         return bool(jobhunter_matching.excluded_reason(job, jobhunter_matching.validate_matching(matching)))
     title = job["title"].lower()
-    return any(term in title for term in CONFIG["exclude_terms"])
+    # Substrings made "cto" reject contractor, sector and Autoinjectors.
+    for term in CONFIG["exclude_terms"]:
+        if not job_scoring._phrase_pattern(term).search(title):
+            continue
+        # The same DevOps/React title rescues must survive the pre-fetch list.
+        if any(job_scoring._phrase_pattern(family).search(term)
+               and job_scoring.core_title_rescues_family(title, family)
+               for family in job_scoring.CORE_TITLE_RESCUABLE_FAMILIES):
+            continue
+        return True
+    return False
 
 
 def score_job(job, *, now=None):
@@ -2462,6 +2505,168 @@ def parse_args():
     return args
 
 
+def build_collection_buckets(session):
+    """One LinkedIn bucket per region, one Foundit bucket per Gulf country."""
+    buckets = {}
+    for scraper_name, scraper_fn in SCRAPERS:
+        regions = CONFIG["regions"]
+        if scraper_name.lower() == "foundit":
+            # Dubai/Abu Dhabi and Jeddah/Riyadh returned identical Foundit
+            # pages; Switzerland has no listings on this Gulf board.
+            regions = {}
+            for locations in CONFIG["regions"].values():
+                for location in locations:
+                    country = FOUNDIT_LOCATION_MAP.get(location, location)
+                    if country in ("United Arab Emirates", "Saudi Arabia"):
+                        regions[country] = [country]
+        for region, locations in regions.items():
+            buckets[f"{scraper_name}/{region}"] = {
+                "matches": 0,
+                "generators": [scraper_fn(session, keyword, location)
+                               for keyword in CONFIG["keywords"] for location in locations],
+                "pending_jobs": [],
+            }
+    return buckets
+
+
+_COUNTRY_DISPLAY = {"uae": "United Arab Emirates", "ksa": "Saudi Arabia"}
+
+
+def chosen_country_cities(country):
+    cities = []
+    for city in ("Dubai", "Abu Dhabi", "Jeddah", "Riyadh"):
+        if job_scoring.market_country(city) == country and is_allowed_location({"location": city}):
+            cities.append(city)
+    return cities
+
+
+def location_resolution_country(job):
+    """Country whose chosen cities must be confirmed in the fetched body."""
+    if CONFIG.get("matching", {}).get("preset") == "generic":
+        return None
+    location = normalize_location(job.get("location")).strip().lower()
+    country = job_scoring.market_country(location)
+    if str(job.get("source", "")).lower() == "foundit":
+        query = job_scoring.market_country(job.get("query_country"))
+        # Null and Remote carry no country; the Foundit country query supplies
+        # it. An explicitly different country cannot be rescued by that query.
+        if query in _COUNTRY_DISPLAY and (country == query or location in ("", "remote")):
+            return query if chosen_country_cities(query) else None
+        return None
+    # 211 bare-UAE listings repeated nightly, including 59 target-role titles.
+    if location in ("united arab emirates", "uae", "saudi arabia"):
+        if re.search(r"\b(?:java|spring\w*|kotlin|node(?:\.?js)?|backend|architect|tech lead)\b", str(job.get("title") or ""), re.I):
+            return country if chosen_country_cities(country) else None
+    return None
+
+
+def resolve_description_city(description, country):
+    matches = []
+    for city in chosen_country_cities(country):
+        pattern = r"\b(?:jeddah|jiddah)\b" if city == "Jeddah" else job_scoring._phrase_pattern(city)
+        match = re.search(pattern, description or "", re.I) if isinstance(pattern, str) else pattern.search(description or "")
+        if match:
+            matches.append((match.start(), city))
+    if matches:
+        return f"{min(matches)[1]}, {_COUNTRY_DISPLAY[country]}"
+    return None
+
+
+def save_knockout(conn, job, reason):
+    # 24% of nightly detail fetches repeated knockouts that were never saved.
+    job["score"] = 0
+    job["score_breakdown"] = f"knocked out: {reason}"
+    save_job(conn, job)
+    log.info(f"Knocked out: {reason}: {job['title']} @ {job['company']}")
+    return None
+
+
+def evaluate_job(job, *, conn, session, seen_titles, skip_counts):
+    """Evaluate a single job: fetch details, filter, score. Returns job if it passes, None otherwise."""
+    if is_job_seen(conn, job["id"]):
+        skip_counts["already_seen"] += 1
+        return None
+    title_key = job_scoring.duplicate_key(job, matching=CONFIG.get("matching"), markets=CONFIG.get("markets"))
+    generic = CONFIG.get("matching", {}).get("preset", "default") == "generic"
+    short_title = not generic and len(title_key.split("|", 1)[0].split()) <= 2
+    if title_key in seen_titles and not short_title:
+        skip_counts["repost"] += 1
+        log.info(f"Skipped (repost of a title already stored): {job['title']} @ {job['company']}")
+        return None
+    if is_excluded(job):
+        skip_counts["excluded"] += 1
+        log.debug(f"Excluded: {job['title']}")
+        return None
+    country = location_resolution_country(job) if not is_allowed_location(job) else None
+    if not is_allowed_location(job) and not country:
+        skip_counts["outside_location"] += 1
+        log.info(f"Skipped (outside allowed location): {job['title']} @ {job['company']} — {job.get('location', '')}")
+        return None
+
+    max_age = CONFIG["max_job_age_days"]
+    date_posted = job.get("date_posted", "")
+    if date_posted:
+        try:
+            posted = datetime.fromisoformat(date_posted.replace("Z", "+00:00"))
+            if posted.tzinfo is None:
+                posted = posted.replace(tzinfo=timezone.utc)
+            age_days = (datetime.now(timezone.utc) - posted).days
+            if age_days > max_age:
+                skip_counts["too_old"] += 1
+                log.debug(f"Skipped (posted {age_days}d ago > {max_age}d max): {job['title']}")
+                return None
+        except (ValueError, TypeError):
+            pass
+
+    log.info(f"Fetching details: {job['title']}")
+    desc = fetch_job_description(session, job)
+    job["description"] = desc
+    if country:
+        resolved = resolve_description_city(desc, country)
+        if not resolved:
+            return save_knockout(conn, job, "outside the configured markets: no chosen city in description")
+        job["location"] = resolved
+    # Resolution may turn an unknown location into the stored twin's country.
+    title_key = job_scoring.duplicate_key(job, matching=CONFIG.get("matching"), markets=CONFIG.get("markets"))
+    if title_key in seen_titles:
+        if not short_title or description_hash(desc) in seen_titles[title_key]:
+            log.info(f"Skipped (repost after detail fetch): {job['title']} @ {job['company']}")
+            return None
+    posting_company = str(job.get("company") or "").strip()
+    actual_employer = extract_actual_employer(
+        posting_company,
+        desc,
+        job.get("credibility_notes", ""),
+    )
+    if actual_employer and actual_employer != posting_company:
+        job["company"] = actual_employer
+        job["recruiter_company"] = job.get("recruiter_company") or posting_company
+        existing_notes = str(job.get("credibility_notes") or "").strip()
+        resolution_note = f"posted via {posting_company} aggregator"
+        job["credibility_notes"] = "; ".join(value for value in (existing_notes, resolution_note) if value)
+
+    if ("markets" in CONFIG or not CONFIG.get("skip_local_presence", False)) and requires_local_presence(desc, job=job):
+        return save_knockout(conn, job, "requires local presence")
+
+    req, nice = extract_tech_keywords(desc)
+    job["tech_required"] = ", ".join(req)
+    job["tech_nice_to_have"] = ", ".join(nice)
+    job["min_experience"] = extract_min_experience(desc)
+
+    max_exp = CONFIG["max_experience"]
+    if job["min_experience"] > max_exp:
+        return save_knockout(conn, job, f"wants {job['min_experience']}+ years, over the {max_exp} cap")
+
+    job["salary"] = extract_salary(desc, job.get("location", ""))
+    job["work_model"] = detect_work_model(desc)
+    score, breakdown = score_job(job)
+    job["score"] = score
+    job["score_breakdown"] = ", ".join(breakdown)
+    remember_if_sent(seen_titles, title_key, score, CONFIG["score_threshold"], desc)
+    save_job(conn, job)
+    return job
+
+
 def main():
     load_dotenv()
     args = parse_args()
@@ -2563,23 +2768,10 @@ def main():
     conn = init_db()
     session = create_session()
     new_jobs = []
-    target = CONFIG["min_matching_jobs"]
+    target = CONFIG["min_matching_jobs"] or float("inf")
+    skip_counts = dict.fromkeys(("excluded", "outside_location", "too_old", "repost", "already_seen"), 0)
 
-    # Build all (scraper, region) buckets with their keyword×location generators
-    buckets = {}
-    for scraper_name, scraper_fn in SCRAPERS:
-        for region_name, locations in CONFIG["regions"].items():
-            bucket = f"{scraper_name}/{region_name}"
-            # Create a page generator for each keyword×location combo
-            generators = []
-            for keyword in CONFIG["keywords"]:
-                for location in locations:
-                    generators.append(scraper_fn(session, keyword, location))
-            buckets[bucket] = {
-                "matches": 0,
-                "generators": generators,  # page generators (each yields list of jobs)
-                "pending_jobs": [],  # jobs fetched but not yet evaluated
-            }
+    buckets = build_collection_buckets(session)
 
     # Titles already stored inside the freshness window, seeded from the
     # database so the rule survives the process. Inception posted one
@@ -2588,74 +2780,6 @@ def main():
     # id each time; without the seed each night's copy takes a daily slot.
     seen_titles = load_recent_duplicate_keys(conn, CONFIG["max_job_age_days"], CONFIG["score_threshold"])
     log.info(f"Duplicate guard seeded with {len(seen_titles)} sent titles from the last {CONFIG['max_job_age_days']} days")
-
-    def evaluate_job(job):
-        """Evaluate a single job: fetch details, filter, score. Returns job if it passes, None otherwise."""
-        if is_job_seen(conn, job["id"]):
-            return None
-        title_key = job_scoring.duplicate_key(job, matching=CONFIG.get("matching"), markets=CONFIG.get("markets"))
-        if title_key in seen_titles:
-            log.info(f"Skipped (repost of a title already stored): {job['title']} @ {job['company']}")
-            return None
-        if is_excluded(job):
-            log.debug(f"Excluded: {job['title']}")
-            return None
-        if not is_allowed_location(job):
-            log.info(f"Skipped (outside allowed location): {job['title']} @ {job['company']} — {job.get('location', '')}")
-            return None
-
-        max_age = CONFIG["max_job_age_days"]
-        date_posted = job.get("date_posted", "")
-        if date_posted:
-            try:
-                posted = datetime.fromisoformat(date_posted.replace("Z", "+00:00"))
-                if posted.tzinfo is None:
-                    posted = posted.replace(tzinfo=timezone.utc)
-                age_days = (datetime.now(timezone.utc) - posted).days
-                if age_days > max_age:
-                    log.debug(f"Skipped (posted {age_days}d ago > {max_age}d max): {job['title']}")
-                    return None
-            except (ValueError, TypeError):
-                pass
-
-        log.info(f"Fetching details: {job['title']}")
-        desc = fetch_job_description(session, job)
-        job["description"] = desc
-        posting_company = str(job.get("company") or "").strip()
-        actual_employer = extract_actual_employer(
-            posting_company,
-            desc,
-            job.get("credibility_notes", ""),
-        )
-        if actual_employer and actual_employer != posting_company:
-            job["company"] = actual_employer
-            job["recruiter_company"] = job.get("recruiter_company") or posting_company
-            existing_notes = str(job.get("credibility_notes") or "").strip()
-            resolution_note = f"posted via {posting_company} aggregator"
-            job["credibility_notes"] = "; ".join(value for value in (existing_notes, resolution_note) if value)
-
-        if ("markets" in CONFIG or not CONFIG.get("skip_local_presence", False)) and requires_local_presence(desc, job=job):
-            log.info(f"Skipped (requires local presence): {job['title']} @ {job['company']}")
-            return None
-
-        req, nice = extract_tech_keywords(desc)
-        job["tech_required"] = ", ".join(req)
-        job["tech_nice_to_have"] = ", ".join(nice)
-        job["min_experience"] = extract_min_experience(desc)
-
-        max_exp = CONFIG["max_experience"]
-        if job["min_experience"] > max_exp:
-            log.info(f"Skipped ({job['min_experience']}+ yrs > {max_exp} max): {job['title']} @ {job['company']}")
-            return None
-
-        job["salary"] = extract_salary(desc, job.get("location", ""))
-        job["work_model"] = detect_work_model(desc)
-        score, breakdown = score_job(job)
-        job["score"] = score
-        job["score_breakdown"] = ", ".join(breakdown)
-        remember_if_sent(seen_titles, title_key, score, CONFIG["score_threshold"])
-        save_job(conn, job)
-        return job
 
     # Breadth-first: fetch one page per generator, evaluate immediately, rotate
     while any(b["matches"] < target and b["generators"] for b in buckets.values()):
@@ -2686,7 +2810,7 @@ def main():
                     if state["matches"] >= target:
                         break
 
-                    result = evaluate_job(job)
+                    result = evaluate_job(job, conn=conn, session=session, seen_titles=seen_titles, skip_counts=skip_counts)
                     if result and result["score"] >= CONFIG["score_threshold"]:
                         new_jobs.append(result)
                         state["matches"] += 1
@@ -2703,6 +2827,8 @@ def main():
                             log.info(f"Reached {target} matches for {bucket}, moving on")
 
             state["generators"] = next_generators
+
+    log.info("Pre-fetch skips: " + ", ".join(f"{reason}={count}" for reason, count in skip_counts.items()))
 
     if args.collect_only:
         log.info(f"Collect-only mode: stored {len(new_jobs)} threshold-matching job(s); notifications skipped")

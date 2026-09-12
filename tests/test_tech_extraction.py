@@ -1,3 +1,5 @@
+import job_scoring
+import pytest
 import scraper
 
 
@@ -141,3 +143,22 @@ def test_short_ai_terms_respect_word_boundaries():
     )
     assert "ml" not in required
     assert "rag" not in required
+
+
+
+def test_vendor_description_requires_three_mentions_without_core_stack():
+    assert job_scoring.vendor_description({"description": "SAP SAP SAP"}) == "vendor platform specialization"
+    assert job_scoring.vendor_description({"description": "SAP Salesforce Workday"}) == "vendor platform specialization"
+    assert job_scoring.vendor_description({"description": "SAP Salesforce"}) is None
+    assert job_scoring.vendor_description({"description": "sapphire workdays pegasus"}) is None
+    assert job_scoring.knockout({"title": "Architect", "location": "Dubai", "description": "SAP SAP SAP"},
+                                allowed_locations=job_scoring.DEFAULT_MARKETS) == "vendor platform specialization"
+
+
+@pytest.mark.parametrize("core", ["Java", "Spring", "Kotlin", "Node.js", "NestJS", "TypeScript", "microservice", "microservices"])
+def test_vendor_integration_with_core_stack_is_not_blocked(core):
+    assert job_scoring.vendor_description({"description": f"SAP Salesforce Workday integration using {core}"}) is None
+
+
+def test_vendor_core_exception_uses_whole_words():
+    assert job_scoring.vendor_description({"description": "SAP SAP SAP with JavaScript"}) == "vendor platform specialization"

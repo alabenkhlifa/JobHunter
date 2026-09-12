@@ -28,6 +28,10 @@ ROLE_FAMILY_BLOCKS = (
     "security architect", "cybersecurity", "information security", "infosec",
     "embedded", "firmware", "hardware", "frontend", "front-end", "front end",
     "ui engineer", "ui developer", "ux engineer", "react", "angular", "vue",
+    # 39 pre-sales titles reached 45+; none were sent and nine were rejected.
+    "pre-sales", "presales", "customer engineer", "solutions engineer",
+    "sales engineer", "evangelist", "forward deployed", "forward-deployed",
+    "value engineer", "technical account manager", "partner engineer",
 )
 
 # Exact strings he asked to block. These stay literal: stripping "senior" from
@@ -41,10 +45,9 @@ LITERAL_BLOCKS = (
 # (10 of 25 ratings) and the rubric had no way to see it. Distinct from
 # SENIORITY_WORDS: those are management-track words normalise_title strips so
 # the underlying role family can judge them (Engineering Manager stays a
-# role_fit call, not a knockout, per the Task 1 ruling). These are
-# individual-contributor words with no such ambiguity -- he ruled them out
-# directly, regardless of company or role. "staff engineer" and "staff
-# software engineer" left LITERAL_BLOCKS above to be covered by this wider rule.
+# role_fit call, not a knockout, per the Task 1 ruling). Expert and Staff
+# require the description's years: Saudi grade titles asked for only five.
+# Principal and Enterprise remain blocked regardless of stated experience.
 #
 # The word only names a LEVEL when it comes before the role noun it qualifies:
 # `Enterprise Architect`, `Expert Solution Architect`, `Lead Enterprise
@@ -90,6 +93,15 @@ _SENIOR_MODIFIER_PATTERNS = tuple(
 # slipped through on the word `architect` alone — all of the escape risk and
 # none of the gain.
 RESCUABLE_FAMILIES = ("infrastructure", "frontend", "front-end", "front end")
+CORE_TITLE_RESCUABLE_FAMILIES = ("devops", "sre", "react", "angular", "vue")
+
+
+def core_title_rescues_family(title, family):
+    # Java/DevOps and full-stack React titles were lost to technology blocks.
+    return family in CORE_TITLE_RESCUABLE_FAMILIES and bool(re.search(
+        r"\b(?:java|kotlin|spring|node(?:\.?js)?|backend|back-end|full[ -]?stack)\b",
+        str(title or ""), re.I,
+    ))
 
 # A rescuable family word that directly follows one of these is a qualifier on
 # a role he wants rather than the role itself. The test is adjacency, not mere
@@ -134,9 +146,12 @@ def normalise_title(title):
     return " ".join(kept)
 
 
-def blocked_title(job):
+def blocked_title(job, *, max_experience=8):
     """Return a reason string when the title is one he never wants, else None."""
     raw = str(job.get("title") or "").lower()
+    for platform in VENDOR_PLATFORMS:
+        if _phrase_pattern(platform).search(raw):
+            return f"blocked vendor platform: {platform}"
     for phrase in LITERAL_BLOCKS:
         if phrase in raw:
             return f"blocked title: {phrase}"
@@ -148,13 +163,21 @@ def blocked_title(job):
     for word, pattern in _SENIOR_MODIFIER_PATTERNS:
         match = pattern.search(raw)
         if match and match.start() < role_noun_pos:
+            # Saudi Expert/Staff grades include five-year engineering roles.
+            years = job.get("min_experience", -1)
+            if word in ("expert", "staff") and type(years) is int and 0 <= years <= max_experience:
+                continue
             return f"blocked title: too senior ({word})"
 
     normalised = normalise_title(raw)
     rescuable = None  # computed once, and only if a rescuable family matches
     for family, pattern in _FAMILY_PATTERNS:
-        for match in pattern.finditer(normalised):
-            if family in RESCUABLE_FAMILIES and _QUALIFIED_BY.search(normalised[:match.start()]):
+        # Normalisation drops "manager", which hid Technical Account Manager.
+        matched_title = normalised if pattern.search(normalised) else raw
+        for match in pattern.finditer(matched_title):
+            if core_title_rescues_family(raw, family):
+                continue
+            if family in RESCUABLE_FAMILIES and _QUALIFIED_BY.search(matched_title[:match.start()]):
                 if rescuable is None:
                     rescuable = _names_work_he_wants(raw, normalised)
                 if rescuable:
@@ -294,6 +317,75 @@ def _phrase_pattern(term, suffix=""):
     return re.compile(rf"(?<!\w){body}{suffix}(?!\w)", re.IGNORECASE)
 
 
+# Vendor titles: 37 rows at 45+, zero sends, ten rejects. Description-only
+# matches: 49 rows, zero sends, eleven rejects; core-stack mentions spare
+# software roles integrating a vendor product.
+VENDOR_PLATFORMS = (
+    "sap", "s/4hana", "abap", "btp", "salesforce", "dynamics 365", "d365",
+    "servicenow", "sitecore", "pega", "mulesoft", "oracle fusion", "oracle ebs",
+    "power platform", "copilot studio", "sharepoint", "workday",
+    "automation anywhere", "uipath", "stibo", "informatica", "flowable",
+    "finacle", "t24", "murex",
+)
+_VENDOR_CORE = ("java", "spring", "kotlin", "node.js", "nestjs", "typescript", "microservice")
+
+
+def vendor_description(job):
+    description = str(job.get("description") or "")
+    if any(_phrase_pattern(term, suffix="s?").search(description) for term in _VENDOR_CORE):
+        return None
+    mentions = sum(len(_phrase_pattern(term).findall(description)) for term in VENDOR_PLATFORMS)
+    return "vendor platform specialization" if mentions >= 3 else None
+
+
+# Non-English Swiss bodies reached review 108 times, with zero sends and
+# 24 rejects. Whole-word counts avoid reading English substrings as language.
+# That review outcome does not establish a language barrier: Ala speaks
+# French, English and Arabic, so only German and Italian are checked.
+_LANGUAGE_WORDS = {
+    "German": "und wir sie mit für nicht eine aufgaben erfahrung",
+    "Italian": "noi voi con per della delle degli una esperienza competenze",
+}
+
+
+def language_body_barrier(job):
+    words = re.findall(r"\b\w+\b", str(job.get("description") or "").lower())
+    for language, stopwords in _LANGUAGE_WORDS.items():
+        vocabulary = set(stopwords.split())
+        if sum(word in vocabulary for word in words) >= 25:
+            return f"language barrier: {language}"
+    return None
+
+
+# Explicit language requirements: 58 rows, one send and 18 rejects. Optional
+# language skills must stay optional even beside a required English skill.
+_LANGUAGE_NAMES = {
+    "German": r"german|deutsch", "Italian": r"italian|italiano",
+}
+_LANGUAGE_LEVEL = r"fluent|fluency|c1|c2|native|mandatory|required|must|proficien\w*|business|excellent|very good|strong|verhandlungssicher|sehr gute|niveau|stufe"
+_LANGUAGE_OPTIONAL = re.compile(r"\b(?:plus|advantage|asset|nice[ -]to[ -]have|desirable|preferred|bonus)\b", re.I)
+
+
+def language_requirement_barrier(job):
+    # "German (min. C1)" keeps its level in the same requirement sentence.
+    for sentence in re.split(r"(?<!\bmin\.)(?<=[.!?;])\s+|\n+", str(job.get("description") or ""), flags=re.I):
+        if _LANGUAGE_OPTIONAL.search(sentence):
+            continue
+        for language, names in _LANGUAGE_NAMES.items():
+            pattern = rf"\b(?:{names})\b.{{0,60}}\b(?:{_LANGUAGE_LEVEL})\b|\b(?:{_LANGUAGE_LEVEL})\b.{{0,60}}\b(?:{names})\b"
+            if re.search(pattern, sentence, re.I):
+                return f"language barrier: {language}"
+    return None
+
+
+def nationals_only(job):
+    # Nine nationals-only postings reached 45+; none were sent.
+    text = f"{job.get('title') or ''} {job.get('description') or ''}"
+    if re.search(r"\b(?:uae nationals?|saudi nationals?|emirati|nationals only|saudization|emiratisation)\b", text, re.I):
+        return "nationals only"
+    return None
+
+
 # The markers carry an inflection because the corpus writes both numbers:
 # "luxury villas", "residential developments", "interior designer". The
 # evidence terms do not, because they are product names.
@@ -372,6 +464,7 @@ MARKET_COUNTRIES = {
         "switzerland", "schweiz", "suisse", "svizzera",
         "zurich", "zürich", "geneva", "genève", "genf",
         "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
+        "sankt gallen", "st. gallen",
     ),
 }
 DEFAULT_MARKETS = tuple(term for terms in MARKET_COUNTRIES.values() for term in terms)
@@ -454,7 +547,7 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(),
             return "duplicate of a posting already seen"
         return None
 
-    reason = blocked_title(job)
+    reason = blocked_title(job, max_experience=max_experience)
     if reason:
         return reason
 
@@ -487,6 +580,11 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(),
         for phrase in REFUSES_SPONSORSHIP:
             if phrase in description:
                 return f"refuses sponsorship: {phrase}"
+
+    for rule in (language_body_barrier, language_requirement_barrier, nationals_only, vendor_description):
+        reason = rule(job)
+        if reason:
+            return reason
 
     reason = building_industry(job)
     if reason:
@@ -679,6 +777,10 @@ def role_fit(job):
         for pattern in patterns:
             if pattern.search(title) or pattern.search(raw):
                 return value
+    # Java-titled engineers scored 41-43 on the generic rung despite their stack.
+    if (re.search(r"\b(?:java|spring|kotlin|node.?js|nestjs)\b", raw)
+            and re.search(r"\b(?:engineer|developer|consultant|développeur)\b", raw)):
+        return 0.8
     return GENERIC_ROLE_FIT
 
 

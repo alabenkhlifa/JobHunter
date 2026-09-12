@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import job_scoring
+import pytest
 
 
 def test_normalise_title_strips_seniority_words():
@@ -554,6 +555,7 @@ def test_default_markets_is_exactly_the_markets_he_chose():
         "switzerland", "schweiz", "suisse", "svizzera",
         "zurich", "zürich", "geneva", "genève", "genf",
         "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
+        "sankt gallen", "st. gallen",
     )
 
 
@@ -652,10 +654,10 @@ def test_the_duplicate_guard_is_seeded_from_the_database(tmp_path):
 
     db = tmp_path / "jobs.db"
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE jobs (title TEXT, company TEXT, location TEXT, score INTEGER, date_scraped TEXT)")
+    conn.execute("CREATE TABLE jobs (title TEXT, company TEXT, location TEXT, score INTEGER, date_scraped TEXT, description TEXT DEFAULT '')")
     now = datetime.now(timezone.utc)
     conn.executemany(
-        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO jobs (title, company, location, score, date_scraped) VALUES (?, ?, ?, ?, ?)",
         [
             ("Senior Cloud Architect Remote", "Joveo AI", "Dubai, UAE", 60, (now - timedelta(days=3)).isoformat()),
             ("Technical Architect", "Inception", "Dubai, UAE", 60, (now - timedelta(days=30)).isoformat()),
@@ -688,11 +690,11 @@ def test_a_row_he_never_saw_does_not_seed_the_duplicate_guard(tmp_path):
 
     db = tmp_path / "jobs.db"
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE jobs (title TEXT, company TEXT, location TEXT, score INTEGER, date_scraped TEXT)")
+    conn.execute("CREATE TABLE jobs (title TEXT, company TEXT, location TEXT, score INTEGER, date_scraped TEXT, description TEXT DEFAULT '')")
     now = datetime.now(timezone.utc)
     cutoff = scraper.CONFIG["score_threshold"]
     conn.executemany(
-        "INSERT INTO jobs VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO jobs (title, company, location, score, date_scraped) VALUES (?, ?, ?, ?, ?)",
         [
             ("Solution Architect, SASE", "Check Point Software", "United Arab Emirates", 0, (now - timedelta(days=2)).isoformat()),
             ("Backend Engineer", "Below The Line", "Dubai, UAE", cutoff - 1, (now - timedelta(days=1)).isoformat()),
@@ -717,7 +719,7 @@ def test_a_posting_that_was_not_sent_does_not_suppress_a_later_copy_in_the_same_
     # The in-run add had the seed's defect with a one-night window: every
     # scored key was recorded, so a copy knocked out at 0 hid a later sendable
     # copy of the same role before its description was fetched.
-    seen = set()
+    seen = {}
     cutoff = scraper.CONFIG["score_threshold"]
     knocked_out = {"title": "Solution Architect, SASE", "company": "Check Point Software",
                    "location": "United Arab Emirates"}
@@ -872,3 +874,133 @@ def test_the_building_knockout_survives_a_missing_description():
     # evaluate must never raise, and half the corpus rows carry no description.
     assert job_scoring.building_industry(job(description="")) is None
     assert job_scoring.building_industry({"title": "Architect"}) is None
+
+
+@pytest.mark.parametrize("language,body", [
+    ("German", "und wir sie mit für nicht eine Aufgaben Erfahrung " * 3),
+    ("Italian", "noi voi con per della delle degli una esperienza competenze " * 3),
+])
+def test_unsupported_language_body_is_knocked_out(language, body):
+    result = job_scoring.evaluate(job(description=body), allowed_locations=UAE)
+    assert result["reason"] == f"language barrier: {language}"
+    assert result["total"] == 0
+
+
+def test_body_language_threshold_counts_whole_words():
+    assert job_scoring.language_body_barrier(job(description="und " * 24)) is None
+    assert job_scoring.language_body_barrier(job(description="und " * 25)) == "language barrier: German"
+    assert job_scoring.language_body_barrier(job(description="understand wireless sieve mitten " * 30)) is None
+
+
+@pytest.mark.parametrize("text,language", [
+    ("Fluent German (min. C1)", "German"), ("German fluency required", "German"),
+    ("Sehr gute Deutsch Kenntnisse", "German"),
+    ("Proficiency in Italian", "Italian"),
+])
+def test_required_language_knockout(text, language):
+    assert job_scoring.knockout(job(description=text), allowed_locations=UAE) == f"language barrier: {language}"
+
+
+@pytest.mark.parametrize("exemption", ["plus", "advantage", "asset", "nice to have", "desirable", "preferred", "bonus"])
+def test_optional_language_is_not_a_barrier(exemption):
+    for text in (f"German is a {exemption}", f"Fluent German is {exemption}", f"Native Arabic is {exemption}"):
+        assert job_scoring.knockout(job(description=text), allowed_locations=UAE) is None
+
+
+@pytest.mark.parametrize("text", [
+    "Fluent Arabic", "Business Arabic", "Arabic proficiency", "German " + "x" * 61 + " required",
+    "German is a plus. English is required.", "English required\nGerman preferred",
+])
+def test_language_rule_respects_distance_sentence_and_spoken_languages(text):
+    assert job_scoring.language_requirement_barrier(job(description=text)) is None
+
+
+@pytest.mark.parametrize("text", [
+    "nous vous avec pour dans expérience compétences " * 10,
+    "نحن نبحث عن مهندس برمجيات لديه خبرة في تطوير التطبيقات. " * 10,
+    "French at niveau C1", "Excellent français", "Native French required",
+    "Arabic is required", "Must speak Arabic", "Native Arabic speaker", "Mandatory Arabic",
+    "Fluent English required", "French, English and Arabic are mandatory",
+])
+def test_spoken_languages_are_not_knockouts(text):
+    assert job_scoring.language_body_barrier(job(description=text)) is None
+    assert job_scoring.language_requirement_barrier(job(description=text)) is None
+    assert job_scoring.evaluate(job(description=text), allowed_locations=UAE)["passed"]
+
+
+def test_spoken_language_does_not_exempt_a_required_unsupported_language():
+    text = "Fluent French and German are required."
+    assert job_scoring.knockout(job(description=text), allowed_locations=UAE) == "language barrier: German"
+
+
+@pytest.mark.parametrize("text", ["UAE nationals only", "Saudi national", "Emirati", "nationals only", "Saudization", "Emiratisation"])
+def test_nationals_only_knockout(text):
+    assert job_scoring.knockout(job(description=text), allowed_locations=UAE) == "nationals only"
+
+
+@pytest.mark.parametrize("platform", job_scoring.VENDOR_PLATFORMS)
+def test_vendor_platform_title_is_blocked(platform):
+    assert job_scoring.blocked_title(job(title=f"{platform} Architect")) == f"blocked vendor platform: {platform}"
+
+
+@pytest.mark.parametrize("family", [
+    "pre-sales", "presales", "customer engineer", "solutions engineer", "sales engineer",
+    "evangelist", "forward deployed", "forward-deployed", "value engineer",
+    "technical account manager", "partner engineer",
+])
+def test_presales_role_families_are_blocked(family):
+    assert job_scoring.blocked_title(job(title=f"Senior {family}"))
+
+
+@pytest.mark.parametrize("title", [
+    "Java Architect with DevOps", "Technical Architect (Java & DevOps)",
+    "Lead Fullstack Software Engineer – Java & Angular",
+    "Senior Fullstack Engineer (Java & Angular)",
+    "Full Stack Developer (React / Next.js + Node.js + PostgreSQL + GCP)",
+    "Senior Fullstack Developer (Node.js+React.js+API Banking)",
+    "Développeur Java/Vue.Js", "Kotlin SRE Engineer", "Backend React Developer",
+])
+def test_core_stack_titles_are_rescued(title):
+    assert job_scoring.blocked_title(job(title=title)) is None
+    assert job_scoring.knockout(job(title=title), allowed_locations=UAE) is None
+
+
+@pytest.mark.parametrize("title", ["DevOps Architect", "Senior Frontend Software Engineer", "React Developer"])
+def test_specialist_titles_stay_blocked(title):
+    assert job_scoring.blocked_title(job(title=title))
+
+
+@pytest.mark.parametrize("title", ["Expert Backend Engineer", "Senior Expert - Software Engineer", "Staff Engineer", "Staff Software Engineer"])
+@pytest.mark.parametrize("years,blocked", [(-1, True), (5, False), (7, False), (8, True)])
+def test_expert_and_staff_use_stated_experience(title, years, blocked):
+    candidate = job(title=title, min_experience=years)
+    assert bool(job_scoring.knockout(candidate, allowed_locations=UAE, max_experience=7)) == blocked
+    assert not scraper.is_excluded(candidate)
+
+
+@pytest.mark.parametrize("title", ["Principal Backend Engineer", "Enterprise Architect"])
+def test_principal_and_enterprise_are_blocked_even_with_five_years(title):
+    assert job_scoring.knockout(job(title=title, min_experience=5), allowed_locations=UAE, max_experience=7)
+
+
+@pytest.mark.parametrize("title,expected", [
+    ("Senior Java Software Engineer", 0.8), ("Développeur Java", 0.8), ("Nodejs Developer", 0.8),
+    ("Spring Consultant", 0.8), ("Kotlin Engineer", 0.8), ("NestJS Developer", 0.8),
+    ("Java Full Stack Engineer", 0.4), ("Senior Fullstack Engineer (Java & Angular)", 0.4),
+    ("Node.js Full-Stack Developer", 0.4), ("Java Architect", 1.0),
+    ("JavaScript Developer", 0.3),
+])
+def test_core_language_engineer_role_rung(title, expected):
+    assert job_scoring.role_fit(job(title=title)) == expected
+
+
+def test_new_knockouts_do_not_apply_to_generic_matching():
+    matching = {"preset": "generic", "preferred_roles": ["Salesforce Architect"]}
+    candidate = job(title="Salesforce Architect", description="UAE nationals only. Fluent German. " + "und " * 25)
+    markets = [{"name": "Dubai", "locations": ["Dubai"], "work_authorization": "authorized", "relocation_required": False}]
+    assert job_scoring.evaluate(candidate, allowed_locations=UAE, matching=matching, markets=markets)["passed"]
+
+
+def test_language_requirement_keeps_minimum_level_abbreviation_in_sentence():
+    assert job_scoring.language_requirement_barrier(job(description="German (min. C1)")) == "language barrier: German"
+    assert job_scoring.language_requirement_barrier(job(description="German (min. C1) is preferred.")) is None

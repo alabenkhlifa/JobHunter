@@ -41,7 +41,7 @@ def test_experience_requirement_after_introduction_overrides_missing_metadata():
                    "10+ years architecting and operating distributed infrastructure.")
     prepared, reason = scraper.prepare_review_candidate(original, now=NOW)
     assert prepared["min_experience"] == 10
-    assert "over the 8 cap" in reason
+    assert "over the 7 cap" in reason
     assert original["min_experience"] == -1
 
 
