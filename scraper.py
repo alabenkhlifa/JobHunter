@@ -1535,10 +1535,22 @@ GULFTALENT_COUNTRIES = {
     "Oman": "10111116000000",
 }
 GULFTALENT_LOCATION_ALIASES = {
-    "United Arab Emirates": ("uae", "dubai", "abu dhabi", "sharjah", "ajman", "fujairah", "ras al khaimah", "umm al quwain"),
-    "Saudi Arabia": ("ksa", "riyadh", "jeddah", "jiddah", "dammam", "khobar", "dhahran", "mecca", "makkah", "medina"),
+    "United Arab Emirates": ("uae", "dubai", "abu dhabi", "sharjah", "ajman", "al ain", "fujairah", "ras al khaimah", "umm al quwain"),
+    "Saudi Arabia": ("ksa", "riyadh", "jeddah", "jiddah", "dammam", "khobar", "dhahran", "mecca", "makkah", "medina", "jubail", "yanbu"),
     "Kuwait": ("kuwait city",), "Qatar": ("doha",),
     "Bahrain": ("manama",), "Oman": ("muscat", "salalah"),
+}
+# City IDs from the same captured public filter response.
+GULFTALENT_CITIES = {
+    "United Arab Emirates": {"dubai": "10111111000111", "abu dhabi": "10111111000112",
+        "sharjah": "10111111000113", "ajman": "10111111000114", "al ain": "10111111000115",
+        "fujairah": "10111111000116", "ras al khaimah": "10111111000117", "umm al quwain": "10111111000118"},
+    "Saudi Arabia": {"riyadh": "10111112000121", "jeddah": "10111112000122",
+        "dammam": "10111112000123", "khobar": "10111112000124", "jubail": "10111112000125",
+        "yanbu": "10111112000126", "mecca": "10111112000127", "dhahran": "10111112000128"},
+    "Kuwait": {"kuwait city": "10111113000131"}, "Qatar": {"doha": "10111114000151"},
+    "Bahrain": {"manama": "10111115000141"},
+    "Oman": {"salalah": "10111116000161", "muscat": "10111116000162"},
 }
 GULFTALENT_HEADERS = {"Accept": "application/json", "User-Agent": "JobHunter/1.0 (public job collection)"}
 
@@ -1548,6 +1560,25 @@ def gulftalent_country(location):
     matches = [country for country, aliases in GULFTALENT_LOCATION_ALIASES.items()
                if parts.intersection((country.casefold(), *aliases))]
     return matches[0] if len(matches) == 1 else None
+
+
+def gulftalent_city_ids(country):
+    """Push configured cities into search without narrowing country-wide markets."""
+    aliases = {"jiddah": "jeddah", "makkah": "mecca"}
+    selected = []
+    for locations in CONFIG["regions"].values():
+        for location in locations:
+            if gulftalent_country(location) != country:
+                continue
+            parts = [part.strip().casefold() for part in location.split(",")]
+            identifiers = [GULFTALENT_CITIES[country][aliases.get(part, part)] for part in parts
+                           if aliases.get(part, part) in GULFTALENT_CITIES[country]]
+            # A country-wide destination or a city whose ID we do not know
+            # still needs country coverage; existing local filters decide fit.
+            if not identifiers:
+                return []
+            selected.extend(identifiers)
+    return list(dict.fromkeys(selected))
 
 
 def parse_gulftalent_job(row, country):
@@ -1604,8 +1635,10 @@ def scrape_gulftalent(session, keyword, location):
             "filters[country][0]": GULFTALENT_COUNTRIES[country],
             "filters[search_keyword]": keyword, "search_keyword": keyword,
             "include_scraped": 1, "limit": limit, "offset": offset,
-            "search_order": "r", "version": 2,
+            "search_order": "d", "version": 2,
         }
+        params.update({f"filters[city][{index}]": identifier
+                       for index, identifier in enumerate(gulftalent_city_ids(country))})
         log.info(f"GulfTalent: '{keyword}' in '{country}' page {page + 1}")
         try:
             resp = rate_limited_get(session, "https://www.gulftalent.com/api/jobs/search",

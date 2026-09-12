@@ -66,7 +66,8 @@ def test_both_internal_and_external_jobs_are_collected_without_applying(get):
         "config[filters]": "DISABLED", "config[isDynamicSearchV2]": "true",
         "filters[country][0]": "10111111000000", "filters[search_keyword]": "backend engineer",
         "search_keyword": "backend engineer", "include_scraped": 1,
-        "limit": 25, "offset": 0, "search_order": "r", "version": 2}
+        "limit": 25, "offset": 0, "search_order": "d", "version": 2,
+        "filters[city][0]": "10111111000111", "filters[city][1]": "10111111000112"}
     assert "Cookie" not in get.call_args.kwargs["headers"]
     assert get.call_count == 1
 
@@ -168,3 +169,28 @@ def test_blocked_detail_stops_subsequent_searches(get):
     assert scraper.fetch_job_description(session, scraper.parse_gulftalent_job(row(), "United Arab Emirates")) == ""
     assert list(scraper.scrape_gulftalent(session, "engineer", "Dubai")) == []
     assert get.call_count == 1
+
+
+@pytest.mark.parametrize("country,regions,expected", [
+    ("United Arab Emirates", {"UAE": ["Dubai", "Abu Dhabi, UAE", "Dubai"]}, ["10111111000111", "10111111000112"]),
+    ("Saudi Arabia", {"Saudi": ["Riyadh", "Jiddah", "Dubai"]}, ["10111112000121", "10111112000122"]),
+    ("United Arab Emirates", {"UAE": ["Dubai", "UAE"]}, []),
+    ("United Arab Emirates", {"UAE": ["Dubai", "Unmapped city, UAE"]}, []),
+    ("Saudi Arabia", {"Saudi": ["Riyadh", "Medina"]}, []),
+    ("Qatar", {"Qatar": ["Doha"]}, ["10111114000151"]),
+    ("Oman", {"Oman": ["Muscat"]}, ["10111116000162"]),
+])
+def test_city_filters_preserve_configured_destination_scope(monkeypatch, country, regions, expected):
+    monkeypatch.setitem(scraper.CONFIG, "regions", regions)
+    assert scraper.gulftalent_city_ids(country) == expected
+
+
+def test_all_pages_keep_country_specific_city_filters(get, monkeypatch):
+    monkeypatch.setitem(scraper.CONFIG, "regions", {"Saudi": ["Riyadh", "Jeddah"], "UAE": ["Dubai"]})
+    get.side_effect = [response([None] * 25), response([])]
+    list(scraper.scrape_gulftalent(Mock(), "engineer", "Saudi Arabia"))
+    for call in get.call_args_list:
+        params = call.kwargs["params"]
+        assert params["filters[city][0]"] == "10111112000121"
+        assert params["filters[city][1]"] == "10111112000122"
+        assert params["search_order"] == "d"
