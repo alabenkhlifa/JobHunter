@@ -348,3 +348,9 @@ The HTTPS address belongs to the JobHunter service on the Pi. Candidates do not 
 The Pi deployment supports Tailscale Funnel for this address. A loopback gateway exposes only the private login/consent/viewer routes; administrative APIs remain local. Friends open `/connect linkedin` links from their private Telegram chat in an ordinary browser, without installing Tailscale or receiving access to the owner's desktop. The browser stores each LinkedIn login in that candidate's own profile. HTTPS activation and deployment verification are described in [setup.md](setup.md#14-restricted-multi-user-service-on-the-pi).
 
 An owner-only local credential service resolves the current Hermes model/provider and refreshes the original credential pool. The restricted planner receives only the effective access credential in memory, including support for the owner's `openai-codex` OAuth login. Each request runs in a disposable Hermes home with tools, owner files, memory and history disabled. Candidate updates are acknowledged after durable local storage and retried independently of the owner's Telegram polling offset. A standalone bot and explicit API-key provider remain optional deployment modes.
+
+## License
+
+JobHunter is licensed under the [Apache License 2.0](LICENSE). Keep the [NOTICE](NOTICE) file and state your changes when you share a modified version.
+
+The licence covers this code only. It gives no rights to job-board content, accounts or data. You are responsible for following the terms of LinkedIn, Foundit and any other site you use it with.
