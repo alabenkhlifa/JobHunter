@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import jobhunter_queue as queue
 
 NOW = datetime(2026, 9, 12, 18, tzinfo=timezone.utc)
-REGIONS = ("Dubai", "Abu Dhabi", "Jeddah", "Riyadh", "Switzerland")
+REGIONS = ("Dubai", "Madrid", "Valencia", "Jeddah", "Riyadh", "Switzerland")
 
 
 def job(job_id, location="Dubai", **changes):
@@ -25,7 +25,8 @@ def test_floor_per_market_then_the_rest_globally_by_score():
                   for index, region in enumerate(REGIONS) for i in range(30)]
     selected = queue.candidate_review_order(candidates, cap=40, per_market=3)
     counts = {region: sum(row["location"] == region for row in selected) for region in REGIONS}
-    assert counts == {"Dubai": 28, "Abu Dhabi": 3, "Jeddah": 3, "Riyadh": 3, "Switzerland": 3}
+    assert counts == {"Dubai": 25, "Madrid": 3, "Valencia": 3, "Jeddah": 3,
+                      "Riyadh": 3, "Switzerland": 3}
 
 
 def test_a_promised_visa_enters_the_batch_first_even_at_a_low_score():

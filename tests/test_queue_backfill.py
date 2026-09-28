@@ -49,11 +49,11 @@ def test_global_top40_cannot_crowd_out_eligible_thin_markets():
 
 def test_capacity_below_combined_quota_still_covers_each_available_market():
     candidates = [job(f"{region}-{i}", region, score=100 - region_index * 10)
-                  for region_index, region in enumerate(("Dubai", "Abu Dhabi", "Jeddah", "Riyadh", "Switzerland"))
+                  for region_index, region in enumerate(("Dubai", "Madrid", "Valencia", "Jeddah", "Riyadh", "Switzerland"))
                   for i in range(3)]
-    selected = queue.candidate_review_order(candidates, cap=6)
-    assert len(selected) == 6
-    assert len({row["market"] for row in selected}) == 5
+    selected = queue.candidate_review_order(candidates, cap=7)
+    assert len(selected) == 7
+    assert len({row["market"] for row in selected}) == 6
     assert sum(row["market"] == "dubai" for row in selected) == 2
 
 

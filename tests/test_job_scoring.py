@@ -491,12 +491,12 @@ def test_scraper_score_job_returns_zero_for_a_knocked_out_job():
 
 def test_the_scraper_reads_its_markets_from_job_scoring():
     # One list, three readers: the rubric, the scraper's location filter, and
-    # the measurement tool. It holds the five markets he chose and nothing
+    # the measurement tool. It holds the current markets and nothing
     # else: the wider Gulf was an evaluation convenience, never a choice.
     assert list(scraper.CONFIG["allowed_locations"]) == list(job_scoring.DEFAULT_MARKETS)
-    for market in ("dubai", "abu dhabi", "jeddah", "riyadh", "switzerland", "zurich", "lausanne"):
+    for market in ("dubai", "madrid", "valencia", "valència", "jeddah", "riyadh", "switzerland", "zurich", "lausanne"):
         assert market in job_scoring.DEFAULT_MARKETS, market
-    for market in ("sharjah", "saudi", "saudi arabia", "united arab emirates"):
+    for market in ("abu dhabi", "sharjah", "saudi", "saudi arabia", "united arab emirates", "spain"):
         assert market not in job_scoring.DEFAULT_MARKETS, market
 
 
@@ -509,7 +509,8 @@ def test_the_shipped_threshold_is_the_rubrics_send_cutoff():
 
 def test_allowed_locations_cover_the_board_spellings_of_the_chosen_markets():
     for location in ("Jiddah, Makkah, Saudi Arabia", "Jeddah, Saudi Arabia",
-                     "Dubai, United Arab Emirates", "Abu Dhabi", "Zurich, Switzerland",
+                     "Dubai, United Arab Emirates", "Madrid, Spain", "Valencia, Spain",
+                     "València, Comunitat Valenciana", "Zurich, Switzerland",
                      "Riyadh, Saudi Arabia", "Saudi Arabia, Riyadh", "Riyadh Region"):
         assert job_scoring.knockout({"title": "Software Architect", "location": location,
                                      "description": "", "min_experience": 6},
@@ -519,9 +520,10 @@ def test_allowed_locations_cover_the_board_spellings_of_the_chosen_markets():
 def test_allowed_locations_still_exclude_the_markets_he_declined():
     # Jeddah and Riyadh are the two Saudi cities he chose; the country is not
     # a market, so a bare "Saudi Arabia" or any other Saudi city stays out.
-    for location in ("Sharjah, United Arab Emirates", "United Arab Emirates",
+    for location in ("Abu Dhabi, United Arab Emirates", "Sharjah, United Arab Emirates", "United Arab Emirates",
                      "Saudi Arabia", "Dammam, Eastern, Saudi Arabia",
-                     "Riyad Qana, Al Qasim, Saudi Arabia", "Cairo, Egypt"):
+                     "Riyad Qana, Al Qasim, Saudi Arabia", "Cairo, Egypt",
+                     "Madrid, Missouri, United States", "Valencia, California, United States"):
         assert job_scoring.knockout({"title": "Software Architect", "location": location,
                                      "description": "", "min_experience": 6},
                                     allowed_locations=job_scoring.DEFAULT_MARKETS), location
@@ -543,15 +545,11 @@ def test_duplicate_key_separates_the_same_role_in_two_countries():
     assert job_scoring.duplicate_key(dubai) == job_scoring.duplicate_key(abu_dhabi)
 
 
-# MARKET_COUNTRIES does double duty: it defines the allowed markets and it
-# classifies the country for duplicate_key. A term added to stop a key
-# fragmenting across an unchosen city (Khobar, Al Ain, Makkah) would widen
-# DEFAULT_MARKETS by construction and enrol him in a market he never chose.
-# The literal is written out, not derived, so this test is what stops a
-# dedup fix from widening the search.
+# Country classification includes historical cities; the selected destinations
+# stay an explicit list so a dedup fix cannot widen the job search.
 def test_default_markets_is_exactly_the_markets_he_chose():
     assert job_scoring.DEFAULT_MARKETS == (
-        "dubai", "abu dhabi", "jeddah", "jiddah", "riyadh",
+        "dubai", "madrid", "valencia", "valència", "jeddah", "jiddah", "riyadh",
         "switzerland", "schweiz", "suisse", "svizzera",
         "zurich", "zürich", "geneva", "genève", "genf",
         "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
@@ -667,8 +665,9 @@ def test_the_duplicate_guard_is_seeded_from_the_database(tmp_path):
 
     keys = scraper.load_recent_duplicate_keys(conn, 7, scraper.CONFIG["score_threshold"])
 
-    repost = {"title": "Cloud Architect Remote", "company": "joveo ai", "location": "Abu Dhabi"}
+    repost = {"title": "Cloud Architect Remote", "company": "joveo ai", "location": "Dubai"}
     assert job_scoring.duplicate_key(repost) in keys
+    assert job_scoring.duplicate_key(dict(repost, location="Abu Dhabi")) in keys
     # Outside the window it stops counting, so a role can be re-offered.
     stale = {"title": "Technical Architect", "company": "Inception", "location": "Dubai, UAE"}
     assert job_scoring.duplicate_key(stale) not in keys

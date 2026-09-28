@@ -43,7 +43,8 @@ CONFIG = {
     ],
     "regions": {
         "Dubai": ["Dubai"],
-        "Abu Dhabi": ["Abu Dhabi"],
+        "Madrid": ["Madrid, Spain"],
+        "Valencia": ["Valencia, Spain"],
         "Jeddah": ["Jeddah"],
         "Riyadh": ["Riyadh"],
         # One country-wide query rather than a city list: LinkedIn resolves
@@ -156,6 +157,15 @@ CONFIG = {
         "eu/efta", "eu or efta", "efta citizens", "eu citizens only",
         "swiss work permit", "valid work permit for switzerland",
         "must hold a valid work permit", "existing work permit",
+        # Spain: the owner needs employer visa support. A posting that is
+        # silent about sponsorship remains eligible and is labelled as such.
+        "right to work in spain", "authorized to work in spain",
+        "authorised to work in spain", "valid work permit for spain",
+        "valid work permit in spain", "spanish work permit required",
+        "eu work authorization", "eu work authorisation",
+        "authorized to work in the eu", "authorised to work in the eu",
+        "eu citizenship required", "spanish citizenship required",
+        "permiso de trabajo en españa", "permiso de trabajo válido en españa",
     ],
     # Roles demanding more required years than this never reach review; he
     # called the 8-year roles too senior, so the cap is one below them.
@@ -1348,8 +1358,8 @@ def is_allowed_location(job):
     allowed = [loc.lower() for loc in CONFIG.get("allowed_locations", [])]
     if not allowed:
         return True
-    location = normalize_location(job.get("location", "")).lower()
-    return any(loc in location for loc in allowed)
+    location = normalize_location(job.get("location", ""))
+    return job_scoring.location_allowed(location, allowed)
 
 
 # ── LinkedIn Scraper ─────────────────────────────────────────────────────────
@@ -2381,10 +2391,11 @@ def format_job_message(job):
 # match job_scoring.market_region's return values directly -- NOT
 # CONFIG["regions"]'s capitalized keys, a different casing convention for
 # a different purpose (scrape-time region search vs. display grouping).
-DIGEST_MARKET_ORDER = ("dubai", "abu dhabi", "jeddah", "riyadh", "switzerland")
+DIGEST_MARKET_ORDER = ("dubai", "madrid", "valencia", "jeddah", "riyadh", "switzerland")
 DIGEST_MARKET_LABELS = {
     "dubai": "\U0001f1e6\U0001f1ea DUBAI",
-    "abu dhabi": "\U0001f1e6\U0001f1ea ABU DHABI",
+    "madrid": "\U0001f1ea\U0001f1f8 MADRID",
+    "valencia": "\U0001f1ea\U0001f1f8 VALENCIA",
     "jeddah": "\U0001f1f8\U0001f1e6 JEDDAH",
     "riyadh": "\U0001f1f8\U0001f1e6 RIYADH",
     "switzerland": "\U0001f1e8\U0001f1ed SWITZERLAND",
@@ -2661,8 +2672,8 @@ def build_collection_buckets(session):
     for scraper_name, scraper_fn in SCRAPERS:
         regions = CONFIG["regions"]
         if scraper_name.lower() == "foundit":
-            # Dubai/Abu Dhabi and Jeddah/Riyadh returned identical Foundit
-            # pages; Switzerland has no listings on this Gulf board.
+            # The Gulf board returns country-wide pages. Spain and
+            # Switzerland are searched through LinkedIn only.
             regions = {}
             for locations in CONFIG["regions"].values():
                 for location in locations:
@@ -2684,7 +2695,7 @@ _COUNTRY_DISPLAY = {"uae": "United Arab Emirates", "ksa": "Saudi Arabia"}
 
 def chosen_country_cities(country):
     cities = []
-    for city in ("Dubai", "Abu Dhabi", "Jeddah", "Riyadh"):
+    for city in ("Dubai", "Jeddah", "Riyadh"):
         if job_scoring.market_country(city) == country and is_allowed_location({"location": city}):
             cities.append(city)
     return cities

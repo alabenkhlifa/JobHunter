@@ -456,22 +456,12 @@ def duplicate_key(job, *, matching=None, markets=None):
     return f"{normalise_title(title)}|{_words(job.get('company'))}|{market_country(job.get('location'))}"
 
 
-# The five markets he chose, matched as substrings of the displayed location,
-# with the Swiss city and language spellings for postings that omit the
-# country. scraper.CONFIG["allowed_locations"] and tools/eval_scoring.py both
-# read it from here, so the number the tool measures is the number the
-# scraper ships. Sharjah and a bare "United Arab Emirates" are not here on
-# purpose: the boards return them for these searches, and he did not pick
-# them. Jeddah and Riyadh are cities, not the country: "saudi" would bring
-# Dammam and Khobar with it. "jiddah" is one board's spelling of Jeddah, on
-# 17 of the 4,580 corpus rows; every Riyadh row in the corpus spells it
-# "riyadh", so that one term covers all 989 of them.
-#
-# Grouped by country because duplicate_key needs the country a market is in;
-# DEFAULT_MARKETS is the same flat tuple every caller always read.
+# Country groups support duplicate detection, including historical Abu Dhabi
+# rows. DEFAULT_MARKETS is the separate list of destinations currently chosen.
 MARKET_COUNTRIES = {
     "uae": ("dubai", "abu dhabi"),
     "ksa": ("jeddah", "jiddah", "riyadh"),
+    "es": ("madrid", "valencia", "valència"),
     "ch": (
         "switzerland", "schweiz", "suisse", "svizzera",
         "zurich", "zürich", "geneva", "genève", "genf",
@@ -479,7 +469,10 @@ MARKET_COUNTRIES = {
         "sankt gallen", "st. gallen",
     ),
 }
-DEFAULT_MARKETS = tuple(term for terms in MARKET_COUNTRIES.values() for term in terms)
+DEFAULT_MARKETS = (
+    "dubai", "madrid", "valencia", "valència", "jeddah", "jiddah", "riyadh",
+    *MARKET_COUNTRIES["ch"],
+)
 
 # Names that place a location in a country without naming a chosen market.
 # They decide the country segment of duplicate_key only, never whether a
@@ -489,7 +482,43 @@ DEFAULT_MARKETS = tuple(term for terms in MARKET_COUNTRIES.values() for term in 
 COUNTRY_NAMES = {
     "uae": ("united arab emirates", "uae"),
     "ksa": ("saudi arabia", "saudi"),
+    "es": ("spain", "españa"),
 }
+
+
+_SPANISH_CITY_TERMS = {
+    "madrid": ("madrid",),
+    "valencia": ("valencia", "valència"),
+}
+_SPANISH_LOCATION_CONTEXT = (
+    "spain", "españa", "community of madrid", "comunidad de madrid",
+    "valencian community", "comunitat valenciana", "comunidad valenciana",
+    "province of valencia", "provincia de valencia",
+)
+
+
+def _spanish_market(location):
+    """Accept a chosen Spanish city without treating its foreign namesakes as Spain."""
+    location = str(location or "").strip().lower()
+    cities = [region for region, terms in _SPANISH_CITY_TERMS.items()
+              if any(re.search(rf"(?<!\w){re.escape(term)}(?!\w)", location) for term in terms)]
+    if len(cities) != 1:
+        return None
+    if "," not in location or any(context in location for context in _SPANISH_LOCATION_CONTEXT):
+        return cities[0]
+    parts = [part.strip() for part in location.split(",")]
+    if len(parts) == 2 and parts[1] in (*_SPANISH_CITY_TERMS[cities[0]], "remote", "hybrid"):
+        return cities[0]
+    return None
+
+
+def location_allowed(location, allowed_locations):
+    """Match configured cities while disambiguating Madrid and Valencia."""
+    location = str(location or "").lower()
+    spanish = _spanish_market(location)
+    spanish_terms = {term for terms in _SPANISH_CITY_TERMS.values() for term in terms}
+    return any(term in location and (term not in spanish_terms or spanish is not None)
+               for term in allowed_locations)
 
 
 def market_country(location):
@@ -500,25 +529,25 @@ def market_country(location):
     """
     location = str(location or "").lower()
     for country, terms in MARKET_COUNTRIES.items():
+        if country == "es":
+            if _spanish_market(location) or any(term in location for term in COUNTRY_NAMES["es"]):
+                return country
+            continue
         if any(term in location for term in terms + COUNTRY_NAMES.get(country, ())):
             return country
     return "unknown"
 
 
-# Which of his five markets a location falls in, for stage-2 selection --
-# NOT market_country, which groups Dubai and Abu Dhabi together as "uae"
-# for duplicate_key's purposes. The digest's markets are cities: the
-# 2026-09-03 spec's own mockup shows Dubai and Switzerland as separate
-# market headers. Switzerland stays one market, unsplit -- a country-wide
-# scrape query by original design, not a city list.
+# The digest groups chosen cities separately. Switzerland stays one
+# country-wide market; duplicate detection still groups cities by country.
 _REGION_OF_TERM = {
-    "dubai": "dubai", "abu dhabi": "abu dhabi",
+    "dubai": "dubai",
     "jeddah": "jeddah", "jiddah": "jeddah", "riyadh": "riyadh",
 }
 
 
 def market_region(location, markets=None):
-    """Which of his five markets a displayed location falls in.
+    """Which chosen market a displayed location falls in.
 
     Matches the same way market_country and knockout do. "unknown" when
     nothing places it -- same fallback rule as market_country.
@@ -527,6 +556,9 @@ def market_region(location, markets=None):
         market = jobhunter_matching.resolve_market(location, markets)
         return market["name"].lower() if market else "unknown"
     location = str(location or "").lower()
+    spanish = _spanish_market(location)
+    if spanish:
+        return spanish
     for term, region in _REGION_OF_TERM.items():
         if term in location:
             return region
@@ -574,7 +606,7 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(),
             return f"too junior: {word}"
 
     location = str(job.get("location") or "").lower()
-    if allowed_locations and not any(a in location for a in allowed_locations):
+    if allowed_locations and not location_allowed(location, allowed_locations):
         return f"outside the configured markets: {job.get('location') or 'unknown'}"
 
     years = job.get("min_experience", -1)

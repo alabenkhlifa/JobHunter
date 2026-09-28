@@ -42,7 +42,7 @@ def test_digest_opens_with_a_visa_section_and_does_not_repeat_those_jobs():
     assert "Riyadh" in lines[heading + 2]
     assert text.count("Role visa") == 1
     assert "No matches: Riyadh" not in text
-    assert "No matches: Abu Dhabi, Jeddah" in text
+    assert "No matches: Madrid, Valencia, Jeddah" in text
     assert any(line.startswith("3. Role swiss") for line in lines)
 
 

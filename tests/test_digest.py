@@ -29,7 +29,7 @@ def job(**over):
 
 def test_format_digest_message_shows_every_market_when_empty():
     msg = scraper.format_digest_message([], 0, [])
-    assert "No matches: Dubai, Abu Dhabi, Jeddah, Riyadh, Switzerland" in msg
+    assert "No matches: Dubai, Madrid, Valencia, Jeddah, Riyadh, Switzerland" in msg
     assert "0 sent" in msg
 
 
@@ -111,7 +111,7 @@ def test_digest_bolds_company_and_unconfirmed_visa_and_empty_markets():
     msg = scraper.format_digest_message([job(company="AT&T")], 0, [])
     assert "<b>AT&amp;T</b>" in msg
     assert "<b>❓ Visa unconfirmed</b>" in msg
-    assert "<b>⚠️ No matches: Abu Dhabi, Jeddah, Riyadh, Switzerland</b>" in msg
+    assert "<b>⚠️ No matches: Madrid, Valencia, Jeddah, Riyadh, Switzerland</b>" in msg
 
 
 @pytest.mark.parametrize("score,icon", [(0, "👍"), (69, "👍"), (70, "⭐"), (79, "⭐"), (80, "🔥"), (100, "🔥")])
@@ -166,7 +166,7 @@ def test_digest_renders_plain_title_when_link_is_missing_or_invalid(url):
 
 def test_digest_twelve_long_jobs_fit_telegram_limit_without_losing_any():
     jobs = [job(
-        id=f"j{n}", ai_rank=n, market=scraper.DIGEST_MARKET_ORDER[(n - 1) % 5],
+        id=f"j{n}", ai_rank=n, market=scraper.DIGEST_MARKET_ORDER[(n - 1) % len(scraper.DIGEST_MARKET_ORDER)],
         title="Long job title 🧩 " * 100, company="Long company name 🏢 " * 100,
         url=f"https://example.test/job/{n}?ref=telegram&source=test",
         tech_required="framework " * 1000, ai_verdict_reason="reason " * 1000,

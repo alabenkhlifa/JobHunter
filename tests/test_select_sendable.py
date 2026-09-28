@@ -1,9 +1,11 @@
 import job_scoring
 
 
-def test_market_region_finds_each_of_the_five_markets():
+def test_market_region_finds_each_chosen_market():
     assert job_scoring.market_region("Dubai, United Arab Emirates") == "dubai"
-    assert job_scoring.market_region("Abu Dhabi, United Arab Emirates") == "abu dhabi"
+    assert job_scoring.market_region("Madrid, Spain") == "madrid"
+    assert job_scoring.market_region("Valencia, Spain") == "valencia"
+    assert job_scoring.market_region("València, Comunitat Valenciana") == "valencia"
     assert job_scoring.market_region("Jeddah, Saudi Arabia") == "jeddah"
     assert job_scoring.market_region("Jiddah, Makkah, Saudi Arabia") == "jeddah"
     assert job_scoring.market_region("Riyadh, Saudi Arabia") == "riyadh"
@@ -11,15 +13,17 @@ def test_market_region_finds_each_of_the_five_markets():
     assert job_scoring.market_region("Geneva, Switzerland") == "switzerland"
 
 
-def test_market_region_does_not_merge_dubai_and_abu_dhabi():
-    # The bug this function exists to avoid: market_country groups both
-    # under "uae". market_region must not.
-    assert job_scoring.market_region("Dubai") != job_scoring.market_region("Abu Dhabi")
+def test_market_region_does_not_merge_madrid_and_valencia():
+    assert job_scoring.market_country("Madrid") == job_scoring.market_country("Valencia") == "es"
+    assert job_scoring.market_region("Madrid") != job_scoring.market_region("Valencia")
 
 
 def test_market_region_is_unknown_for_a_bare_country_or_unplaced_location():
     assert job_scoring.market_region("United Arab Emirates") == "unknown"
+    assert job_scoring.market_region("Abu Dhabi, United Arab Emirates") == "unknown"
     assert job_scoring.market_region("Saudi Arabia") == "unknown"
+    assert job_scoring.market_region("Spain") == "unknown"
+    assert job_scoring.market_region("Valencia, California, United States") == "unknown"
     assert job_scoring.market_region("") == "unknown"
     assert job_scoring.market_region(None) == "unknown"
 
@@ -94,7 +98,7 @@ def test_select_sendable_caps_total_at_the_global_limit_via_spillover():
     # job clears the per-market floor. Cap trims the spillover, not the floor.
     jobs = []
     rank = 1
-    for market in ("dubai", "abu dhabi", "jeddah", "switzerland"):
+    for market in ("dubai", "madrid", "jeddah", "switzerland"):
         for _ in range(2):
             jobs.append(review(id=f"{market}-{rank}", market=market, ai_rank=rank))
             rank += 1
@@ -104,12 +108,12 @@ def test_select_sendable_caps_total_at_the_global_limit_via_spillover():
 
 
 def test_select_sendable_truncates_the_per_market_floor_itself_when_it_exceeds_the_cap():
-    # 5 markets x 3 jobs each = 15 sendable jobs, every one inside its own
+    # 6 markets x 3 jobs each = 18 sendable jobs, every one inside its own
     # market's top 3 -- the floor alone exceeds cap=12. No market may exceed
     # 3, but the overall list truncates to the global top 12 by rank.
     jobs = []
     rank = 1
-    for market in ("dubai", "abu dhabi", "jeddah", "switzerland", "riyadh"):
+    for market in ("dubai", "madrid", "valencia", "jeddah", "switzerland", "riyadh"):
         for _ in range(3):
             jobs.append(review(id=f"{market}-{rank}", market=market, ai_rank=rank))
             rank += 1

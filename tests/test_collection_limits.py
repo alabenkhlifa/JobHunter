@@ -139,12 +139,40 @@ def test_fetched_knockout_is_saved_and_not_fetched_next_run(collection, descript
     assert state["skip_counts"]["already_seen"] == 1
 
 
-def test_default_buckets_are_five_linkedin_and_two_foundit(monkeypatch):
+def test_default_buckets_are_six_linkedin_and_two_foundit(monkeypatch):
     monkeypatch.setattr(scraper, "CONFIG", scraper.DEFAULT_CONFIG)
     buckets = scraper.build_collection_buckets(mock.Mock())
+    assert set(scraper.CONFIG["regions"]) == {"Dubai", "Madrid", "Valencia", "Jeddah", "Riyadh", "Switzerland"}
     assert set(buckets) == {"LinkedIn/" + region for region in scraper.CONFIG["regions"]} | {
         "Foundit/United Arab Emirates", "Foundit/Saudi Arabia"}
     assert len(buckets["Foundit/United Arab Emirates"]["generators"]) == len(scraper.CONFIG["keywords"])
+    assert scraper.CONFIG["regions"]["Madrid"] == ["Madrid, Spain"]
+    assert scraper.CONFIG["regions"]["Valencia"] == ["Valencia, Spain"]
+
+
+@pytest.mark.parametrize("location,allowed", [
+    ("Madrid, Spain", True),
+    ("Valencia, Spain", True),
+    ("València, Comunitat Valenciana", True),
+    ("Madrid, Missouri, United States", False),
+    ("Valencia, California, United States", False),
+    ("Abu Dhabi, United Arab Emirates", False),
+])
+def test_chosen_locations_exclude_foreign_namesakes_and_abu_dhabi(monkeypatch, location, allowed):
+    monkeypatch.setattr(scraper, "CONFIG", scraper.DEFAULT_CONFIG)
+    assert scraper.is_allowed_location({"location": location}) is allowed
+
+
+@pytest.mark.parametrize("requirement", [
+    "Applicants must have the right to work in Spain.",
+    "Must be authorised to work in Spain before applying.",
+    "A valid work permit for Spain is required.",
+    "EU citizenship required for this role.",
+])
+def test_spain_jobs_requiring_existing_work_permission_are_filtered(monkeypatch, requirement):
+    monkeypatch.setattr(scraper, "CONFIG", scraper.DEFAULT_CONFIG)
+    assert scraper.requires_local_presence(requirement)
+    assert not scraper.requires_local_presence("Visa sponsorship support is available in Spain.")
 
 
 @pytest.mark.parametrize("city,country", [
@@ -163,7 +191,7 @@ def test_foundit_queries_country_and_preserves_null_location(monkeypatch, city, 
 
 
 @pytest.mark.parametrize("location,country,city", [
-    (None, "United Arab Emirates", "Dubai"), ("Remote", "United Arab Emirates", "Abu Dhabi"),
+    (None, "United Arab Emirates", "Dubai"), ("Remote", "United Arab Emirates", "Dubai"),
     ("United Arab Emirates", "United Arab Emirates", "Dubai"),
     ("Saudi Arabia, Mecca", "Saudi Arabia", "Jeddah"),
 ])
@@ -190,7 +218,7 @@ def test_country_without_chosen_city_is_saved_at_zero(collection, source, locati
 
 
 @pytest.mark.parametrize("location,title,city,country", [
-    ("United Arab Emirates", "Senior Backend Engineer – Java SpringBoot MicroServices", "Abu Dhabi", "United Arab Emirates"),
+    ("United Arab Emirates", "Senior Backend Engineer – Java SpringBoot MicroServices", "Dubai", "United Arab Emirates"),
     ("uae", "Tech Lead", "Dubai", "United Arab Emirates"),
     ("Saudi Arabia", "Kotlin Developer", "Riyadh", "Saudi Arabia"),
 ])
@@ -205,14 +233,15 @@ def test_bare_country_target_title_is_resolved(collection, location, title, city
 def test_country_resolution_uses_first_city_and_only_chosen_cities(collection, monkeypatch):
     state, fetch = collection
     fetch.return_value += " Abu Dhabi office, with a Dubai team."
-    assert scraper.resolve_description_city(fetch.return_value, "uae") == "Abu Dhabi, United Arab Emirates"
-    monkeypatch.setitem(scraper.CONFIG, "allowed_locations", ["dubai"])
     assert scraper.resolve_description_city(fetch.return_value, "uae") == "Dubai, United Arab Emirates"
+    monkeypatch.setitem(scraper.CONFIG, "allowed_locations", ["jeddah"])
+    assert scraper.resolve_description_city(fetch.return_value, "uae") is None
     assert scraper.resolve_description_city("Dubai office", "ksa") is None
 
 
 @pytest.mark.parametrize("location,title,source,query", [
     ("United Arab Emirates", "Software Engineer", "LinkedIn", ""),
+    ("Abu Dhabi, United Arab Emirates", "Java Architect", "LinkedIn", ""),
     ("Sharjah", "Java Architect", "LinkedIn", ""),
     ("Saudi Arabia", "Java Architect", "Foundit", "United Arab Emirates"),
 ])

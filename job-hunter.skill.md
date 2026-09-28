@@ -1,6 +1,6 @@
 ---
 name: job-hunter
-description: Automated job search agent for the Dubai, Abu Dhabi, Jeddah, Riyadh and Switzerland markets.
+description: Automated job search agent for Dubai, Madrid, Valencia, Jeddah, Riyadh and Switzerland.
   Scrapes LinkedIn and Foundit Gulf, scores matches against a
   Software Architect / Tech Lead / Senior Engineer backend profile, and notifies via Telegram.
 triggers:
@@ -15,10 +15,11 @@ triggers:
 
 ## Overview
 This skill automates job searching for Software Architect / Cloud Architect /
-Tech Lead / Senior Engineer backend roles in Dubai, Abu Dhabi, Jeddah, Riyadh
-and Switzerland. It scrapes LinkedIn (guest API) and
-Foundit Gulf (JSON API), stores keyword-qualified candidates, then a Hermes
-cron job reviews them with an LLM that returns a structured verdict per job
+Tech Lead / Senior Engineer backend roles in Dubai, Madrid, Valencia, Jeddah,
+Riyadh and Switzerland. It scrapes LinkedIn (guest API) for every market and
+Foundit Gulf (JSON API) for the Gulf markets. It stores keyword-qualified
+candidates, then a Hermes cron job reviews them with an LLM. The review returns
+a structured verdict per job
 (`send`/`hold`/`reject`, a reason, a sponsorship read, and a rank); those
 verdicts are persisted. Review input is balanced across markets, and delivery
 combines eligible approvals across batches, checking source availability
@@ -147,9 +148,14 @@ board has no Swiss listings.
 Each region is a search string plus a whitelist of displayed locations
 (`allowed_locations`, read from `job_scoring.DEFAULT_MARKETS`); anything else
 is dropped even if the board returns it.
-- **Dubai**, **Abu Dhabi**, **Jeddah**, **Riyadh** — searched by city. The
-  boards also return Sharjah, a bare "United Arab Emirates", and other Saudi
-  cities such as Dammam for these searches; those are dropped, since they are
+- **Dubai**, **Madrid**, **Valencia**, **Jeddah**, **Riyadh** — searched by city.
+  Madrid and Valencia use Spain-specific LinkedIn queries; Foundit Gulf does
+  not search Spain. Employer visa support is needed for Spain: postings that
+  do not mention sponsorship may still appear with a "Visa not mentioned"
+  label, while explicit sponsorship refusals and existing Spanish/EU work-permit
+  requirements are excluded. The boards also return Sharjah, a bare "United
+  Arab Emirates", and other Saudi cities such as Dammam for these searches;
+  those are dropped, since they are
   not markets he chose. Jeddah and Riyadh are the two Saudi cities he did
   choose; the country itself is not a market
 - **Switzerland** — searched country-wide. Any displayed location naming the
@@ -317,7 +323,7 @@ For each candidate job, the scraper fetches the full description and extracts:
    Queue selection excludes any `send` whose sponsorship reads `excluded`;
    `no_info` sends. A verified `offered` takes a place first, bounded only by
    the global cap. It then allocates one job per market per
-   round (Dubai and Abu Dhabi count separately), for a default floor of 3,
+   round (Madrid and Valencia count separately), for a default floor of 3,
    then shares unused places up to a global cap of 12. A strong market can
    receive more than 3. Current approvals retain their batch order; older
    approvals follow by current score, without comparing ranks from unrelated
@@ -345,7 +351,7 @@ For each candidate job, the scraper fetches the full description and extracts:
    each with its market on the company line; they take places before any
    market floor and only the global cap of 12 bounds them. The remaining
    entries are grouped under a
-   fixed market order — Dubai, Abu Dhabi, Jeddah, Riyadh, Switzerland
+   fixed market order — Dubai, Madrid, Valencia, Jeddah, Riyadh, Switzerland
    (`scraper.DIGEST_MARKET_ORDER`) — sorted by score descending inside each
    market, breaking ties by `ai_rank` then job ID,
    then numbered 1..N in the order they are printed, reading top to bottom.

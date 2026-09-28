@@ -51,7 +51,7 @@ def source_responses(monkeypatch, *, closed=(), unknown=()):
 def test_today_dubai_jobs_backfill_all_other_markets_from_approved_queue(database, monkeypatch):
     for number in range(100, 103):
         insert(database, number, days=0)
-    for number, market in enumerate(('Abu Dhabi', 'Jeddah', 'Riyadh', 'Zurich, Switzerland'), 200):
+    for number, market in enumerate(('Madrid, Spain', 'Valencia, Spain', 'Jeddah', 'Riyadh', 'Zurich, Switzerland'), 200):
         insert(database, number, market, days=5, score=60)
     calls = source_responses(monkeypatch)
     sent = []
@@ -59,15 +59,15 @@ def test_today_dubai_jobs_backfill_all_other_markets_from_approved_queue(databas
     written = scraper.record_review(database, [{'job_id': f'li-{number}', 'verdict': 'send', 'sponsorship': 'implied',
                                               'reason': 'Confirmed match', 'rank': number - 99} for number in range(100, 103)])
     report = scraper.send_reviewed_digest('synthetic', 'private', database, written)
-    assert report['sent'] == 7 and len(calls) == 7
+    assert report['sent'] == 8 and len(calls) == 8
     assert 'No matches' not in sent[0]
-    assert all(name in sent[0] for name in ('DUBAI', 'ABU DHABI', 'JEDDAH', 'RIYADH', 'SWITZERLAND'))
-    assert database.execute('SELECT COUNT(*) FROM jobs WHERE notified=1').fetchone()[0] == 7
+    assert all(name in sent[0] for name in ('DUBAI', 'MADRID', 'VALENCIA', 'JEDDAH', 'RIYADH', 'SWITZERLAND'))
+    assert database.execute('SELECT COUNT(*) FROM jobs WHERE notified=1').fetchone()[0] == 8
 
 
 def test_explicitly_closed_choice_is_replaced_with_older_open_job_in_same_market(database, monkeypatch):
-    closed = insert(database, 100, 'Abu Dhabi', days=0)
-    replacement = insert(database, 101, 'Abu Dhabi', days=4, score=60)
+    closed = insert(database, 100, 'Madrid, Spain', days=0)
+    replacement = insert(database, 101, 'Madrid, Spain', days=4, score=60)
     source_responses(monkeypatch, closed=[closed['id']])
     selected, report = select_available(database, scraper.reviewed_queue(database), per_market=1, cap=1)
     assert [job['id'] for job in selected] == [replacement['id']]
