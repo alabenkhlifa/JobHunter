@@ -104,6 +104,26 @@ def test_legacy_profile_keeps_existing_tailoring_behavior():
     assert set(resume["experience"][0]["bullets"]) == set(profile["experience"][0]["bullets"])
 
 
+def test_public_resume_excludes_teaching_and_interests_for_fallback_and_variant():
+    additional = {
+        "languages": "Arabic (Native) | English (C1) | French (C1)",
+        "teaching": "Training activity kept in the master profile",
+        "interests": "Personal interests kept in the master profile",
+    }
+    profile = _v2_profile(
+        additional=additional,
+        resume_variants=[_variant(resume={"additional": additional})],
+    )
+
+    assert project_public_resume(profile)["additional"] == {
+        "languages": additional["languages"]
+    }
+    assert apply_resume_variant(profile, select_resume_variant(profile, "Java backend"))[
+        "additional"
+    ] == {"languages": additional["languages"]}
+    assert profile["additional"] == additional
+
+
 def test_only_confirmed_public_matching_evidence_is_used_verbatim():
     exact_text = "Implemented asynchronous task processing in a sample production service."
     profile = _v2_profile(
@@ -191,6 +211,49 @@ def test_public_projection_excludes_refiner_defaults_and_unknown_private_metadat
         assert "manager_name" not in serialized
         assert "private_verification" not in serialized
     assert resume["experience"][0]["tech"] == "Kotlin - Java - Spring Boot"
+
+
+def test_confirmed_website_is_public_identity_for_master_and_variant():
+    website = "https://candidate.example/"
+    profile = _v2_profile(
+        website=website,
+        resume_variants=[_variant()],
+    )
+
+    validate_profile(profile)
+    assert project_public_resume(profile)["website"] == website
+    assert apply_resume_variant(profile, select_resume_variant(profile, "Java"))["website"] == website
+
+
+@pytest.mark.parametrize("website", [
+    "http://candidate.example", "javascript:alert(1)",
+    "https://candidate.example\\evil", "https://user@candidate.example", "",
+])
+def test_website_requires_safe_https_url(website):
+    with pytest.raises(ProfileValidationError, match="website"):
+        validate_profile(_v2_profile(website=website))
+
+
+def test_company_url_is_public_in_master_and_confirmed_variant():
+    verse = _experience(company="VERSE", title="Chief Technology Officer (CTO)",
+                        company_url="https://verse.ad")
+    variant_verse = {key: value for key, value in verse.items() if key != "id"}
+    profile = _v2_profile(
+        experience=[verse],
+        resume_variants=[_variant(resume={"experience": [variant_verse]})],
+    )
+
+    validate_profile(profile)
+    assert project_public_resume(profile)["experience"][0]["company_url"] == "https://verse.ad"
+    selected = select_resume_variant(profile, "Java")
+    assert apply_resume_variant(profile, selected)["experience"][0]["company_url"] == "https://verse.ad"
+
+
+@pytest.mark.parametrize("company_url", ["http://verse.ad", "javascript:alert(1)", "https://user@verse.ad"])
+def test_company_url_requires_safe_https(company_url):
+    profile = _v2_profile(experience=[_experience(company_url=company_url)])
+    with pytest.raises(ProfileValidationError, match="company_url"):
+        validate_profile(profile)
 
 
 def test_resume_variant_selection_is_confirmed_whole_term_and_deterministic():
@@ -417,6 +480,7 @@ def test_resume_variant_preserves_certification_links_in_public_projection():
         "https://credentials.example:65536/spring",
         "https://[invalid]/spring", "https://bad..example/spring",
         "https://-bad.example/spring", "https://bad_host.example/spring",
+        "https://user@credentials.example/spring",
         "http://credentials.example/spring", "", None, 42,
     ],
 )

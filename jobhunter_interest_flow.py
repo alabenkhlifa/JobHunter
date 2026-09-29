@@ -106,9 +106,16 @@ _KEYWORD_STOPWORDS = {
     "using", "with", "work", "years", "your",
 }
 
+_HARD_SKILL_TERMS = {
+    "aws", "azure", "java", "kotlin", "spring", "spring boot", "typescript",
+    "nodejs", "nestjs", "react", "postgresql", "redis", "rabbitmq", "terraform",
+    "kubernetes", "prisma", "graphql", "mqtt",
+}
+
 _SKILL_SIGNALS = (
     ("java", ("java", "jvm"), ("java",), 10),
     ("java_backend", ("java", "jvm"), ("spring boot",), 6),
+    ("node_backend", ("nodejs", "node js", "typescript"), ("nestjs",), 15),
     ("backend", ("backend", "server-side"), ("spring boot", "microservices", "rest api"), 5),
     (
         "distributed",
@@ -1340,12 +1347,11 @@ def _relevance_score(text: Any, job_text: str) -> int:
 
 
 def _job_relevance_text(job: dict[str, Any]) -> str:
-    return _normalized_relevance_text(
-        " ".join(
-            str(job.get(field) or "")
-            for field in ("title", "description", "tech_required", "tech_nice_to_have")
-        )
+    content = " ".join(
+        str(job.get(field) or "")
+        for field in ("title", "description", "tech_required", "tech_nice_to_have")
     )
+    return _normalized_relevance_text(html.unescape(re.sub(r"<[^>]+>", " ", content)))
 
 
 def _ranked_values(values: list[Any], job_text: str) -> list[Any]:
@@ -1378,6 +1384,13 @@ def _skill_relevance_score(skill: Any, job_text: str) -> int:
             _contains_relevance_term(candidate, term) for term in candidate_terms
         ):
             score += bonus
+    if candidate == "typescript" and _contains_relevance_term(job_text, "typescript"):
+        score += 15
+    if _contains_relevance_term(job_text, "aws") and not _contains_relevance_term(job_text, "azure"):
+        if candidate.startswith("aws"):
+            score += 20
+        elif candidate.startswith("azure"):
+            score -= 10
     return score
 
 
@@ -1391,24 +1404,77 @@ def _ranked_skills(values: list[Any], job_text: str) -> list[Any]:
     ]
 
 
-def _skill_category_score(category: str, values: Any, job_text: str) -> int:
+def _skill_limit(category: str) -> int:
+    """Keep the public sidebar near the reviewed resume's compact skill density."""
+    name = _normalized_relevance_text(category)
+    if "backend" in name or "architecture" in name:
+        return 8
+    if "data" in name or "languages" in name:
+        return 7
+    if "leadership" in name:
+        return 4
+    return 6
+
+
+def _skill_category_score(category: str, values: Any, job_text: str, job_title: str = "") -> int:
     value_scores = (
         [_skill_relevance_score(value, job_text) for value in values]
         if isinstance(values, list)
         else [_relevance_score(values, job_text)]
     )
-    return max(value_scores or [0]) + (_relevance_score(category, job_text) * 2)
+    score = max(value_scores or [0]) + (_relevance_score(category, job_text) * 2)
+    title = _normalized_relevance_text(job_title)
+    category_text = _normalized_relevance_text(category)
+    if _contains_relevance_term(title, "backend") and _contains_relevance_term(category_text, "backend"):
+        score += 40
+    elif _contains_relevance_term(title, "manager") and _contains_relevance_term(category_text, "leadership"):
+        score += 40
+    elif _contains_relevance_term(title, "architect") and _contains_relevance_term(category_text, "architecture"):
+        score += 20
+    return score
 
 
-def _focused_summary(summary: str, job_text: str, *, limit: int = 3) -> str:
+def _focused_summary(summary: str, job_text: str, job_title: str = "", *, limit: int = 3) -> str:
     sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", summary.strip()) if part.strip()]
     if len(sentences) <= limit:
         return summary
-    ranked_indexes = sorted(
-        range(len(sentences)),
-        key=lambda index: (-_relevance_score(sentences[index], job_text), index),
-    )[:limit]
-    return " ".join(sentences[index] for index in sorted(ranked_indexes))
+    title = _normalized_relevance_text(job_title)
+
+    def role_score(sentence: str) -> int:
+        value = _normalized_relevance_text(sentence)
+        score = _relevance_score(sentence, job_text)
+        if any(_contains_relevance_term(title, term) for term in ("manager", "head of engineering")):
+            score += 20 * sum(
+                _contains_relevance_term(value, term)
+                for term in ("cto", "engineering teams", "technical leader", "led")
+            )
+        elif any(_contains_relevance_term(title, term) for term in ("backend", "software engineer")):
+            score += 10 if _contains_relevance_term(value, "full-stack") else 0
+            score += 10 * sum(
+                _contains_relevance_term(value, term)
+                for term in ("backend", "platform", "api")
+            )
+        return score
+
+    # Keep the confirmed career overview, then give the job's strongest two
+    # existing facts the scarce summary space. No new career claim is composed.
+    selected = [0]
+    if any(_contains_relevance_term(job_text, term) for term in ("mentor", "mentoring", "leadership")):
+        team_sentence = next(
+            (index for index in range(1, len(sentences))
+             if any(_contains_relevance_term(_normalized_relevance_text(sentences[index]), term)
+                    for term in ("managed a team", "led a team", "team of four", "team of 4"))),
+            None,
+        )
+        if team_sentence is not None:
+            selected.append(team_sentence)
+    selected.extend(
+        sorted(
+            (index for index in range(1, len(sentences)) if index not in selected),
+            key=lambda index: (-role_score(sentences[index]), index),
+        )[: max(0, limit - len(selected))]
+    )
+    return " ".join(sentences[index] for index in sorted(selected))
 
 
 def _experience_role_text(experience: dict[str, Any]) -> str:
@@ -1422,15 +1488,14 @@ def _experience_relevance_score(
     experience: dict[str, Any],
     job_text: str,
     job_title: str,
+    bullets: list[str] | None = None,
 ) -> int:
     role_text = _experience_role_text(experience)
-    evidence_text = " ".join(
-        (
-            role_text,
-            " ".join(str(bullet) for bullet in experience.get("bullets") or []),
-        )
+    bullet_scores = sorted(
+        (_bullet_relevance_score(bullet, job_text, job_title) for bullet in (bullets if bullets is not None else experience.get("bullets") or [])),
+        reverse=True,
     )
-    score = _relevance_score(evidence_text, job_text)
+    score = _relevance_score(role_text, job_text) + sum(bullet_scores[:2])
     normalized_title = _normalized_relevance_text(job_title)
     normalized_roles = _normalized_relevance_text(role_text)
     title_terms = {
@@ -1451,6 +1516,115 @@ def _experience_relevance_score(
     return score
 
 
+def _bullet_relevance_score(bullet: str, job_text: str, job_title: str = "") -> int:
+    candidate = _normalized_relevance_text(bullet)
+    job_words = set(re.findall(r"[a-z0-9+#.]+", job_text)) - _KEYWORD_STOPWORDS
+    candidate_words = set(re.findall(r"[a-z0-9+#.]+", candidate)) - _KEYWORD_STOPWORDS
+    exact = sum(len(word) > 2 and word in job_words for word in candidate_words)
+    title = _normalized_relevance_text(job_title)
+    role_terms: tuple[str, ...] = ()
+    if _contains_relevance_term(title, "backend"):
+        role_terms = ("backend", "nestjs", "node", "typescript", "react", "aws", "api", "deployment", "reliability", "outage")
+    elif _contains_relevance_term(title, "manager"):
+        role_terms = ("managing", "team", "mentored", "led", "workflow", "agent", "full-stack", "client", "delivered")
+    role_bonus = sum(
+        5 for term in role_terms
+        if _contains_relevance_term(candidate, term) and _contains_relevance_term(job_text, term)
+    )
+    hard_skill_bonus = sum(
+        20 for term in _HARD_SKILL_TERMS
+        if _contains_relevance_term(candidate, term) and _contains_relevance_term(job_text, term)
+    )
+    cloud_penalty = 15 if (
+        _contains_relevance_term(job_text, "aws")
+        and not _contains_relevance_term(job_text, "azure")
+        and _contains_relevance_term(candidate, "azure")
+        and not _contains_relevance_term(candidate, "aws")
+    ) else 0
+    full_stack_bonus = 30 if (
+        _contains_relevance_term(title, "manager")
+        and (_contains_relevance_term(job_text, "full stack") or _contains_relevance_term(job_text, "full-stack"))
+        and (_contains_relevance_term(candidate, "nestjs") or _contains_relevance_term(candidate, "backend"))
+        and _contains_relevance_term(candidate, "react")
+    ) else 0
+    communications_bonus = 45 if (
+        any(_contains_relevance_term(job_text, term) for term in ("communications", "messaging", "notifications"))
+        and any(_contains_relevance_term(candidate, term) for term in ("notification", "webhook", "retry"))
+    ) else 0
+    reliability_bonus = 15 if (
+        any(_contains_relevance_term(job_text, term) for term in ("reliability", "availability", "resilience"))
+        and any(_contains_relevance_term(candidate, term) for term in ("duplicate", "retry", "outage", "downtime"))
+    ) else 0
+    return (
+        _relevance_score(bullet, job_text) + exact * 5 + role_bonus + hard_skill_bonus
+        + full_stack_bonus + communications_bonus + reliability_bonus - cloud_penalty
+    )
+
+
+def _bullet_duplicate_key(bullet: str) -> str:
+    value = _normalized_relevance_text(bullet)
+    value = re.sub(r"\bfour\b", "4", value)
+    if re.search(r"\bteam of 4 engineers\b", value) and re.search(
+        r"\b(manag\w*|coordinat\w*|lead\w*)\b", value
+    ):
+        return "managed-team-of-4-engineers"
+    return value
+
+
+def _ranked_distinct_bullets(bullets: list[str], job_text: str, limit: int, job_title: str = "") -> list[str]:
+    job_skills = {
+        term for term in _HARD_SKILL_TERMS if _contains_relevance_term(job_text, term)
+    }
+    ranked = [
+        (
+            index,
+            bullet,
+            _bullet_relevance_score(bullet, job_text, job_title),
+            {
+                term for term in job_skills
+                if _contains_relevance_term(_normalized_relevance_text(bullet), term)
+            },
+        )
+        for index, bullet in enumerate(bullets)
+    ]
+    selected: list[str] = []
+    seen: set[str] = set()
+    covered_skills: set[str] = set()
+    while ranked and len(selected) < limit:
+        # Favor new job-relevant evidence when similarly scored bullets repeat
+        # a skill that a stronger selected bullet has already established.
+        best_index = max(
+            range(len(ranked)),
+            key=lambda index: (
+                ranked[index][2] - 3 * len(ranked[index][3] & covered_skills),
+                -ranked[index][0],
+            ),
+        )
+        _, bullet, _, bullet_skills = ranked.pop(best_index)
+        key = _bullet_duplicate_key(bullet)
+        if key in seen:
+            continue
+        selected.append(bullet)
+        seen.add(key)
+        covered_skills.update(bullet_skills)
+    return selected
+
+
+def _focused_tech_keywords(tech: Any, bullets: list[str], job_text: str) -> str:
+    """Show only verified role keywords supported by the selected work or job."""
+    original = str(tech or "")
+    terms = [term.strip() for term in re.split(r"\s*[·|,]\s*", original) if term.strip()]
+    if not terms or not bullets:
+        return original
+    selected_work = _normalized_relevance_text(" ".join(bullets))
+    focused = [
+        term for term in terms
+        if _contains_relevance_term(selected_work, _normalized_relevance_text(term))
+        or _contains_relevance_term(job_text, _normalized_relevance_text(term))
+    ]
+    return " · ".join(focused) if focused else original
+
+
 def _tailored_experience(
     profile: dict[str, Any],
     job_text: str,
@@ -1461,23 +1635,29 @@ def _tailored_experience(
     for item in usable_evidence(profile, "resume"):
         resume_evidence.setdefault(item["experience_id"], []).append(item["public_text"])
 
+    candidates = [
+        list(dict.fromkeys([
+            *(projected[index].get("bullets") or []),
+            *resume_evidence.get(source.get("id"), []),
+        ]))
+        for index, source in enumerate(profile.get("experience") or [])
+    ]
+
     ranked_sources = sorted(
         enumerate(profile.get("experience") or []),
-        key=lambda item: (
-            -_experience_relevance_score(item[1], job_text, job_title),
-            item[0],
-        ),
+        key=lambda item: _experience_chronology_key(projected[item[0]], item[0]),
     )
     tailored_experience: list[dict[str, Any]] = []
     for ranked_index, (source_index, source) in enumerate(ranked_sources):
         experience = json.loads(json.dumps(projected[source_index]))
-        bullets = list(experience.get("bullets") or [])
-        bullets.extend(resume_evidence.get(source.get("id"), []))
-        bullets = list(dict.fromkeys(bullets))
         limit = 4 if ranked_index < 3 else 2
-        experience["bullets"] = _ranked_values(bullets, job_text)[:limit]
+        experience["bullets"] = _ranked_distinct_bullets(candidates[source_index], job_text, limit, job_title)
+        if experience.get("tech"):
+            experience["tech"] = _focused_tech_keywords(
+                experience["tech"], experience["bullets"], job_text,
+            )
         tailored_experience.append(experience)
-    return tailored_experience
+    return _filter_optional_experiences(tailored_experience, job_text, job_title)
 
 
 def _resume_for_job(
@@ -1495,20 +1675,37 @@ def _resume_for_job(
     job_title = str(job.get("title") or "")
     variant = select_resume_variant(profile, job_text, job_title=job_title)
     if variant is not None:
-        return apply_resume_variant(profile, variant), variant
+        tailored_variant = apply_resume_variant(profile, variant)
+        tailored_variant["experience"] = _filter_optional_experiences(
+            sorted(
+                tailored_variant.get("experience") or [],
+                key=lambda item: _experience_chronology_key(item, 0),
+            ),
+            job_text,
+            job_title,
+        )
+        tailored_variant["experience"] = _group_company_experiences(
+            tailored_variant["experience"], profile, job_text, job_title,
+            preserve_variant=True,
+        )
+        return tailored_variant, variant
 
     tailored = project_public_resume(profile)
     if profile.get("summary"):
-        tailored["summary"] = _focused_summary(str(profile["summary"]), job_text)
+        tailored["summary"] = _focused_summary(str(profile["summary"]), job_text, job_title, limit=3)
     skills = profile.get("skills") or {}
     tailored["skills"] = {
-        category: _ranked_skills(list(values), job_text) if isinstance(values, list) else values
+        category: _ranked_skills(list(values), job_text)[:_skill_limit(category)]
+        if isinstance(values, list) else values
         for _, (category, values) in sorted(
             enumerate(skills.items()),
-            key=lambda item: (-_skill_category_score(item[1][0], item[1][1], job_text), item[0]),
+            key=lambda item: (-_skill_category_score(item[1][0], item[1][1], job_text, job_title), item[0]),
         )
     }
     tailored["experience"] = _tailored_experience(profile, job_text, job_title)
+    tailored["experience"] = _group_company_experiences(
+        tailored["experience"], profile, job_text, job_title,
+    )
     return tailored, None
 
 
@@ -1555,6 +1752,238 @@ def _start_month(value: Any) -> tuple[int, int] | None:
     if year_match:
         return int(year_match.group(1)), 1
     return None
+
+
+def _end_month(value: Any) -> tuple[int, int] | None:
+    text = str(value or "")
+    if _CURRENT_DATE_PATTERN.search(text):
+        return 9999, 12
+    month_matches = list(_MONTH_YEAR_PATTERN.finditer(text))
+    if month_matches:
+        last = month_matches[-1]
+        return int(last.group(2)), _MONTH_NUMBERS[last.group(1).lower()]
+    years = _YEAR_PATTERN.findall(text)
+    if years:
+        return int(years[-1]), 12
+    return None
+
+
+def _experience_chronology_key(experience: dict[str, Any], source_index: int) -> tuple[int, int, int, int, int]:
+    end = _end_month(experience.get("dates")) or (0, 0)
+    start = _start_month(experience.get("dates")) or (0, 0)
+    return -end[0], -end[1], -start[0], -start[1], source_index
+
+
+def _filter_optional_experiences(
+    experiences: list[dict[str, Any]], job_text: str, job_title: str,
+) -> list[dict[str, Any]]:
+    """Keep current progression and show side roles only when they fit the role."""
+    title = _normalized_relevance_text(job_title)
+    leadership_role = any(
+        _contains_relevance_term(title, term)
+        for term in ("manager", "lead", "architect", "director", "head", "principal", "chief")
+    )
+    current_companies = {
+        _normalized_relevance_text(item.get("company"))
+        for item in experiences
+        if _CURRENT_DATE_PATTERN.search(str(item.get("dates") or ""))
+    }
+    latest_current_start = max(
+        (_start_month(item.get("dates")) or (0, 0) for item in experiences
+         if _CURRENT_DATE_PATTERN.search(str(item.get("dates") or ""))),
+        default=None,
+    )
+    dated = [(_start_month(item.get("dates")), index) for index, item in enumerate(experiences)]
+    oldest_index = min(
+        ((start, index) for start, index in dated if start is not None),
+        default=(None, None),
+    )[1]
+    selected: list[dict[str, Any]] = []
+    for index, item in enumerate(experiences):
+        role = _normalized_relevance_text(item.get("title"))
+        if any(_contains_relevance_term(role, term) for term in ("chief technology officer", "cto", "co-founder")):
+            if not leadership_role:
+                continue
+        if index == oldest_index and latest_current_start is not None:
+            end = _end_month(item.get("dates"))
+            company = _normalized_relevance_text(item.get("company"))
+            if (
+                end is not None
+                and end[0] < 9999
+                and latest_current_start[0] - end[0] >= 4
+                and company not in current_companies
+            ):
+                public_work = _normalized_relevance_text(
+                    " ".join([
+                        _experience_role_text(item),
+                        *(str(bullet) for bullet in item.get("bullets") or []),
+                    ])
+                )
+                overlap = {
+                    term for term in _HARD_SKILL_TERMS
+                    if _contains_relevance_term(job_text, term)
+                    and _contains_relevance_term(public_work, term)
+                }
+                if "spring boot" in overlap:
+                    overlap.discard("spring")
+                if len(overlap) < 2:
+                    continue
+        selected.append(item)
+    return selected
+
+
+def _group_company_experiences(
+    experiences: list[dict[str, Any]],
+    profile: dict[str, Any],
+    job_text: str,
+    job_title: str,
+    *,
+    preserve_variant: bool = False,
+) -> list[dict[str, Any]]:
+    """Present one employer tenure with dated work inside it.
+
+    A confirmed variant keeps its selected bullet wording. Fallback tailoring
+    can select from the candidate's reviewed client-engagement snapshot.
+    """
+    result = list(experiences)
+    for group in profile.get("employment_groups") or []:
+        if group.get("confirmation") != "candidate-reviewed":
+            continue
+        company = _normalized_relevance_text(group.get("company"))
+        matches = [item for item in result if _normalized_relevance_text(item.get("company")) == company]
+        if not matches:
+            continue
+
+        if preserve_variant:
+            engagements = _variant_grouped_engagements(matches, group)
+        else:
+            candidates = list(group.get("engagements") or [])
+            ranked = sorted(
+                enumerate(candidates),
+                key=lambda pair: (
+                    -(
+                        _relevance_score(
+                            " ".join((str(pair[1].get("name") or ""), str(pair[1].get("tech") or ""))),
+                            job_text,
+                        )
+                        + sum(sorted(
+                            (_bullet_relevance_score(str(bullet), job_text, job_title)
+                             for bullet in pair[1].get("bullets") or []),
+                            reverse=True,
+                        )[:2])
+                    ),
+                    pair[0],
+                ),
+            )[:3]
+            engagements = []
+            for _, item in ranked:
+                bullets = _ranked_distinct_bullets(
+                    [str(bullet) for bullet in item.get("bullets") or []],
+                    job_text, 3, job_title,
+                )
+                engagements.append({
+                    "name": str(item.get("name") or ""),
+                    "dates": str(item.get("dates") or ""),
+                    "bullets": bullets,
+                    "tech": _focused_tech_keywords(item.get("tech"), bullets, job_text),
+                })
+            engagements.sort(key=lambda item: _experience_chronology_key(item, 0))
+
+        grouped = {
+            "title": str(group.get("title") or matches[0].get("title") or ""),
+            "company": str(group.get("company") or matches[0].get("company") or ""),
+            "dates": str(group.get("dates") or matches[0].get("dates") or ""),
+            "location": str(group.get("location") or matches[0].get("location") or ""),
+            "progression": str(group.get("progression") or ""),
+            "engagements": engagements,
+            # The cover-letter selector reads top-level bullets. The PDF
+            # renderer shows the client sections without their dates.
+            "bullets": [bullet for item in engagements for bullet in item["bullets"]],
+        }
+        result = [item for item in result if _normalized_relevance_text(item.get("company")) != company]
+        result.append(grouped)
+    ordered = sorted(result, key=lambda item: _experience_chronology_key(item, 0))
+    maiborn_index = next(
+        (index for index, item in enumerate(ordered)
+         if _normalized_relevance_text(item.get("company")) == "maibornwolff gmbh"),
+        None,
+    )
+    cto_index = next(
+        (index for index, item in enumerate(ordered)
+         if _contains_relevance_term(_normalized_relevance_text(item.get("title")), "cto")
+         or _contains_relevance_term(_normalized_relevance_text(item.get("title")), "chief technology officer")),
+        None,
+    )
+    if maiborn_index is not None and cto_index is not None and maiborn_index > cto_index:
+        ordered.insert(cto_index, ordered.pop(maiborn_index))
+    return ordered
+
+
+def _variant_grouped_engagements(
+    matches: list[dict[str, Any]], group: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Place approved variant bullets under confirmed client dates when unambiguous."""
+    candidates = list(group.get("engagements") or [])
+    if not candidates:
+        return [
+            {
+                "name": str(item.get("subtitle") or item.get("title") or ""),
+                "dates": str(item.get("dates") or ""),
+                "bullets": list(item.get("bullets") or []),
+                "tech": str(item.get("tech") or ""),
+            }
+            for item in sorted(matches, key=lambda entry: _experience_chronology_key(entry, 0))
+        ]
+
+    selected: dict[int, dict[str, Any]] = {}
+    unmatched: list[dict[str, Any]] = []
+    for item in matches:
+        subtitle = str(item.get("subtitle") or "")
+        for bullet in item.get("bullets") or []:
+            matches_by_name = []
+            for index, candidate in enumerate(candidates):
+                aliases = [str(alias) for alias in candidate.get("aliases") or []]
+                if _contains_relevance_term(subtitle, candidate.get("name")) or any(
+                    _contains_relevance_term(subtitle, alias)
+                    or _contains_relevance_term(bullet, alias)
+                    for alias in aliases
+                ):
+                    matches_by_name.append(index)
+            target = matches_by_name[0] if len(matches_by_name) == 1 else None
+            if target is None and not matches_by_name:
+                start, end = _start_month(item.get("dates")), _end_month(item.get("dates"))
+                dated = [
+                    index for index, candidate in enumerate(candidates)
+                    if start is not None and end is not None
+                    and (client_start := _start_month(candidate.get("dates"))) is not None
+                    and (client_end := _end_month(candidate.get("dates"))) is not None
+                    and (
+                        (start <= client_start and client_end <= end)
+                        or (client_start <= start and end <= client_end)
+                    )
+                ]
+                if len(dated) == 1:
+                    target = dated[0]
+            if target is None:
+                unmatched.append({
+                    "name": subtitle or str(item.get("title") or ""),
+                    "dates": str(item.get("dates") or ""),
+                    "bullets": [bullet],
+                    "tech": str(item.get("tech") or ""),
+                })
+                continue
+            if target not in selected:
+                candidate = candidates[target]
+                selected[target] = {
+                    "name": str(candidate.get("name") or ""),
+                    "dates": str(candidate.get("dates") or ""),
+                    "bullets": [],
+                    "tech": str(candidate.get("tech") or ""),
+                }
+            selected[target]["bullets"].append(bullet)
+    engagements = list(selected.values()) + unmatched
+    engagements.sort(key=lambda item: _experience_chronology_key(item, 0))
+    return engagements
 
 
 def _title_seniority(title: Any) -> int:
@@ -1665,12 +2094,13 @@ def _ranked_evidence(
             experience_contexts[experience_id] = context
         for bullet_index, bullet in enumerate(experience.get("bullets") or []):
             text = str(bullet).strip()
-            if text in seen_text:
+            key = _bullet_duplicate_key(text)
+            if key in seen_text:
                 continue
-            seen_text.add(text)
+            seen_text.add(key)
             evidence.append(
                 (
-                    _relevance_score(bullet, job_text) + title_score + recency_score,
+                    _bullet_relevance_score(text, job_text, job_title) + title_score + recency_score,
                     experience_index,
                     bullet_index,
                     {"text": text, "context": context},
@@ -1678,9 +2108,10 @@ def _ranked_evidence(
             )
     for evidence_index, item in enumerate(usable_evidence(profile, "cover-letter")):
         text = item["public_text"]
-        if text in seen_text:
+        key = _bullet_duplicate_key(text)
+        if key in seen_text:
             continue
-        seen_text.add(text)
+        seen_text.add(key)
         experience_id = item["experience_id"]
         experience_index = experience_indexes[experience_id]
         experience = profile["experience"][experience_index]
@@ -1690,7 +2121,7 @@ def _ranked_evidence(
         recency_score = max(0, 4 - experience_index)
         evidence.append(
             (
-                _relevance_score(text, job_text) + title_score + recency_score,
+                _bullet_relevance_score(text, job_text, job_title) + title_score + recency_score,
                 experience_index,
                 len(experience.get("bullets") or []) + evidence_index,
                 {"text": text, "context": experience_contexts[experience_id]},
@@ -1700,29 +2131,78 @@ def _ranked_evidence(
         evidence.sort(key=lambda item: (item[1], item[2]))
     else:
         evidence.sort(key=lambda item: (-item[0], item[1], item[2]))
-    return [item[3] for item in evidence[:limit]]
+    if preserve_experience_order:
+        return [item[3] for item in evidence[:limit]]
+    selected: list[tuple[int, int, int, dict[str, str]]] = []
+    while evidence and len(selected) < limit:
+        used_contexts = {item[3]["context"] for item in selected}
+        best_index = max(
+            range(len(evidence)),
+            key=lambda index: (
+                evidence[index][0] - (12 if evidence[index][3]["context"] in used_contexts else 0),
+                -evidence[index][1],
+                -evidence[index][2],
+            ),
+        )
+        selected.append(evidence.pop(best_index))
+    return [item[3] for item in selected]
 
 
-def _matched_skills(profile: dict[str, Any], job_text: str, *, limit: int = 5) -> list[str]:
+def _matched_skills(profile: dict[str, Any], job_text: str, *, limit: int = 4) -> list[str]:
     values = [
         str(skill)
         for skills in (profile.get("skills") or {}).values()
         for skill in (skills if isinstance(skills, list) else [skills])
     ]
-    ranked = [value for value in _ranked_skills(values, job_text) if _skill_relevance_score(value, job_text) > 0]
+    public_work = _normalized_relevance_text(" ".join([
+        *(
+            str(bullet)
+            for item in (project_public_resume(profile).get("experience") or [])
+            for bullet in (item.get("bullets") or [])
+        ),
+        *(item["public_text"] for item in usable_evidence(profile, "cover-letter")),
+    ]))
+
+    def direct_match(value: str) -> int:
+        candidate = _normalized_relevance_text(value)
+        first_term = candidate.split(" ", 1)[0].strip("(")
+        if first_term in {"llm", "rag"} and not _contains_relevance_term(public_work, first_term):
+            return 0
+        if first_term == "ai-assisted":
+            return 2 if (
+                any(_contains_relevance_term(job_text, term) for term in (
+                    "ai-native software delivery", "ai-sdlc", "ai agents", "ai/ml", "ai applications"
+                ))
+                and any(_contains_relevance_term(public_work, term) for term in ("agentic", "agent skills", "ai-assisted"))
+            ) else 0
+        if candidate == "team management":
+            return 2 if _contains_relevance_term(job_text, "engineering manager") else 0
+        if candidate in {"architecture decisions", "production operations", "cross-functional coordination"}:
+            return int(_contains_relevance_term(job_text, candidate))
+        if first_term == "nestjs" and _contains_relevance_term(job_text, "nodejs"):
+            return len(re.findall(r"(?<![a-z0-9])nodejs(?![a-z0-9])", job_text))
+        if len(first_term) <= 2:
+            return 0
+        return len(re.findall(rf"(?<![a-z0-9]){re.escape(first_term)}(?![a-z0-9])", job_text))
+
+    ranked = sorted(
+        (value for value in values if direct_match(value)),
+        key=lambda value: (-direct_match(value), -_skill_relevance_score(value, job_text), values.index(value)),
+    )
     selected: list[str] = []
     covered_families: set[str] = set()
     for value in ranked:
         families = _skill_families(value, job_text)
         if selected and families and families <= covered_families:
             continue
-        selected.append(value)
+        selected.append(value.split(" (", 1)[0])
         covered_families.update(families)
         if len(selected) >= limit:
             return selected
     for value in ranked:
-        if value not in selected:
-            selected.append(value)
+        display = value.split(" (", 1)[0]
+        if display not in selected:
+            selected.append(display)
         if len(selected) >= limit:
             break
     return selected
@@ -1730,6 +2210,11 @@ def _matched_skills(profile: dict[str, Any], job_text: str, *, limit: int = 5) -
 
 def _role_focus(job_text: str, *, limit: int = 3) -> list[str]:
     signals = (
+        (("internal developer platform",), "internal developer platforms"),
+        (("ai-native software delivery", "ai-sdlc"), "AI-assisted software delivery"),
+        (("government clients", "government stakeholders"), "engineering delivery for government clients"),
+        (("customer communications",), "customer communications"),
+        (("engineering manager",), "engineering leadership"),
         (("server-side", "backend"), "scalable backend services"),
         (("distributed system", "message queue", "distributed storage"), "distributed systems"),
         (("backend infrastructure", "infrastructure"), "backend infrastructure"),
@@ -1737,10 +2222,13 @@ def _role_focus(job_text: str, *, limit: int = 3) -> list[str]:
         (("mysql", "nosql", "database"), "data-intensive systems"),
         (("ai / ml", "ai/ml", "machine learning"), "applied AI"),
     )
-    return [
+    selected = [
         label for terms, label in signals
         if any(_contains_relevance_term(job_text, term) for term in terms)
-    ][:limit]
+    ]
+    if _contains_relevance_term(job_text, "nodejs") and _contains_relevance_term(job_text, "typescript"):
+        selected.insert(1 if selected else 0, "TypeScript and Node.js services")
+    return selected[:limit]
 
 
 def _natural_join(values: list[str]) -> str:
@@ -1758,7 +2246,11 @@ def _cover_letter(
     preserve_experience_order: bool = False,
 ) -> dict[str, Any]:
     name = str(profile["name"])
-    contact_parts = [profile.get("email"), profile.get("phone"), profile.get("linkedin")]
+    contact_parts = [
+        profile.get("website") or profile.get("phone"),
+        profile.get("email"),
+        profile.get("linkedin"),
+    ]
     company = str(job.get("company") or "the company")
     title = str(job.get("title") or "Software Engineer")
     job_text = _job_relevance_text(job)
@@ -1769,15 +2261,14 @@ def _cover_letter(
     if skills:
         if years_match:
             opening_sentences.append(
-                f"With {years_match.group(0)} of experience, my background includes {_natural_join(skills)}."
+                f"I have {years_match.group(0)} of software engineering experience, including {_natural_join(skills)}."
             )
         else:
             opening_sentences.append(f"My background includes {_natural_join(skills)}.")
     if focus:
         opening_sentences.append(
-            f"This background is relevant to the role's focus on {_natural_join(focus)}."
+            f"The posting's focus on {_natural_join(focus)} interests me."
         )
-    team_name = title.split(",", 1)[1].strip() if "," in title else title
     now = datetime.now(timezone.utc)
     return {
         "name": name,
@@ -1793,10 +2284,6 @@ def _cover_letter(
             job_text,
             title,
             preserve_experience_order=preserve_experience_order,
-        ),
-        "motivation": (
-            f"I am particularly interested in contributing to the {team_name} team, where the role combines "
-            "system design, production delivery, and continuous technical improvement."
         ),
         "closing": (
             f"I would welcome the opportunity to discuss how my experience could contribute to {company}. "

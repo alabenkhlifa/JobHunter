@@ -124,7 +124,7 @@ Do not change confirmation or visibility flags to make a fact eligible. Ask the 
 
 ### Confirmed resume variant contract
 
-A confirmed role-family variant is a complete candidate-approved presentation, not newly inferred evidence. It may deliberately consolidate or omit master-profile experiences and sections. Identity and contact fields always come from the master profile; every other intended public section must be present in the renderer-compatible variant snapshot because unspecified master sections are not inherited. A legacy variant requires at least one matching `match_terms` phrase. A variant with `role_terms` is eligible only when the job title matches that role family; supporting `match_terms` then rank eligible variants. Architecture-titled jobs require a matching role-scoped confirmed variant and must not use generic fallback tailoring. `max_pages` must pass before `package_generated` is recorded. Preserve selected variant wording and order exactly and never expose its matching or confirmation metadata in generated documents.
+A confirmed role-family variant is a complete candidate-approved presentation, not newly inferred evidence. It may deliberately consolidate or omit master-profile experiences and sections. Identity and contact fields always come from the master profile; every other intended public section must be present in the renderer-compatible variant snapshot because unspecified master sections are not inherited. A legacy variant requires at least one matching `match_terms` phrase. A variant with `role_terms` is eligible only when the job title matches that role family; supporting `match_terms` then rank eligible variants. Architecture-titled jobs require a matching role-scoped confirmed variant and must not use generic fallback tailoring. `max_pages` must pass before `package_generated` is recorded. Preserve selected variant wording and bullet order; show MaibornWolff before the CTO role, keep other employers in reverse chronology, and apply conditional side-role rules. Never expose matching or confirmation metadata in generated documents.
 
 ## Scraping Strategy
 The scraper uses **breadth-first round-robin** across five LinkedIn region
@@ -418,31 +418,37 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
 
 4. **AI tailoring** (this is the intelligent part openclaw does):
 
-   First select a matching `candidate-confirmed` role-family variant, if one exists. Match `role_terms` against the job title as complete terms, then rank eligible variants with supporting `match_terms`. Preserve every public field, experience choice, bullet, and ordering in that variant exactly, use its selected public resume as the cover-letter evidence source, and enforce its optional `max_pages` value before recording `package_generated`. If no confirmed variant matches, use the legacy rules below, except for architecture-titled jobs: pause those until a matching role-scoped variant is confirmed.
+   First select a matching `candidate-confirmed` role-family variant, if one exists. Match `role_terms` against the job title as complete terms, then rank eligible variants with supporting `match_terms`. Preserve its confirmed wording and bullet order, apply the global chronology and optional-role rules below, use the selected public resume as the cover-letter evidence source, and enforce its optional `max_pages` value before recording `package_generated`. Before using a fixed variant, compare its included experience with newer candidate-confirmed public evidence that strongly matches the posting. If relevant evidence is missing, show the gap and propose a complete updated variant for candidate confirmation; never silently add it to the approved snapshot. If no confirmed variant matches, use the legacy rules below, except for architecture-titled jobs: pause those until a matching role-scoped variant is confirmed.
 
-   **CRITICAL: The master-profile.json contains REAL data. In legacy tailoring, every company name, job title, date range, education entry, and certification is factual and must be preserved EXACTLY. You are tailoring, NOT rewriting.**
+   For legacy tailoring, show MaibornWolff before the CTO role whenever both appear. Keep all other employers in reverse chronological order: current roles first, then ended roles by end date, with newer starts first among current roles. Rank confirmed public evidence only within each experience. Group promotions at the same employer under one employer-tenure heading when a `candidate-reviewed` `employment_groups` snapshot exists, then show relevant client engagements beneath it in newest-to-oldest order. Keep client dates distinct from employment dates in the source data, but show only the employer tenure in the PDF. Do not repeat the company logo for each promotion. Include the CTO role for leadership, management, and architecture roles; include the oldest standalone role only when its technical work directly matches the posting. Adapt the summary from confirmed strengths without customer or project names or the word "currently". Keep the profile headline unchanged. Rank skills by job relevance and keep each sidebar category compact enough to match the reviewed template; leave the full verified skills in the master profile. Keep each role's displayed `Keywords` aligned with its selected bullets or the job requirements; do not carry over unrelated keywords merely because they exist in the master profile.
+
+   **CRITICAL: The master-profile.json contains REAL data. Do not change its factual companies, roles, dates, education, or certifications. The grouped employer heading may present the complete tenure and promotion history from candidate-reviewed evidence; keep client-engagement dates separate and exact.**
 
    What you MUST keep unchanged (copy verbatim from master profile):
    - All `company` names exactly as written
-   - All `title` values exactly as written
-   - All `dates` and `location` values exactly as written
+   - All role titles and promotion facts, including those summarized beneath a grouped employer heading
+   - All employer, role, and client-engagement dates and locations; never imply that an ended client engagement is still current
    - All `education` entries exactly as written
    - All `certifications` exactly as written
    - The `name`, `email`, `phone`, `linkedin` fields exactly as written
-   - The number of experience entries (legacy tailoring keeps all of them; a confirmed variant keeps exactly the approved selection)
+   - The `website` field exactly as written when present; show only safe verified contact links in PDFs
+   - The factual wording of included work; use the candidate-reviewed engagement snapshot when presenting grouped client history
 
    What you CAN adjust (minor refinements only):
    - **Skills ordering**: reorder the skill categories so the most relevant one for this job appears first
    - **Certification presentation**: reorder candidate-confirmed certifications for role relevance. When exact candidate-confirmed verification URLs exist, preserve certification names as strings and provide renderer-safe HTTPS links through a `certification_links` mapping keyed by the exact certification name; never invent a credential URL.
-   - **Summary paragraph**: rewrite to emphasize aspects relevant to this job, but keep it grounded in the real experience from the master profile
-   - **Experience bullets**: select or minimally reword existing bullets and candidate-confirmed public evidence to emphasize relevant keywords; every core fact must remain unchanged
-   - **Experience order**: optionally reorder experience entries to lead with the most relevant one
+   - **Summary paragraph**: describe the candidate's confirmed strengths and relevant scope; do not name a customer or single project, or say "currently"
+   - **Experience bullets**: select existing bullets and candidate-confirmed public evidence to cover the posting's strongest requirements; remove repeated claims and keep every core fact unchanged
+   - **Experience order**: show MaibornWolff before CTO when both are included; otherwise sort employers from newest to oldest. Do not rank roles by keyword relevance.
+   - **Same-employer grouping**: show one company/logo heading with complete tenure and promotion history; display selected client engagements beneath it in descending date order without printing each client's dates. For a confirmed variant, retain its exact selected bullet wording and map bullets to the candidate-reviewed client dates only when the client is identifiable by an approved alias or an unambiguous date span. Keep ambiguous work under its role heading instead of guessing a client.
+   - **VERSE presentation**: show the role title as `Chief Technology Officer (CTO)` without `Co-Founder`; link the VERSE company name to the candidate-provided `https://verse.ad` URL. Carry its validated `company_url` from the public experience record into the PDF.
+   - **Experience inclusion**: include the CTO role only for roles that call for leadership or comparable responsibility; omit an old standalone role when its stack is not relevant
 
    What you MUST NOT do:
    - Do NOT invent new companies, roles, or experiences
-   - Do NOT change dates, titles, company names, or locations
+   - Do NOT change source dates, titles, company names, or locations without a candidate correction; keep employer and client dates distinct in source data while printing only the employer tenure for grouped MaibornWolff work
    - Do NOT add skills or certifications not in the master profile or its candidate-confirmed evidence
-   - Do NOT remove any experience entries or education during legacy tailoring; a confirmed variant may omit only what the candidate approved
+   - Do NOT remove relevant employment history or education; apply only the candidate's explicit optional-role rules
    - Do NOT change the person's name, contact info, or education history
 
 5. Write tailored resume JSON to a temp file using only renderer-compatible public fields. Start from the validated public projection, preserve its immutable values, and make only the adjustments above. Do not copy evidence metadata, refiner state, private notes, or application defaults into the output. Write a private `tailoring_manifest.json` beside successful package files with the tailoring mode, selected variant ID, profile digest, renderer page count, and readiness checks. Do not create package files or record `package_generated` when a readiness gate blocks generation.
@@ -469,13 +475,15 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
    python3 render_pdf.py cover <cover_letter.json> data/CoverLetter_<Candidate>_<Company>.pdf
    ```
 
-9. Send both PDFs:
+9. Review the generated package before delivery. Inspect every PDF page for clipping, broken words, orphaned headings, MaibornWolff-before-CTO order, and newest-to-oldest order for all other employers and client sections. Confirm that client dates remain in source data but do not print in the PDF. Compare its fonts, colors, spacing, rules, skill tags, compact language labels without filling bars, and sidebar layout with the candidate's reviewed two-column PDF. Keep the two columns close in height where content allows, without moving experience that fits on page one to a later page. Confirm that optional-role omissions match the job, included experience has relevant confirmed evidence, and the summary contains no customer/project name or "currently". Exclude Teaching and Interests; show Arabic Native, English C1, and French C1. Check page limits and actual PDF annotations for email, website, LinkedIn, and only certificates with a verified URL; Claude Certified Architect is currently unlinked. Review the cover letter for job-specific examples and repeated sentences. Keep fixed variant wording unchanged until the candidate approves revised wording.
+
+10. Send both PDFs:
    ```bash
    python3 scraper.py --send-doc data/Resume_<Candidate>_<Company>.pdf
    python3 scraper.py --send-doc data/CoverLetter_<Candidate>_<Company>.pdf
    ```
 
-10. Send completion message:
+11. Send completion message:
     ```bash
     python3 scraper.py --send-msg "✅ Done! Here are your tailored documents:
     📄 Resume_<Candidate>_<Company>.pdf
@@ -489,7 +497,7 @@ Hermes/JobHunter handles the intelligent tailoring and safe apply preparation; s
     Good luck! 🚀"
     ```
 
-11. Mark job as interested:
+12. Mark job as interested:
     ```bash
     python3 scraper.py --mark-interested <job_id>
     ```
@@ -583,11 +591,13 @@ cp .env.example .env  # Edit with real values
 These rules are NON-NEGOTIABLE. Violating them produces a fraudulent resume.
 - **NEVER fabricate** companies, job titles, dates, education, certifications, or skills
 - **NEVER change** company names, job titles, date ranges, locations, or education entries — copy them verbatim from master-profile.json
-- **NEVER drop** experience entries during legacy tailoring. A candidate-confirmed role-family variant may deliberately consolidate or omit entries exactly as approved by the candidate.
-- **ONLY adjust**: summary paragraph wording, skills category ordering, experience bullet emphasis/rewording, experience entry ordering
+- **INCLUDE** current and relevant employment. Show MaibornWolff before CTO when both appear, and sort other employers in reverse chronology. The CTO role is conditional on leadership scope; the oldest standalone role is conditional on direct relevance.
+- **ONLY adjust**: summary paragraph wording, skills category ordering, experience bullet emphasis, and optional-role inclusion under the candidate's rules
 - **Bullet rewording** means highlighting relevant keywords that are already truthful — NOT inventing new accomplishments
 - **Refined evidence** may be used only when it is candidate-confirmed, public, and visible to that document type
 - **NEVER expose** the evidence bank, refiner session, application defaults, or private/interview-only notes in generated application JSON or PDFs
+- **CONSIDER** all eligible confirmed public evidence before ranking bullets within each role; never reorder roles by relevance
+- **VERIFY** links in the PDF itself. Never invent a website or certification URL; use only validated public profile links
 - The tailored JSON must use the renderer-compatible public profile structure, not the private/refinement fields from master-profile.json
 - When in doubt, keep the original text unchanged
 

@@ -31,6 +31,7 @@ _RESUME_FIELDS = (
     "headline",
     "email",
     "phone",
+    "website",
     "linkedin",
     "location",
     "summary",
@@ -41,9 +42,10 @@ _RESUME_FIELDS = (
     "education",
     "additional",
 )
-_EXPERIENCE_FIELDS = ("title", "company", "subtitle", "location", "dates", "bullets", "tech")
+_EXPERIENCE_FIELDS = ("title", "company", "company_url", "subtitle", "location", "dates", "bullets", "tech")
 _EDUCATION_FIELDS = ("degree", "school", "location", "dates")
 _ADDITIONAL_FIELDS = ("teaching", "languages", "interests")
+_PUBLIC_ADDITIONAL_FIELDS = ("languages",)
 _V2_REQUIRED_EXPERIENCE_FIELDS = ("title", "company", "dates", "bullets")
 _VARIANT_RESUME_FIELDS = (
     "headline",
@@ -55,7 +57,7 @@ _VARIANT_RESUME_FIELDS = (
     "education",
     "additional",
 )
-_VARIANT_IDENTITY_FIELDS = ("name", "email", "phone", "linkedin", "location")
+_VARIANT_IDENTITY_FIELDS = ("name", "email", "phone", "website", "linkedin", "location")
 _OMITTABLE_SECTIONS = frozenset(
     {"summary", "skills", "certifications", "experience", "education", "additional"}
 )
@@ -109,7 +111,7 @@ def _is_https_url(value: Any) -> bool:
     try:
         parsed = urlsplit(value)
         hostname = parsed.hostname
-        if parsed.scheme != "https" or not hostname:
+        if parsed.scheme != "https" or not hostname or parsed.username or parsed.password:
             return False
         # Accessing port also rejects non-numeric and out-of-range values.
         if parsed.port == 0:
@@ -183,6 +185,8 @@ def _validate_variant_resume(resume: Any, *, index: int) -> None:
             for field in ("company", "subtitle", "location", "dates", "tech"):
                 if field in experience and not isinstance(experience[field], str):
                     raise ProfileValidationError(f"{item_path}.{field} must be a string")
+            if "company_url" in experience and not _is_https_url(experience["company_url"]):
+                raise ProfileValidationError(f"{item_path}.company_url must be an HTTPS URL")
             if "bullets" in experience:
                 _validate_string_list(experience["bullets"], f"{item_path}.bullets")
 
@@ -293,6 +297,8 @@ def validate_profile(profile: Any) -> None:
         raise ProfileValidationError("Candidate profile must be a JSON object")
     if not isinstance(profile.get("name"), str) or not profile["name"].strip():
         raise ProfileValidationError("Candidate profile is missing the required name field")
+    if "website" in profile and not _is_https_url(profile["website"]):
+        raise ProfileValidationError("Candidate profile website must be an HTTPS URL")
     if "certifications" in profile:
         _validate_string_list(profile["certifications"], "certifications")
     if "certification_links" in profile:
@@ -308,6 +314,8 @@ def validate_profile(profile: Any) -> None:
     for index, experience in enumerate(experiences):
         if not isinstance(experience, dict):
             raise ProfileValidationError(f"experience[{index}] must be an object")
+        if "company_url" in experience and not _is_https_url(experience["company_url"]):
+            raise ProfileValidationError(f"experience[{index}].company_url must be an HTTPS URL")
 
     _validate_resume_variants(profile)
 
@@ -402,7 +410,7 @@ def project_public_resume(profile: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict)
         ]
     if isinstance(projection.get("additional"), dict):
-        projection["additional"] = _copy_selected(profile["additional"], _ADDITIONAL_FIELDS)
+        projection["additional"] = _copy_selected(profile["additional"], _PUBLIC_ADDITIONAL_FIELDS)
     return projection
 
 
@@ -418,7 +426,7 @@ def _sanitized_variant_resume(resume: dict[str, Any]) -> dict[str, Any]:
             _copy_selected(item, _EDUCATION_FIELDS) for item in resume["education"]
         ]
     if "additional" in sanitized:
-        sanitized["additional"] = _copy_selected(resume["additional"], _ADDITIONAL_FIELDS)
+        sanitized["additional"] = _copy_selected(resume["additional"], _PUBLIC_ADDITIONAL_FIELDS)
     return sanitized
 
 

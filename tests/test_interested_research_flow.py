@@ -1339,7 +1339,7 @@ def test_resume_tailoring_only_selects_and_reorders_profile_evidence():
     assert resume["experience"][0]["tech"] == profile["experience"][0]["tech"]
 
 
-def test_resume_tailoring_ranks_complete_experiences_before_allocating_bullets():
+def test_resume_tailoring_keeps_current_experience_before_ended_experience():
     profile = {
         "name": "Candidate",
         "headline": "Software Architect",
@@ -1378,8 +1378,8 @@ def test_resume_tailoring_ranks_complete_experiences_before_allocating_bullets()
 
     resume = flow._tailor_resume(profile, job)
 
-    assert [item["company"] for item in resume["experience"]] == ["Consultancy", "Side Venture"]
-    assert resume["experience"][0]["dates"] == "2024 - 2026"
+    assert [item["company"] for item in resume["experience"]] == ["Side Venture", "Consultancy"]
+    assert resume["experience"][0]["dates"] == "2025 - Present"
     assert len(resume["experience"]) == len(profile["experience"])
 
 
@@ -1420,6 +1420,504 @@ def test_resume_tailoring_ignores_non_public_engagement_metadata_for_ordering():
         "Second Company",
     ]
     assert "engagements" not in json.dumps(resume)
+
+
+def test_backend_tailoring_keeps_current_lead_first_and_omits_unneeded_cto():
+    profile = {
+        "name": "Candidate",
+        "headline": "Software Architect | Tech Lead",
+        "summary": (
+            "Software engineer with 7+ years of experience. "
+            "CTO and team leader for an advertising platform. "
+            "Full-stack engineer on an industrial monitoring platform. "
+            "Previously led cloud migration for a client."
+        ),
+        "experience": [
+            {
+                "id": "exp-cto", "title": "Chief Technology Officer", "company": "Venture",
+                "dates": "October 2025 - Present", "bullets": ["Owned product planning."],
+            },
+            {
+                "id": "exp-lead", "title": "Lead Software Engineer", "company": "Consultancy",
+                "dates": "October 2024 - Present",
+                "bullets": ["Worked on Azure API Management for a client."],
+                "engagements": [{"summary": "PRIVATE_ENGAGEMENT_NOT_FOR_RESUME"}],
+            },
+            {
+                "id": "exp-senior", "title": "Senior Software Engineer", "company": "Consultancy",
+                "dates": "October 2022 - October 2024",
+                "bullets": ["Built Java microservices for a client."],
+            },
+        ],
+        "evidence_bank": [
+            {
+                "id": "ev-api", "experience_id": "exp-lead",
+                "public_text": "Built a NestJS backend for mobile and web applications.",
+                "confirmation": "candidate-confirmed", "confidentiality": "public",
+                "visibility": ["resume", "cover-letter"],
+            },
+            {
+                "id": "ev-react", "experience_id": "exp-lead",
+                "public_text": "Delivered authorization features across NestJS, React, and shared Zod contracts.",
+                "confirmation": "candidate-confirmed", "confidentiality": "public",
+                "visibility": ["resume", "cover-letter"],
+            },
+            {
+                "id": "ev-aws", "experience_id": "exp-lead",
+                "public_text": "Deployed development and production environments on AWS with PostgreSQL.",
+                "confirmation": "candidate-confirmed", "confidentiality": "public",
+                "visibility": ["resume", "cover-letter"],
+            },
+            {
+                "id": "ev-private", "experience_id": "exp-lead",
+                "public_text": "PRIVATE_EVIDENCE_NOT_FOR_RESUME",
+                "confirmation": "candidate-confirmed", "confidentiality": "private",
+                "visibility": ["resume", "cover-letter"],
+            },
+            {
+                "id": "ev-unconfirmed", "experience_id": "exp-lead",
+                "public_text": "UNCONFIRMED_MODEL_DELIVERY",
+                "confirmation": "unconfirmed", "confidentiality": "public",
+                "visibility": ["resume", "cover-letter"],
+            },
+        ],
+    }
+    job = {
+        "title": "Senior Backend Engineer",
+        "company": "TargetCo",
+        "description": "Build and operate NodeJS and TypeScript services on AWS; React experience is useful.",
+    }
+
+    resume = flow._tailor_resume(profile, job)
+    lead = resume["experience"][0]
+
+    assert lead["title"] == "Lead Software Engineer"
+    assert lead["company"] == "Consultancy"
+    assert lead["dates"] == "October 2024 - Present"
+    assert set(lead["bullets"][:3]) == {
+        "Delivered authorization features across NestJS, React, and shared Zod contracts.",
+        "Deployed development and production environments on AWS with PostgreSQL.",
+        "Built a NestJS backend for mobile and web applications.",
+    }
+    assert resume["headline"] == profile["headline"]
+    assert [item["title"] for item in resume["experience"]] == [
+        "Lead Software Engineer", "Senior Software Engineer"
+    ]
+    assert {item["dates"] for item in resume["experience"]} == {
+        "October 2024 - Present", "October 2022 - October 2024"
+    }
+    serialized = json.dumps(resume)
+    cover_serialized = json.dumps(flow._cover_letter(profile, job))
+    assert "PRIVATE_" not in serialized
+    assert "UNCONFIRMED_" not in serialized
+    assert "engagements" not in serialized
+    assert "PRIVATE_" not in cover_serialized
+    assert "UNCONFIRMED_" not in cover_serialized
+
+
+def test_optional_older_role_needs_direct_stack_match_and_current_roles_stay_chronological():
+    profile = {
+        "name": "Candidate",
+        "experience": [
+            {"title": "Software Engineer", "company": "Older Employer",
+             "dates": "February 2019 - September 2020",
+             "bullets": ["Built Java and Spring Boot services with RabbitMQ."],
+             "tech": "Java | Spring Boot | RabbitMQ"},
+            {"title": "Senior Software Engineer", "company": "Consultancy",
+             "dates": "October 2022 - October 2024", "bullets": ["Built backend services."]},
+            {"title": "Lead Software Engineer", "company": "Consultancy",
+             "dates": "October 2024 - Present", "bullets": ["Built AWS and NestJS services."]},
+            {"title": "Chief Technology Officer", "company": "Side Venture",
+             "dates": "October 2025 - Present", "bullets": ["Led product delivery."]},
+        ],
+    }
+
+    manager = flow._tailor_resume(profile, {
+        "title": "Engineering Manager", "description": "Lead delivery teams using AWS."
+    })
+    java_backend = flow._tailor_resume(profile, {
+        "title": "Senior Backend Engineer",
+        "description": "Build Java and Spring Boot services with RabbitMQ.",
+    })
+
+    assert [item["company"] for item in manager["experience"]] == [
+        "Side Venture", "Consultancy", "Consultancy"
+    ]
+    assert [item["company"] for item in java_backend["experience"]] == [
+        "Consultancy", "Consultancy", "Older Employer"
+    ]
+
+
+def test_backend_summary_uses_personal_strengths_when_posting_requests_mentorship():
+    profile = {
+        "name": "Candidate",
+        "summary": (
+            "Backend engineering leader with 8 years in software engineering. "
+            "Managed a team of four engineers while remaining hands-on with microservices. "
+            "Built production services on AWS using TypeScript, PostgreSQL, and Kubernetes. "
+            "Delivered full-stack features with React."
+        ),
+        "experience": [{"title": "Lead Software Engineer", "company": "Example",
+                        "dates": "2024 - Present", "bullets": ["Built backend services."]}],
+    }
+    job = {
+        "title": "Senior Backend Engineer",
+        "description": "Build TypeScript services on AWS, mentor engineers, and own production reliability.",
+    }
+
+    summary = flow._tailor_resume(profile, job)["summary"]
+
+    assert summary.startswith("Backend engineering leader with 8 years")
+    assert "Managed a team of four" in summary
+    assert "Built production services on AWS" in summary
+    assert "Delivered full-stack features" not in summary
+
+
+def test_confirmed_variant_experiences_still_follow_candidate_chronology_rule():
+    profile = {
+        "name": "Candidate",
+        "experience": [],
+        "resume_variants": [{
+            "id": "platform-variant",
+            "confirmation": "candidate-confirmed",
+            "role_terms": ["platform architect"],
+            "match_terms": ["developer platform"],
+            "resume": {"experience": [
+                {"title": "Senior Software Engineer", "company": "Example",
+                 "dates": "2022 - 2024", "bullets": ["Built services."]},
+                {"title": "Lead Software Engineer", "company": "Example",
+                 "dates": "2024 - Present", "bullets": ["Led delivery."]},
+            ]},
+        }],
+    }
+
+    resume, selected = flow._resume_for_job(profile, {
+        "title": "Platform Architect", "description": "Build a developer platform."
+    })
+
+    assert selected["id"] == "platform-variant"
+    assert [item["title"] for item in resume["experience"]] == [
+        "Lead Software Engineer", "Senior Software Engineer"
+    ]
+
+
+def test_manager_and_backend_fallbacks_use_distinct_confirmed_evidence():
+    profile = {
+        "name": "Candidate",
+        "headline": "Software Architect | Tech Lead",
+        "summary": (
+            "Software engineer with 7+ years of experience. "
+            "CTO and team leader for an advertising platform. "
+            "Full-stack engineer on an industrial monitoring platform. "
+            "Previously led cloud migration and engineering teams."
+        ),
+        "skills": {"Backend": ["TypeScript", "AWS", "LLM integration", "Team management"]},
+        "experience": [
+            {
+                "id": "exp-cto", "title": "Chief Technology Officer", "company": "Venture",
+                "dates": "2025 - Present", "bullets": ["Owned architecture for enterprise clients."],
+            },
+            {
+                "id": "exp-lead", "title": "Lead Software Engineer", "company": "Consultancy",
+                "dates": "2024 - Present", "bullets": ["Built a NestJS backend for mobile applications."],
+            },
+            {
+                "id": "exp-senior", "title": "Senior Software Engineer", "company": "Consultancy",
+                "dates": "2022 - 2024",
+                "bullets": [
+                    "Managed a team of 4 engineers delivering a client platform.",
+                    "Coordinated a team of four engineers while delivering the client platform.",
+                    "Mentored engineers on deployment practices.",
+                ],
+            },
+        ],
+        "evidence_bank": [
+            {
+                "id": "ev-workflow", "experience_id": "exp-lead",
+                "public_text": "Designed the team's spec workflow with CI checks and agent skills.",
+                "confirmation": "candidate-confirmed", "confidentiality": "public",
+                "visibility": ["resume", "cover-letter"],
+            },
+            {
+                "id": "ev-fullstack", "experience_id": "exp-lead",
+                "public_text": "Delivered authorization features across NestJS, React, and Zod.",
+                "confirmation": "candidate-confirmed", "confidentiality": "public",
+                "visibility": ["resume", "cover-letter"],
+            },
+        ],
+    }
+    manager_job = {
+        "title": "Engineering Manager", "company": "PublicAI",
+        "description": "Lead engineers delivering full stack AI applications to government clients and mentor the team. "
+                       "Production machine learning model training is required.",
+    }
+    backend_job = {
+        "title": "Senior Backend Engineer", "company": "CallCo",
+        "description": "Build NodeJS and TypeScript backend services on AWS with React integrations.",
+    }
+
+    manager = flow._tailor_resume(profile, manager_job)
+    backend = flow._tailor_resume(profile, backend_job)
+    manager_bullets = [bullet for item in manager["experience"] for bullet in item["bullets"]]
+    manager_letter = flow._cover_letter(profile, manager_job)
+    backend_letter = flow._cover_letter(profile, backend_job)
+
+    assert manager["summary"] != backend["summary"]
+    assert "CTO and team leader" in manager["summary"]
+    assert "Full-stack engineer" in backend["summary"]
+    assert any("spec workflow" in bullet for bullet in manager_bullets)
+    assert any("NestJS, React" in bullet for bullet in manager_bullets)
+    assert sum("team of 4 engineers" in bullet or "team of four engineers" in bullet for bullet in manager_bullets) == 1
+    assert "government clients" in manager_letter["opening"]
+    assert "TypeScript and Node.js services" in backend_letter["opening"]
+    assert "production machine learning" not in manager_letter["opening"].lower()
+    assert "LLM integration" not in manager_letter["opening"]
+    assert "Azure" not in backend_letter["opening"]
+
+
+def test_role_skills_and_communications_reliability_evidence_lead_backend_resume():
+    webhook_fix = (
+        "Eliminated duplicate customer notifications caused by third-party webhook retries "
+        "by acknowledging requests and processing them asynchronously."
+    )
+    profile = {
+        "name": "Candidate",
+        "summary": "Backend engineer operating production services.",
+        "skills": {
+            "Data & Languages": ["TypeScript", "PostgreSQL"],
+            "Leadership": ["Mentoring"],
+            "Backend & Architecture": ["Spring Boot", "NestJS", "REST APIs"],
+            "Cloud": ["Azure", "AWS"],
+        },
+        "experience": [
+            {
+                "title": "Lead Software Engineer", "company": "Example", "dates": "2024 - Present",
+                "bullets": ["Built production NestJS services on AWS."],
+                "tech": ".NET/C# · Cosmos DB · AWS · NestJS",
+            },
+            {
+                "title": "Senior Software Engineer", "company": "Example", "dates": "2022 - 2024",
+                "bullets": [
+                    "Managed a team of engineers.",
+                    "Improved CI/CD workflows for releases.",
+                    "Built Java services on AWS.",
+                    "Migrated Spring Boot services.",
+                    webhook_fix,
+                ],
+            },
+        ],
+    }
+    job = {
+        "title": "Senior Backend Engineer, Customer Communications Platform",
+        "company": "CallCo",
+        "description": "Build TypeScript and Node.js services on AWS with high availability for customer communications.",
+    }
+
+    resume = flow._tailor_resume(profile, job)
+    senior = next(item for item in resume["experience"] if item["title"] == "Senior Software Engineer")
+
+    assert next(iter(resume["skills"])) == "Backend & Architecture"
+    assert resume["skills"]["Backend & Architecture"][0] == "NestJS"
+    assert resume["skills"]["Data & Languages"][0] == "TypeScript"
+    assert resume["skills"]["Cloud"][0] == "AWS"
+    assert resume["experience"][0]["tech"] == "AWS · NestJS"
+    assert webhook_fix in senior["bullets"]
+    letter = flow._cover_letter(profile, job)
+    assert webhook_fix in [item["text"] for item in letter["highlights"]]
+
+
+def test_same_employer_roles_group_under_one_tenure_with_dated_engagements():
+    experiences = [
+        {"title": "Chief Technology Officer", "company": "SideCo", "dates": "October 2025 - Present",
+         "bullets": ["Led engineering."]},
+        {"title": "Lead Software Engineer", "company": "Example GmbH", "dates": "October 2024 - Present",
+         "bullets": ["Built NestJS services on AWS."]},
+        {"title": "Senior Software Engineer", "company": "Example GmbH",
+         "dates": "October 2022 - October 2024", "bullets": ["Built Java microservices."]},
+    ]
+    profile = {"employment_groups": [{
+        "company": "Example GmbH", "confirmation": "candidate-reviewed",
+        "title": "Lead Software Engineer",
+        "dates": "October 2020 - Present", "progression": "Promoted twice.",
+        "engagements": [
+            {"name": "Older client", "dates": "October 2020 - October 2024",
+             "bullets": ["Built Java microservices."], "tech": "Java"},
+            {"name": "New client", "dates": "August 2026 - Present",
+             "bullets": ["Built NestJS services on AWS."], "tech": "NestJS, AWS"},
+        ],
+    }]}
+    job_text = flow._normalized_relevance_text("Backend engineer using NestJS, AWS and Java microservices")
+
+    grouped = flow._group_company_experiences(experiences, profile, job_text, "Backend Engineer")
+
+    assert [item["company"] for item in grouped] == ["SideCo", "Example GmbH"]
+    employer = grouped[1]
+    assert employer["dates"] == "October 2020 - Present"
+    assert employer["progression"] == "Promoted twice."
+    assert [item["name"] for item in employer["engagements"]] == ["New client", "Older client"]
+    assert employer["bullets"] == ["Built NestJS services on AWS.", "Built Java microservices."]
+
+
+def test_maibornwolff_is_presented_before_newer_cto_role():
+    experiences = [
+        {"title": "Chief Technology Officer", "company": "VERSE",
+         "dates": "October 2025 - Present", "bullets": ["Led engineering."]},
+        {"title": "Lead Software Engineer", "company": "MaibornWolff GmbH",
+         "dates": "October 2024 - Present", "bullets": ["Built services."]},
+        {"title": "Senior Software Engineer", "company": "MaibornWolff GmbH",
+         "dates": "October 2022 - October 2024", "bullets": ["Built microservices."]},
+    ]
+    profile = {"employment_groups": [{
+        "company": "MaibornWolff GmbH", "confirmation": "candidate-reviewed",
+        "title": "Lead Software Engineer", "dates": "October 2020 - Present",
+        "engagements": [{"name": "Client", "dates": "August 2026 - Present",
+                         "bullets": ["Built services."]}],
+    }]}
+
+    grouped = flow._group_company_experiences(
+        experiences, profile, "backend architecture", "Platform Architect",
+    )
+
+    assert [item["company"] for item in grouped] == ["MaibornWolff GmbH", "VERSE"]
+    assert grouped[0]["dates"] == "October 2020 - Present"
+    assert grouped[0]["engagements"][0]["dates"] == "August 2026 - Present"
+
+
+def test_single_confirmed_client_role_uses_full_maibornwolff_tenure():
+    experiences = [{
+        "title": "Senior Software Engineer", "company": "MaibornWolff GmbH",
+        "subtitle": "Rolls-Royce Whispers", "dates": "October 2020 - October 2024",
+        "bullets": ["Built the Whispers backend."],
+    }]
+    profile = {"employment_groups": [{
+        "company": "MaibornWolff GmbH", "confirmation": "candidate-reviewed",
+        "title": "Lead Software Engineer", "dates": "October 2020 - Present",
+        "engagements": [{
+            "name": "Rolls-Royce Whispers", "dates": "October 2020 - October 2024",
+            "aliases": ["Whispers"], "bullets": ["Built the Whispers backend."],
+        }],
+    }]}
+
+    grouped = flow._group_company_experiences(
+        experiences, profile, "backend", "Senior Backend Engineer",
+        preserve_variant=True,
+    )
+
+    assert grouped[0]["dates"] == "October 2020 - Present"
+    assert grouped[0]["engagements"][0]["name"] == "Rolls-Royce Whispers"
+    assert grouped[0]["engagements"][0]["dates"] == "October 2020 - October 2024"
+
+
+def test_grouped_confirmed_variant_keeps_approved_bullet_wording():
+    experiences = [
+        {"title": "Lead Software Engineer", "company": "Example GmbH",
+         "dates": "October 2024 - Present", "bullets": ["Exact approved lead wording."]},
+        {"title": "Senior Software Engineer", "company": "Example GmbH",
+         "dates": "October 2022 - October 2024", "bullets": ["Exact approved senior wording."]},
+    ]
+    profile = {"employment_groups": [{"company": "Example GmbH", "confirmation": "candidate-reviewed",
+                                     "title": "Lead Software Engineer",
+                                     "dates": "October 2020 - Present", "engagements": []}]}
+
+    grouped = flow._group_company_experiences(
+        experiences, profile, "", "Platform Architect", preserve_variant=True,
+    )
+
+    assert [child["name"] for child in grouped[0]["engagements"]] == [
+        "Lead Software Engineer", "Senior Software Engineer",
+    ]
+    assert grouped[0]["bullets"] == ["Exact approved lead wording.", "Exact approved senior wording."]
+
+
+def test_grouped_confirmed_variant_uses_client_dates_for_identifiable_work():
+    experiences = [
+        {"title": "Lead Software Engineer", "company": "Example GmbH",
+         "dates": "October 2024 - Present",
+         "bullets": ["Supported PlaTo migration.", "Contributed to Husky systems."]},
+        {"title": "Senior Software Engineer", "company": "Example GmbH",
+         "dates": "October 2022 - October 2024",
+         "bullets": ["Owned ten Spring Boot microservices."]},
+    ]
+    profile = {"employment_groups": [{
+        "company": "Example GmbH", "confirmation": "candidate-reviewed",
+        "title": "Lead Software Engineer", "dates": "October 2020 - Present",
+        "engagements": [
+            {"name": "Rolls-Royce Whispers", "dates": "October 2020 - October 2024",
+             "aliases": ["Rolls-Royce", "Whispers"], "tech": "Spring Boot"},
+            {"name": "Husky", "dates": "March 2025 - July 2025",
+             "aliases": ["Husky"], "tech": "Azure"},
+            {"name": "PlaTo / MO360", "dates": "October 2025 - December 2025",
+             "aliases": ["PlaTo", "MO360"], "tech": "Azure"},
+        ],
+    }]}
+
+    grouped = flow._group_company_experiences(
+        experiences, profile, "platform architecture", "Platform Architect",
+        preserve_variant=True,
+    )
+
+    engagements = grouped[0]["engagements"]
+    assert [item["name"] for item in engagements] == [
+        "PlaTo / MO360", "Husky", "Rolls-Royce Whispers",
+    ]
+    assert [item["bullets"] for item in engagements] == [
+        ["Supported PlaTo migration."],
+        ["Contributed to Husky systems."],
+        ["Owned ten Spring Boot microservices."],
+    ]
+
+
+def test_unconfirmed_employer_group_is_not_rendered_as_public_history():
+    experiences = [
+        {"title": "Lead Engineer", "company": "Example GmbH", "dates": "2024 - Present"},
+        {"title": "Engineer", "company": "Example GmbH", "dates": "2020 - 2024"},
+    ]
+    profile = {"employment_groups": [{
+        "company": "Example GmbH", "dates": "2020 - Present",
+        "engagements": [{"name": "Unconfirmed client", "dates": "2024 - Present"}],
+    }]}
+
+    assert flow._group_company_experiences(experiences, profile, "", "Engineer") == experiences
+
+
+def test_resume_bullet_ranking_prefers_distinct_confirmed_work_when_scores_are_close():
+    deployment = "Deployed separate development and production services on AWS with PostgreSQL and Docker."
+    feature = "Delivered authorization and history features across NestJS, React, and TypeScript."
+    repeated = "Designed architecture using AWS, NestJS, and Terraform."
+    workflow = "Designed an OpenSpec workflow with Python validators, Git hooks, and CI checks."
+    bullets = [
+        deployment,
+        "Built a NestJS backend for a mobile application.",
+        feature,
+        repeated,
+        workflow,
+    ]
+    job_text = flow._normalized_relevance_text(
+        "Senior Backend Engineer building NodeJS TypeScript services on AWS with PostgreSQL "
+        "and React integrations, CI delivery workflows, reliability, Python validators, "
+        "and Git hooks for workflow checks"
+    )
+
+    selected = flow._ranked_distinct_bullets(bullets, job_text, 3, "Senior Backend Engineer")
+
+    assert selected == [deployment, feature, workflow]
+    assert repeated not in selected
+
+
+def test_cover_uses_approved_website_contact_without_repeated_discussion_paragraph():
+    profile = {
+        "name": "Candidate",
+        "website": "https://candidate.example/",
+        "email": "candidate@example.com",
+        "phone": "+216 12 345 678",
+        "linkedin": "linkedin.com/in/candidate",
+        "experience": [],
+    }
+    letter = flow._cover_letter(profile, sample_job())
+
+    assert letter["contact"] == "https://candidate.example/ | candidate@example.com | linkedin.com/in/candidate"
+    assert "motivation" not in letter
+    assert letter["closing"].count("discuss") == 1
 
 
 def test_aiqu_architect_package_blocks_legacy_fallback_without_advancing_stage(tmp_path):
@@ -1645,7 +2143,7 @@ def test_confirmed_variant_cover_letter_preserves_approved_experience_order():
     assert all("Software Architect" in item["context"] for item in letter["highlights"])
 
 
-def test_pdf_renderers_keep_cover_to_one_page_and_prevent_orphaned_blocks(tmp_path):
+def test_cover_renderer_keeps_short_letter_to_one_page(tmp_path):
     cover = pdf_renderer.CoverLetterPDF(
         {
             "name": "Candidate",
@@ -1672,12 +2170,6 @@ def test_pdf_renderers_keep_cover_to_one_page_and_prevent_orphaned_blocks(tmp_pa
 
     assert len(cover.pages) == 1
     assert cover_path.stat().st_size > 1000
-
-    resume = pdf_renderer.ResumePDF({"name": "Candidate"})
-    resume.add_page()
-    resume.set_y(resume.h - resume.b_margin - 5)
-    resume.ensure_space(20)
-    assert resume.page_no() == 2
 
 
 def test_application_package_defaults_are_project_anchored():

@@ -2,8 +2,10 @@
 """PDF renderer for tailored resumes and cover letters using fpdf2."""
 
 import json
+import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fpdf import FPDF
 
@@ -41,226 +43,13 @@ def _sanitize(text):
 # ── Resume PDF ────────────────────────────────────────────────────────────────
 
 class SanitizedPDF(FPDF):
-    """FPDF subclass that sanitizes Unicode text for latin-1 core fonts."""
+    """Keep legacy cover-letter core fonts safe for common punctuation."""
+
     def normalize_text(self, text):
         return super().normalize_text(_sanitize(text))
 
 
-class ResumePDF(SanitizedPDF):
-    def __init__(self, profile):
-        super().__init__()
-        self.profile = profile
-        self.set_auto_page_break(auto=True, margin=15)
-
-    def header(self):
-        pass  # We render the header manually on the first page
-
-    def footer(self):
-        self.set_y(-10)
-        self.set_font("Helvetica", "I", 7)
-        self.set_text_color(*LIGHT_GRAY)
-        self.cell(0, 5, f"Page {self.page_no()}/{{nb}}", align="C")
-
-    def section_header(self, title):
-        self.ensure_space(16)
-        self.set_font("Helvetica", "B", 11)
-        self.set_text_color(*DARK)
-        self.cell(0, 7, title.upper(), new_x="LMARGIN", new_y="NEXT")
-        self.set_draw_color(*DARK)
-        self.set_line_width(0.5)
-        self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
-        self.ln(3)
-
-    def ensure_space(self, height):
-        if self.get_y() + height > self.h - self.b_margin:
-            self.add_page()
-
-    def bullet(self, text):
-        self.set_font("Helvetica", "", 9)
-        self.set_text_color(*TEXT)
-        x = self.get_x()
-        self.cell(5, 4.5, "-", new_x="END")
-        self.multi_cell(
-            self.w - self.r_margin - x - 6,
-            4.5,
-            f" {text}",
-            new_x="LMARGIN",
-            new_y="NEXT",
-            align="L",
-        )
-
-    def render(self):
-        p = self.profile
-        self.alias_nb_pages()
-        self.add_page()
-        self.set_margins(15, 10, 15)
-
-        # ── Name & headline ──
-        self.set_font("Helvetica", "B", 20)
-        self.set_text_color(*DARK)
-        self.cell(0, 10, p["name"], new_x="LMARGIN", new_y="NEXT", align="C")
-
-        self.set_font("Helvetica", "", 10)
-        self.set_text_color(*MEDIUM)
-        self.cell(0, 5, p.get("headline", ""), new_x="LMARGIN", new_y="NEXT", align="C")
-
-        # ── Contact row ──
-        contact_parts = []
-        if p.get("email"):
-            contact_parts.append(p["email"])
-        if p.get("phone"):
-            contact_parts.append(p["phone"])
-        if p.get("linkedin"):
-            contact_parts.append(p["linkedin"])
-        if p.get("location"):
-            contact_parts.append(p["location"])
-
-        self.set_font("Helvetica", "", 8)
-        self.set_text_color(*ACCENT)
-        self.cell(0, 5, "  |  ".join(contact_parts), new_x="LMARGIN", new_y="NEXT", align="C")
-        self.ln(5)
-
-        # ── Summary ──
-        if p.get("summary"):
-            self.section_header("Professional Summary")
-            self.set_font("Helvetica", "", 9)
-            self.set_text_color(*TEXT)
-            self.multi_cell(0, 4.5, p["summary"], new_x="LMARGIN", new_y="NEXT", align="L")
-            self.ln(3)
-
-        # ── Skills ──
-        if p.get("skills"):
-            self.section_header("Technical Skills")
-            for category, skills in p["skills"].items():
-                self.set_font("Helvetica", "B", 9)
-                self.set_text_color(*MEDIUM)
-                skill_text = ", ".join(skills) if isinstance(skills, list) else skills
-                self.set_font("Helvetica", "B", 9)
-                cat_width = self.get_string_width(f"{category}: ") + 2
-                self.cell(cat_width, 4.5, f"{category}: ", new_x="END")
-                self.set_font("Helvetica", "", 9)
-                self.set_text_color(*TEXT)
-                self.multi_cell(
-                    self.w - self.r_margin - self.get_x(),
-                    4.5,
-                    skill_text,
-                    new_x="LMARGIN",
-                    new_y="NEXT",
-                    align="L",
-                )
-            self.ln(2)
-
-        # ── Certifications ──
-        if p.get("certifications"):
-            self.section_header("Certifications")
-            self.set_font("Helvetica", "", 9)
-            certification_links = p.get("certification_links", {})
-            for index, certification in enumerate(p["certifications"]):
-                if index:
-                    self.set_text_color(*TEXT)
-                    self.write(4.5, "  |  ")
-                link = certification_links.get(certification)
-                self.set_text_color(*(ACCENT if link else TEXT))
-                self.write(4.5, certification, link=link or "")
-            self.ln(4.5)
-            self.ln(3)
-
-        # ── Experience ──
-        if p.get("experience"):
-            self.section_header("Professional Experience")
-            for i, exp in enumerate(p["experience"]):
-                self.ensure_space(min(66, 30 + (len(exp.get("bullets", [])) * 8)))
-                # Title + Company on same line
-                self.set_font("Helvetica", "B", 10)
-                self.set_text_color(*DARK)
-                title_text = exp["title"]
-                self.cell(0, 5, title_text, new_x="LMARGIN", new_y="NEXT")
-
-                # Company + subtitle + location + dates
-                self.set_font("Helvetica", "I", 9)
-                self.set_text_color(*MEDIUM)
-                company_line = exp.get("company", "")
-                if exp.get("subtitle"):
-                    company_line += f" — {exp['subtitle']}"
-                right_text = exp.get("dates", "")
-                # Company on left, dates on right
-                self.cell(0, 4.5, company_line)
-                self.set_x(self.l_margin)
-                self.cell(0, 4.5, right_text, new_x="LMARGIN", new_y="NEXT", align="R")
-
-                if exp.get("location"):
-                    self.set_font("Helvetica", "", 8)
-                    self.set_text_color(*LIGHT_GRAY)
-                    self.cell(0, 4, exp["location"], new_x="LMARGIN", new_y="NEXT")
-
-                self.ln(1)
-
-                # Bullets
-                for b in exp.get("bullets", []):
-                    self.bullet(b)
-
-                # Tech line
-                if exp.get("tech"):
-                    self.set_font("Helvetica", "I", 8)
-                    self.set_text_color(*ACCENT)
-                    self.multi_cell(
-                        0,
-                        4,
-                        f"Tech: {exp['tech']}",
-                        new_x="LMARGIN",
-                        new_y="NEXT",
-                        align="L",
-                    )
-
-                if i < len(p["experience"]) - 1:
-                    self.ln(3)
-
-            self.ln(2)
-
-        # ── Education ──
-        if p.get("education"):
-            self.section_header("Education")
-            for edu in p["education"]:
-                self.set_font("Helvetica", "B", 9)
-                self.set_text_color(*DARK)
-                self.cell(0, 5, edu.get("degree", ""))
-                self.set_x(self.l_margin)
-                self.set_font("Helvetica", "", 9)
-                self.set_text_color(*MEDIUM)
-                self.cell(0, 5, edu.get("dates", ""), new_x="LMARGIN", new_y="NEXT", align="R")
-                self.set_font("Helvetica", "I", 9)
-                self.set_text_color(*TEXT)
-                school_line = edu.get("school", "")
-                if edu.get("location"):
-                    school_line += f", {edu['location']}"
-                self.cell(0, 4.5, school_line, new_x="LMARGIN", new_y="NEXT")
-            self.ln(3)
-
-        # ── Additional ──
-        if p.get("additional"):
-            self.section_header("Additional")
-            add = p["additional"]
-            if add.get("teaching"):
-                self.set_font("Helvetica", "B", 9)
-                self.set_text_color(*MEDIUM)
-                self.cell(self.get_string_width("Teaching: ") + 2, 4.5, "Teaching: ", new_x="END")
-                self.set_font("Helvetica", "", 9)
-                self.set_text_color(*TEXT)
-                self.multi_cell(0, 4.5, add["teaching"], new_x="LMARGIN", new_y="NEXT", align="L")
-            if add.get("languages"):
-                self.set_font("Helvetica", "B", 9)
-                self.set_text_color(*MEDIUM)
-                self.cell(self.get_string_width("Languages: ") + 2, 4.5, "Languages: ", new_x="END")
-                self.set_font("Helvetica", "", 9)
-                self.set_text_color(*TEXT)
-                self.multi_cell(0, 4.5, add["languages"], new_x="LMARGIN", new_y="NEXT", align="L")
-            if add.get("interests"):
-                self.set_font("Helvetica", "B", 9)
-                self.set_text_color(*MEDIUM)
-                self.cell(self.get_string_width("Interests: ") + 2, 4.5, "Interests: ", new_x="END")
-                self.set_font("Helvetica", "", 9)
-                self.set_text_color(*TEXT)
-                self.multi_cell(0, 4.5, add["interests"], new_x="LMARGIN", new_y="NEXT", align="L")
+from styled_resume_pdf import StyledResumePDF as ResumePDF
 
 
 # ── Cover Letter PDF ──────────────────────────────────────────────────────────
@@ -283,8 +72,24 @@ class CoverLetterPDF(SanitizedPDF):
 
         # ── Contact ──
         self.set_font("Helvetica", "", 9)
-        self.set_text_color(*ACCENT)
-        self.cell(0, 5, d.get("contact", ""), new_x="LMARGIN", new_y="NEXT")
+        contact_parts = [part.strip() for part in d.get("contact", "").split("|") if part.strip()]
+        x, y = self.l_margin, self.get_y()
+        right = self.w - self.r_margin
+        for index, part in enumerate(contact_parts):
+            email = re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", part)
+            link = (f"mailto:{part}" if email else
+                    ResumePDF._web_link(part, linkedin="linkedin.com" in part.lower()))
+            label = (" | " if index and x > self.l_margin else "") + part
+            width = self.get_string_width(label) + 0.4
+            if x > self.l_margin and x + width > right:
+                x, y = self.l_margin, y + 5
+                label = part
+                width = self.get_string_width(label) + 0.4
+            self.set_xy(x, y)
+            self.set_text_color(*(ACCENT if link else MEDIUM))
+            self.cell(width, 5, label, link=link or "")
+            x += width
+        self.set_xy(self.l_margin, y + 5)
         self.ln(8)
 
         # ── Date ──
@@ -303,7 +108,7 @@ class CoverLetterPDF(SanitizedPDF):
         if d.get("subject"):
             self.set_font("Helvetica", "B", 10)
             self.set_text_color(*DARK)
-            self.cell(0, 6, f"Re: {d['subject']}", new_x="LMARGIN", new_y="NEXT")
+            self.multi_cell(0, 6, f"Re: {d['subject']}", new_x="LMARGIN", new_y="NEXT", align="L")
             self.ln(5)
 
         # ── Divider ──
