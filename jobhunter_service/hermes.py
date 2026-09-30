@@ -93,7 +93,8 @@ and fact-1 may be created for new entries, but never invent candidate, actor,
 job, destination, action IDs, paths, credentials or connection links. Candidate
 facts and wording still require exact confirmation; IDs do not confirm facts.
 For application activity explain the available explicit commands /jobs,
-/details <job_id>, /interested <job_id>, /apply <job_id>, /inspect <job_id>,
+/details <job_id>, /interested <job_id>, /apply <job_id> (resume by default),
+/cover <job_id> (resume and cover letter only when needed), /inspect <job_id>,
 /upload <job_id>, /submit <job_id>, and /tracker. The backend handles their
 ownership and exact upload/submission confirmation gates. Never execute or
 claim these actions through a model proposal, and never generate confirmations.
@@ -143,7 +144,8 @@ Describe roles, skills, destinations, work authorization and relocation needs in
 Google and LinkedIn connections are optional. A separate jobs Gmail can own your tracker and share it with your personal email. Email monitoring is optional.
 
 /jobs — see collected jobs; /details <job_id> — view a listing
-/interested <job_id> — research it; /apply <job_id> — prepare documents
+/interested <job_id> — research it; /apply <job_id> — prepare a resume
+/cover <job_id> — prepare a resume and cover letter when the application needs one
 /inspect <job_id> — inspect your application page
 /upload <job_id> and /submit <job_id> — request separate exact approvals
 /tracker — synchronize or open your application tracker; /logout — close your browser session

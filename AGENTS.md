@@ -41,7 +41,8 @@ This repository is intended to be operated by Hermes Agent or another coding age
 Use `jobhunter_auto_apply` conservatively:
 
 - Telegram **Interested** should first show the brief research card from `jobhunter_interest_flow`: best-effort web company/recruiter/salary lookup, stored company context, recruiter/poster if known, warning-only legitimacy notes, and salary guidance vs `JOBHUNTER_TARGET_SALARY_AED_MONTHLY`.
-- Research-card **Apply** selects a matching candidate-confirmed resume variant when available, otherwise uses legacy evidence ranking. It generates the resume + cover-letter package and records `package_generated`; it does not submit anything.
+- Research-card **Apply** selects a matching candidate-confirmed resume variant when available, otherwise uses legacy evidence ranking. It generates a tailored resume by default and records `package_generated`; it does not submit anything.
+- Generate a cover letter only when the candidate asks for one or the specific posting/application explicitly requires one. A generic file-upload input is not evidence that a cover letter is required. For an owner text reply, prepare a private evidence-backed draft using `jobhunter_interest_flow.py --job-id <job_id> --cover-context`, then use `callback_handler.py --apply <job_id> --cover-letter --cover-draft <private_json_path>`; a candidate can use `/cover <job_id>` for model drafting from confirmed public evidence. Review the draft, its evidence IDs and review flags, and every generated document before proceeding.
 - A variant with `max_pages` must pass the renderer-reported page limit before `package_generated` is recorded.
 - Research-card **Ignore/Pause** records skip/paused feedback without affecting other profiles or listeners.
 - Final application prep starts only after the **Proceed to apply** CTA, and final submission remains separately approval-gated.

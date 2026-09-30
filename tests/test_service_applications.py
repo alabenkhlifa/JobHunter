@@ -8,7 +8,28 @@ from unittest.mock import Mock
 import pytest
 
 from jobhunter_service.applications import ApplicationService, PURPOSE, _selector, run_worker, worker
+from jobhunter_service.dispatch import ApplicationTelegramHandler
 from jobhunter_service.service import JobHunterService
+
+
+def configure_cover_planner(monkeypatch, facade, *, review_flags=()):
+    import jobhunter_interest_flow as flow
+    context = {"job_title": "Role for 11", "public_evidence": [
+        {"id": "fact-1", "text": "Built APIs"}, {"id": "fact-2", "text": "Improved delivery"}]}
+    draft = {"paragraphs": ["First paragraph.", "Second paragraph.", "Third paragraph."],
+             "evidence_ids": ["fact-1", "fact-2"], "review_flags": list(review_flags)}
+    revised = {**draft, "paragraphs": ["Revised first paragraph.", "Revised second paragraph.",
+                                       "Revised third paragraph."]}
+    review = {"verdict": "ready", "criticisms": ["The first draft repeated a generic opening."],
+              "blocking_evidence_issues": [], "revised_draft": revised}
+    monkeypatch.setattr(flow, "cover_letter_draft_context", lambda profile, job: context)
+    def validate(value, evidence):
+        if value not in (draft, revised) or evidence != context:
+            raise ValueError("invalid draft")
+        return value
+    monkeypatch.setattr(flow, "validate_cover_letter_draft", validate)
+    facade.planner = Mock(side_effect=[draft, review])
+    return context, draft, revised, review
 
 
 @pytest.fixture
@@ -40,12 +61,14 @@ def app(tmp_path):
             import scraper
             package = root / "output" / "same-job-package"
             package.mkdir(exist_ok=True)
-            for name in ("Resume.pdf", "CoverLetter.pdf"):
+            names = ("Resume.pdf", "CoverLetter.pdf") if request.get("include_cover_letter") else ("Resume.pdf",)
+            for name in names:
                 (package / name).write_bytes(b"%PDF-1.7\nprivate candidate document\n")
             (package / "tailoring_manifest.json").write_text(json.dumps({"job_id": "same-job", "profile_sha256": hashlib.sha256(b"{}").hexdigest()}))
             with closing(sqlite3.connect(root / "jobs.db")) as db, db:
                 scraper.record_application_stage(db, "same-job", "package_generated", package_path=str(package), sync=False)
-            return {"resume_pdf": str(package / "Resume.pdf"), "cover_pdf": str(package / "CoverLetter.pdf")}
+            return {"resume_pdf": str(package / "Resume.pdf"),
+                    "cover_pdf": str(package / "CoverLetter.pdf") if request.get("include_cover_letter") else None}
         return {"status": "completed"}
 
     facade._run = Mock(side_effect=fake_worker)
@@ -60,7 +83,7 @@ def test_same_job_id_resolves_only_the_actors_database_and_private_chat(app):
     assert "Company 22" not in telegram.send_message.call_args_list[0].args[1]
 
 
-@pytest.mark.parametrize("operation", ["details", "interested", "prepare", "inspect", "propose_upload", "propose_submit"])
+@pytest.mark.parametrize("operation", ["details", "interested", "prepare", "prepare_with_cover", "inspect", "propose_upload", "propose_submit"])
 def test_unknown_jobs_fail_without_worker_browser_or_messages(app, operation):
     facade, _, roots, _, browser, telegram = app
     before = sorted(str(path.relative_to(roots[11])) for path in roots[11].rglob("*"))
@@ -75,11 +98,182 @@ def test_unknown_jobs_fail_without_worker_browser_or_messages(app, operation):
 def test_prepare_sends_only_own_documents_to_own_private_chat(app):
     facade, _, roots, _, _, telegram = app
     assert facade.prepare(11, "same-job")["status"] == "package_generated"
-    assert len(telegram.send_document.call_args_list) == 2
+    assert len(telegram.send_document.call_args_list) == 1
+    assert facade._run.call_args.args[1]["include_cover_letter"] is False
+    assert not (roots[11] / "output/same-job-package/CoverLetter.pdf").exists()
     for call in telegram.send_document.call_args_list:
         assert call.args[0] == 11
         assert call.args[1].is_relative_to(roots[11] / "output")
     assert not list((roots[22] / "output").iterdir())
+
+
+def test_explicit_cover_request_sends_both_documents(app, monkeypatch):
+    facade, _, roots, _, _, telegram = app
+    context, draft, revised, _ = configure_cover_planner(monkeypatch, facade)
+    assert facade.prepare_with_cover(11, "same-job")["status"] == "package_generated"
+    assert facade._run.call_args.args[1]["include_cover_letter"] is True
+    assert facade._run.call_args.args[1]["cover_letter_draft"] == revised
+    assert facade.planner.call_count == 2
+    messages, schema = facade.planner.call_args_list[0].args
+    assert messages[0]["role"] == "system" and messages[1]["role"] == "user"
+    assert json.dumps(context, sort_keys=True) in messages[1]["content"]
+    assert schema["type"] == "object"
+    review_messages, review_schema = facade.planner.call_args_list[1].args
+    assert review_messages[0]["role"] == "system"
+    assert len(review_messages) == 2
+    assert json.loads(review_messages[1]["content"].split("\n", 1)[1]) == {"context": context, "draft": draft}
+    assert review_schema["properties"]["verdict"]["enum"] == ["ready", "blocked"]
+    assert [call.args[1].name for call in telegram.send_document.call_args_list] == ["Resume.pdf", "CoverLetter.pdf"]
+    assert all(call.args[1].is_relative_to(roots[11] / "output") for call in telegram.send_document.call_args_list)
+    assert "resume and cover letter" in telegram.send_message.call_args.args[1]
+
+
+def test_cover_fit_flags_reach_candidate_before_application_steps(app, monkeypatch):
+    facade, _, _, _, _, telegram = app
+    configure_cover_planner(
+        monkeypatch, facade,
+        review_flags=("Seven-person leadership is requested but only four-person coordination is confirmed.",),
+    )
+
+    facade.prepare_with_cover(11, "same-job")
+
+    message = telegram.send_message.call_args.args[1]
+    assert "Cover-letter fit points to review:" in message
+    assert "Seven-person leadership is requested" in message
+    assert message.index("fit points") < message.index("/inspect")
+
+
+def test_explicit_cover_request_rejects_missing_cover_before_delivery(app, monkeypatch):
+    facade, _, roots, _, _, telegram = app
+    configure_cover_planner(monkeypatch, facade)
+    facade._run.return_value = {"resume_pdf": str(roots[11] / "output/Resume.pdf"), "cover_pdf": None}
+    facade._run.side_effect = None
+    with pytest.raises(ValueError, match="incomplete"):
+        facade.prepare_with_cover(11, "same-job")
+    telegram.send_document.assert_not_called()
+
+
+def test_cover_request_without_planner_does_not_generate_or_deliver(app):
+    facade, _, _, _, _, telegram = app
+    with pytest.raises(ValueError, match="drafting is unavailable"):
+        facade.prepare_with_cover(11, "same-job")
+    facade._run.assert_not_called()
+    telegram.send_document.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["model", "invalid_draft", "readiness_rejection"])
+def test_cover_request_fails_closed_when_model_or_draft_is_invalid(app, monkeypatch, failure):
+    facade, _, _, _, _, telegram = app
+    _, draft, _, _ = configure_cover_planner(monkeypatch, facade)
+    if failure == "model":
+        facade.planner.side_effect = RuntimeError("private model details")
+    elif failure == "readiness_rejection":
+        from jobhunter_interest_flow import TailoringReadinessError
+        monkeypatch.setattr("jobhunter_interest_flow.validate_cover_letter_draft",
+                            Mock(side_effect=TailoringReadinessError("unverified evidence")))
+    else:
+        facade.planner.side_effect = [{**draft, "paragraphs": ["generic"]}]
+    with pytest.raises(ValueError, match="drafting is unavailable|did not pass evidence checks") as error:
+        facade.prepare_with_cover(11, "same-job")
+    assert "private model details" not in str(error.value)
+    facade._run.assert_not_called()
+    telegram.send_document.assert_not_called()
+
+
+@pytest.mark.parametrize("review_change", [
+    {"verdict": "blocked", "blocking_evidence_issues": ["Outcome lacks public evidence."]},
+    {"verdict": "ready", "blocking_evidence_issues": ["Outcome lacks public evidence."]},
+    {"verdict": "ready", "criticisms": []},
+    {"verdict": "ready", "revised_draft": {"paragraphs": ["Generic."]}},
+    {"verdict": "ready", "revised_draft": "not a draft"},
+    {"verdict": "ready", "unexpected": True},
+])
+def test_cover_critic_rejection_or_malformed_response_fails_closed(app, monkeypatch, review_change):
+    facade, _, _, _, _, telegram = app
+    _, draft, _, review = configure_cover_planner(monkeypatch, facade)
+    facade.planner.side_effect = [draft, {**review, **review_change}]
+
+    with pytest.raises(ValueError, match="review did not approve"):
+        facade.prepare_with_cover(11, "same-job")
+
+    facade._run.assert_not_called()
+    telegram.send_document.assert_not_called()
+
+
+def test_cover_critic_model_failure_fails_closed(app, monkeypatch):
+    facade, _, _, _, _, telegram = app
+    _, draft, _, _ = configure_cover_planner(monkeypatch, facade)
+    facade.planner.side_effect = [draft, RuntimeError("private model details")]
+
+    with pytest.raises(ValueError, match="review is unavailable") as error:
+        facade.prepare_with_cover(11, "same-job")
+
+    assert "private model details" not in str(error.value)
+    facade._run.assert_not_called()
+    telegram.send_document.assert_not_called()
+
+
+def test_candidate_cover_command_routes_only_to_explicit_cover_generation(app):
+    facade, service, _, _, _, telegram = app
+    handler = ApplicationTelegramHandler(service, telegram)
+    handler.applications = Mock()
+    handler._handle_private(11, {"text": "/apply same-job"}, None)
+    handler._handle_private(11, {"text": "/cover same-job"}, None)
+    handler.applications.prepare.assert_called_once_with(11, "same-job")
+    handler.applications.prepare_with_cover.assert_called_once_with(11, "same-job")
+
+
+def test_candidate_cover_route_receives_restricted_planner(app):
+    _, service, _, _, _, telegram = app
+    planner = Mock()
+    handler = ApplicationTelegramHandler(service, telegram, assistant=Mock(planner=planner))
+    assert handler.applications.planner is planner
+
+
+@pytest.mark.parametrize("stage", ["submitted", "submission_attempted"])
+def test_worker_does_not_replace_terminal_or_uncertain_application_package(app, monkeypatch, stage):
+    facade, _, roots, _, _, _ = app
+    import scraper
+    with closing(sqlite3.connect(roots[11] / "jobs.db")) as db, db:
+        scraper.record_application_stage(db, "same-job", stage, sync=False)
+    generate = Mock()
+    monkeypatch.setattr("jobhunter_interest_flow.prepare_application_package", generate)
+    with pytest.raises(ValueError, match="submission|attempt"):
+        worker({"root": str(roots[11]), "job_id": "same-job", "operation": "prepare",
+                "include_cover_letter": True})
+    generate.assert_not_called()
+
+
+def test_worker_passes_reviewed_cover_draft_to_package_generator(app, monkeypatch):
+    facade, _, roots, _, _, _ = app
+    generated = Mock(return_value=Mock(resume_pdf=roots[11] / "output/Resume.pdf",
+                                       cover_pdf=roots[11] / "output/CoverLetter.pdf"))
+    monkeypatch.setattr("jobhunter_interest_flow.prepare_application_package", generated)
+    draft = {"paragraphs": ["One", "Two", "Three"], "evidence_ids": ["fact-1"], "review_flags": []}
+    result = worker({"root": str(roots[11]), "job_id": "same-job", "operation": "prepare",
+                     "include_cover_letter": True, "cover_letter_draft": draft})
+    assert result["cover_pdf"].endswith("CoverLetter.pdf")
+    assert generated.call_args.kwargs["cover_letter_draft"] == draft
+    assert generated.call_args.kwargs["include_cover_letter"] is True
+
+
+def test_worker_rejects_cover_without_reviewed_draft(app, monkeypatch):
+    facade, _, roots, _, _, _ = app
+    generate = Mock()
+    monkeypatch.setattr("jobhunter_interest_flow.prepare_application_package", generate)
+    with pytest.raises(ValueError, match="reviewed cover-letter draft"):
+        worker({"root": str(roots[11]), "job_id": "same-job", "operation": "prepare",
+                "include_cover_letter": True})
+    generate.assert_not_called()
+
+
+def test_preparing_an_updated_package_invalidates_old_application_approval(app, monkeypatch):
+    facade, service, *_ = app
+    configure_cover_planner(monkeypatch, facade)
+    token = ready_upload(app)
+    facade.prepare_with_cover(11, "same-job")
+    with pytest.raises(PermissionError):
+        service.store.read_token(token, PURPOSE, consume=False)
 
 
 def test_failed_render_does_not_announce_or_record_package(app):

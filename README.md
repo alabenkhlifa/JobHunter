@@ -139,12 +139,12 @@ Telegram CTA flow:
 
 ```text
 Interested → brief research card → Apply / Ignore / Details
-Apply      → validate chronology and role-variant gate → select confirmed variant or legacy tailoring → generate package + manifest → Proceed to apply / Pause
+Apply      → validate chronology and role-variant gate → select confirmed variant or legacy tailoring → generate resume + manifest → Proceed to apply / Pause
 Blocked    → generate nothing and record no package stage → Refine resume / Pause
 Proceed   → begin application prep only; final submit remains explicitly approval-gated
 ```
 
-The research card is intentionally brief and warning-only. It does a best-effort web lookup for company/recruiter/salary context, then falls back to stored metadata if search fails. It summarizes company context, recruiter/poster info when stored, obvious legitimacy concerns, and salary guidance in the job market's currency. The monthly AED target applies only to UAE roles:
+The research card is intentionally brief and warning-only. It does a best-effort web lookup for company/recruiter/salary context, then falls back to stored metadata if search fails. It summarizes company context, recruiter/poster info when stored, obvious legitimacy concerns, and salary guidance in the job market's currency. Apply prepares a resume by default. When a cover letter is requested or explicitly required, the owner first writes private confirmed-evidence context with `jobhunter_interest_flow.py --job-id <job_id> --cover-context`, reviews an agent-written three-paragraph draft, then runs `callback_handler.py --apply <job_id> --cover-letter --cover-draft <private_json_path>`. A candidate can use `/cover <job_id>`; the restricted model drafts from confirmed public evidence and the backend validates it before generation. Both PDFs are delivered in that case. Rebuilding a package invalidates earlier application confirmations and requires fresh review. The monthly AED target applies only to UAE roles:
 
 ```env
 JOBHUNTER_TARGET_SALARY_AED_MONTHLY=30000
@@ -339,7 +339,7 @@ Each destination declares work authorization (`authorized`, `sponsorship_require
 
 Google integrations are optional and independently authorized. Recommend a dedicated jobs Gmail owning a newly created Google Sheet and document folder, shared as reader with the candidate's personal account. A personal Gmail is also supported; tracker and monitored mailbox can differ. `/connect tracker` creates the tracker after consent. `/connect gmail` enables mailbox access after the candidate has configured monitoring. The Sheet can be viewed in the browser or downloaded from Google Sheets as Excel.
 
-`/jobs` lists collected roles. `/details <id>`, `/interested <id>` and `/apply <id>` show a role, track interest and prepare private application documents. `/connect linkedin` opens a short-lived authenticated web viewer for the candidate's own container browser. Candidates sign in directly on LinkedIn and complete human verification themselves. They do not receive a Pi desktop or VNC account. `/inspect <id>` checks the current application; `/upload <id>` and `/submit <id>` each require a separate confirmation bound to the candidate, job, page, browser and document. A click alone records an attempted submission, and uncertain outcomes prevent automatic retries. `/tracker` retries synchronization; `/logout` closes the viewer while retaining the private browser login profile.
+`/jobs` lists collected roles. `/details <id>`, `/interested <id>` and `/apply <id>` show a role, track interest and prepare a private tailored resume. `/cover <id>` prepares a resume and cover letter when the application needs one. `/connect linkedin` opens a short-lived authenticated web viewer for the candidate's own container browser. Candidates sign in directly on LinkedIn and complete human verification themselves. They do not receive a Pi desktop or VNC account. `/inspect <id>` checks the current application; `/upload <id>` and `/submit <id>` each require a separate confirmation bound to the candidate, job, page, browser and document. A click alone records an attempted submission, and uncertain outcomes prevent automatic retries. `/tracker` retries synchronization; `/logout` closes the viewer while retaining the private browser login profile.
 
 Owner suspension/revocation pauses searches and invalidates access links, pending deliveries and approvals. Candidate data remains available for controlled recovery. Telegram delivery uses a durable outbox and marks jobs notified only after a full destination acknowledges every message part. A lost provider acknowledgement can still cause a duplicate message on retry; the Bot API offers no transactional delivery with the local database.
 

@@ -993,7 +993,7 @@ def test_render_pdf_rejects_invalid_page_metadata(monkeypatch, tmp_path, metadat
         flow._render_pdf("resume", tmp_path / "resume.json", tmp_path / "resume.pdf")
 
 
-def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_path, monkeypatch):
+def test_prepare_application_package_defaults_to_resume_and_can_include_requested_cover(tmp_path, monkeypatch):
     db = tmp_path / "jobs.db"
     output_dir = tmp_path / "output"
     profile = tmp_path / "master-profile.json"
@@ -1016,12 +1016,27 @@ def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_
 
     monkeypatch.setattr(flow.scraper, "sync_application_tracker_if_enabled", fail_tracker_sync)
 
+    resume_only = flow.prepare_application_package(
+        "li-1",
+        db_path=db,
+        profile_path=profile,
+        output_dir=output_dir,
+        render_pdfs=False,
+    )
+
+    assert resume_only.resume_pdf.exists()
+    assert resume_only.cover_json is None
+    assert resume_only.cover_pdf is None
+    assert not (resume_only.package_dir / "CoverLetter.pdf").exists()
+    assert json.loads(resume_only.manifest_json.read_text(encoding="utf-8"))["cover_letter_included"] is False
+
     package = flow.prepare_application_package(
         "li-1",
         db_path=db,
         profile_path=profile,
         output_dir=output_dir,
         render_pdfs=False,
+        include_cover_letter=True,
     )
 
     assert package.package_dir.exists()
@@ -1042,6 +1057,7 @@ def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_
     manifest = json.loads(package.manifest_json.read_text(encoding="utf-8"))
     assert manifest["tailoring_mode"] == "legacy_fallback"
     assert manifest["selected_variant_id"] is None
+    assert manifest["cover_letter_included"] is True
     assert len(manifest["profile_sha256"]) == 64
     assert manifest["quality_checks"] == {
         "timeline_consistent": True,
@@ -1061,6 +1077,57 @@ def test_prepare_application_package_creates_resume_cover_and_records_stage(tmp_
     assert row[0] == "package_generated"
     assert str(package.package_dir) == row[1]
     assert "Resume and cover letter generated" in row[2]
+
+    with sqlite3.connect(db) as submitted:
+        flow.scraper.record_application_stage(submitted, "li-1", "submitted", sync=False)
+    with pytest.raises(flow.TailoringReadinessError, match="already reached submission"):
+        flow.prepare_application_package(
+            "li-1", db_path=db, profile_path=profile, output_dir=output_dir,
+            render_pdfs=False, include_cover_letter=True,
+        )
+    with sqlite3.connect(db) as submitted:
+        assert submitted.execute("SELECT stage FROM applications WHERE job_id='li-1'").fetchone()[0] == "submitted"
+
+
+def test_reviewed_agent_draft_replaces_template_body_in_optional_cover_package(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    profile_path = tmp_path / "master-profile.json"
+    profile = {
+        "name": "Candidate", "email": "candidate@example.com",
+        "experience": [{"title": "Engineer", "company": "Example", "dates": "2021 - Present",
+                        "bullets": [
+                            "Resolved duplicate alerts caused by event retries through durable processing.",
+                            "Led four engineers delivering Java services and production releases.",
+                        ]}],
+    }
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    job = {"id": "job-one", "title": "Java Technical Lead", "company": "TargetCo",
+           "description": "Lead Java services and investigate production integration failures."}
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT, company TEXT, description TEXT)")
+        conn.execute("INSERT INTO jobs VALUES (?, ?, ?, ?)", tuple(job.values()))
+    context = flow.cover_letter_draft_context(profile, job)
+    draft = {
+        "paragraphs": [
+            "Your technical lead role asks for someone who can stay close to backend delivery while a team handles difficult integrations. That combination matches the work I have done on production Java services, where reliability had to be addressed in the implementation rather than only in planning.",
+            "At Example, event retries caused duplicate alerts. I changed the handling to use durable processing, which resolved the duplicate alerts. I also coordinated four engineers delivering Java services and production releases, while keeping the technical work visible to the rest of the team.",
+            "I have also worked on production releases with the same team. Those are the experiences I would bring to conversations about integration failures and release quality. I would be glad to discuss the exact work and where it lines up with the responsibilities of this role.",
+        ],
+        "evidence_ids": [item["id"] for item in context["public_evidence"]],
+        "review_flags": [],
+    }
+    monkeypatch.setattr(flow.scraper, "sync_application_tracker_if_enabled", lambda: None)
+
+    package = flow.prepare_application_package(
+        job["id"], db_path=db, profile_path=profile_path, output_dir=tmp_path / "output",
+        render_pdfs=False, include_cover_letter=True, cover_letter_draft=draft,
+    )
+
+    cover = json.loads(package.cover_json.read_text(encoding="utf-8"))
+    assert cover["paragraphs"] == draft["paragraphs"]
+    assert cover["evidence_ids"] == draft["evidence_ids"]
+    assert "highlights" not in cover and "opening" not in cover
+    assert json.loads(package.manifest_json.read_text(encoding="utf-8"))["cover_letter_included"] is True
 
 
 def test_failed_regeneration_restores_previous_package_atomically(tmp_path, monkeypatch):
@@ -1274,6 +1341,7 @@ def test_confirmed_variant_is_preserved_and_drives_cover_letter(tmp_path, monkey
         profile_path=profile_path,
         output_dir=output_dir,
         render_pdfs=True,
+        include_cover_letter=True,
     )
 
     resume = json.loads(package.resume_json.read_text(encoding="utf-8"))
@@ -2198,6 +2266,52 @@ def test_cover_letter_is_specific_complete_and_evidence_based():
     assert "compensation" not in letter_text
     assert "tailored" not in letter_text
     assert "generated" not in letter_text
+
+
+def test_cover_draft_context_excludes_private_evidence_and_validates_agent_prose():
+    profile = {
+        "name": "Candidate",
+        "headline": "Backend Engineer",
+        "summary": "Backend engineer with confirmed production work.",
+        "experience": [{
+            "id": "exp-one", "title": "Senior Engineer", "company": "Example", "dates": "2022 - Present",
+            "bullets": [
+                "Resolved duplicate alerts caused by event retries through durable processing.",
+                "Led four engineers delivering Java services and production releases.",
+            ],
+        }],
+        "evidence_bank": [
+            {"id": "fact-public", "experience_id": "exp-one",
+             "public_text": "Migrated three production services without downtime.",
+             "confirmation": "candidate-confirmed", "confidentiality": "public",
+             "visibility": ["resume", "cover-letter"]},
+            {"id": "fact-private", "experience_id": "exp-one",
+             "public_text": "PRIVATE INTERNAL RESULT", "confirmation": "candidate-confirmed",
+             "confidentiality": "private", "visibility": ["interview-only"]},
+        ],
+    }
+    job = {"id": "job-one", "title": "Java Technical Lead", "company": "TargetCo",
+           "description": "Lead Java services and investigate production integration failures."}
+    context = flow.cover_letter_draft_context(profile, job)
+    serialized = json.dumps(context)
+    assert "PRIVATE INTERNAL RESULT" not in serialized
+    assert len(context["public_evidence"]) == 3
+    draft = {
+        "paragraphs": [
+            "Your technical lead role asks for someone who can stay close to backend delivery while a team handles difficult integrations. That combination matches the work I have done on production Java services, where reliability had to be addressed in the implementation rather than only in planning.",
+            "At Example, event retries caused duplicate alerts. I changed the handling to use durable processing, which resolved the duplicate alerts. I also coordinated four engineers delivering Java services and production releases, while keeping the technical work visible to the rest of the team.",
+            "I have also migrated three production services without downtime. Those are the experiences I would bring to conversations about integration failures and release quality. I would be glad to discuss the exact work and where it lines up with the responsibilities of this role.",
+        ],
+        "evidence_ids": [item["id"] for item in context["public_evidence"]],
+        "review_flags": ["Check requested team size against confirmed experience."],
+    }
+    assert flow.validate_cover_letter_draft(draft, context)["paragraphs"] == draft["paragraphs"]
+    with pytest.raises(flow.TailoringReadinessError, match="unavailable public evidence"):
+        flow.validate_cover_letter_draft({**draft, "evidence_ids": ["E999", "E1"]}, context)
+    with pytest.raises(flow.TailoringReadinessError, match="boilerplate"):
+        flow.validate_cover_letter_draft({**draft, "paragraphs": [
+            "I am excited to apply. " + draft["paragraphs"][0], *draft["paragraphs"][1:]
+        ]}, context)
 
 
 def test_confirmed_variant_cover_letter_preserves_approved_experience_order():

@@ -110,6 +110,27 @@ def test_cover_contact_links_and_long_subject():
     assert "I build reliable APIs" in reader.pages[0].extract_text()
 
 
+def test_reviewed_cover_paragraphs_take_precedence_over_legacy_highlights():
+    letter = CoverLetterPDF({
+        "name": "Candidate",
+        "paragraphs": [
+            "I handled a production integration failure and resolved duplicate events.",
+            "I kept the team close to the implementation and verified the release.",
+            "Those examples are directly relevant to the integration work in this role.",
+        ],
+        "opening": "Generic opening that should not render.",
+        "highlights": [{"text": "Copied resume bullet that should not render."}],
+        "closing": "Generic closing that should not render.",
+    })
+    letter.render()
+    text = PdfReader(BytesIO(bytes(letter.output()))).pages[0].extract_text()
+
+    assert "production integration failure" in text
+    assert "Copied resume bullet" not in text
+    assert "Generic opening" not in text
+    assert "Generic closing" not in text
+
+
 def test_wrapped_certification_text_keeps_links_and_order():
     # A wrapped credential needs one real link rectangle per visible line.
     class RecordingResumePDF(ResumePDF):

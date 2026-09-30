@@ -435,6 +435,20 @@ def _matched_term_count(terms: Iterable[str], normalized_text: str) -> int:
     return sum(1 for term in terms if f" {_normalized_match_text(term)} " in padded_text)
 
 
+def _matched_role_term_count(terms: Iterable[str], normalized_title: str) -> int:
+    # Job boards use both "Solution Architect" and "Solutions Architect" for
+    # the same role. Keep complete-phrase matching for every other title term.
+    normalized_title = re.sub(r"\bsolutions\b", "solution", normalized_title)
+    padded_title = f" {normalized_title} "
+    normalized_terms = (
+        re.sub(r"\bsolutions\b", "solution", _normalized_match_text(term))
+        for term in terms
+    )
+    return sum(
+        1 for term in normalized_terms if f" {term} " in padded_title
+    )
+
+
 def select_resume_variant(
     profile: dict[str, Any],
     job_text: str,
@@ -461,7 +475,7 @@ def select_resume_variant(
             continue
 
         role_terms = variant.get("role_terms")
-        role_match_count = _matched_term_count(role_terms, normalized_title) if role_terms else 0
+        role_match_count = _matched_role_term_count(role_terms, normalized_title) if role_terms else 0
         if role_terms and not role_match_count:
             continue
 

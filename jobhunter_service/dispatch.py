@@ -14,7 +14,8 @@ class ApplicationTelegramHandler(TelegramHandler):
     def __init__(self, service, client, assistant=None, scheduler=None):
         super().__init__(service, client, assistant)
         self.scheduler = scheduler
-        self.applications = ApplicationService(service, service.browser_manager, client)
+        self.applications = ApplicationService(service, service.browser_manager, client,
+                                               planner=getattr(assistant, 'planner', None))
         if scheduler:
             service.sync_tracker = scheduler.sync_candidate
 
@@ -34,7 +35,8 @@ class ApplicationTelegramHandler(TelegramHandler):
         parts = text.split() if isinstance(text, str) else []
         command = parts[0].split('@', 1)[0].lower() if parts else ''
         actions = {'/details': self.applications.details, '/interested': self.applications.interested,
-                   '/apply': self.applications.prepare, '/inspect': self.applications.inspect,
+                   '/apply': self.applications.prepare, '/cover': self.applications.prepare_with_cover,
+                   '/inspect': self.applications.inspect,
                    '/upload': self.applications.propose_upload, '/submit': self.applications.propose_submit}
         if callback is None and command in {*actions, '/jobs', '/tracker', '/logout'}:
             self.service.authorize(actor_id)

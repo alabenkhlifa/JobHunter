@@ -124,11 +124,18 @@ class CoverLetterPDF(SanitizedPDF):
             self.multi_cell(0, 5.5, d["salutation"], new_x="LMARGIN", new_y="NEXT", align="L")
             self.ln(3)
 
-        if d.get("opening"):
+        paragraphs = d.get("paragraphs")
+        if isinstance(paragraphs, list) and paragraphs:
+            for paragraph in paragraphs:
+                if not isinstance(paragraph, str) or not paragraph.strip():
+                    continue
+                self.multi_cell(0, 5.5, paragraph, new_x="LMARGIN", new_y="NEXT", align="L")
+                self.ln(4)
+        elif d.get("opening"):
             self.multi_cell(0, 5.5, d["opening"], new_x="LMARGIN", new_y="NEXT", align="L")
             self.ln(4)
 
-        if d.get("highlights"):
+        if not paragraphs and d.get("highlights"):
             self.set_font("Helvetica", "B", 10)
             self.multi_cell(0, 5.5, d.get("highlights_heading", "Relevant experience:"), new_x="LMARGIN", new_y="NEXT", align="L")
             self.ln(1)
@@ -160,7 +167,7 @@ class CoverLetterPDF(SanitizedPDF):
                 self.ln(1.5)
             self.ln(2)
 
-        for field in ("motivation", "closing"):
+        for field in (() if paragraphs else ("motivation", "closing")):
             if d.get(field):
                 self.set_font("Helvetica", "", 10)
                 self.set_text_color(*TEXT)
@@ -172,13 +179,6 @@ class CoverLetterPDF(SanitizedPDF):
             self.multi_cell(0, 5.5, d["signoff"], new_x="LMARGIN", new_y="NEXT", align="L")
             self.set_font("Helvetica", "B", 10)
             self.multi_cell(0, 5.5, d.get("signature", d.get("name", "")), new_x="LMARGIN", new_y="NEXT", align="L")
-
-        if not d.get("opening"):
-            for para in d.get("paragraphs", []):
-                self.set_font("Helvetica", "", 10)
-                self.multi_cell(0, 5.5, para, new_x="LMARGIN", new_y="NEXT", align="L")
-                self.ln(3)
-
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 

@@ -47,7 +47,7 @@ before selecting the jobs actually sent.
 - The Gmail setup grants read access only. Sending and Sheets/Drive need separate authorization. Restore encrypted credentials, account config and processed IDs together, then rerun the connection check; if Google revoked the grant, reauthorize.
 - Record application stages through `scraper.record_application_stage`; enabled tracker sync runs after each committed stage, including submissions. The Gmail watcher uses the same hook for matched application outcomes, and the scheduled monitor retries sync after every check. Report the database submission state and Google Sheet sync state separately. For a submission, use the opt-in `return_receipt=True` result and claim the Sheet is updated only after verified sync and read-back of that job's row.
 - Mail alerts show the outcome, company, role and confirmed tracking result. Receipt acknowledgements do not change status; unknown outcomes require review. If an already-processed email was misclassified, back up the database, reprocess only that message with the watcher helpers, and verify the application row, job status and Sheet. Preserve the processed-ID ledger to avoid replaying old notifications.
-- `applications.package_path` is the permanent per-job directory produced under `data/output/`, containing the resume, cover letter and tailoring manifest. Preserve it during browser uploads and blocker/status updates. Hermes document-cache paths are transport copies; never replace the package directory with a cached PDF or cache directory. If reusing a cached attachment, verify it against the permanent package and use that package's document.
+- `applications.package_path` is the permanent per-job directory produced under `data/output/`, containing the resume, optional cover letter and tailoring manifest. Preserve it during browser uploads and blocker/status updates. Hermes document-cache paths are transport copies; never replace the package directory with a cached PDF or cache directory. If reusing a cached attachment, verify it against the permanent package and use that package's document.
 - Before reporting an application as submitted, verify the portal confirmation or application-history row for that exact role. Open the saved screenshot and ensure the role and confirmation/status (plus application number when available) are visible; a login page or upload form is not submission evidence. Capture the confirmation again if needed, record that screenshot as `evidence_path`, and verify the tracker's Evidence Screenshot link resolves to it before closing the browser. Use this verified image when sending submission evidence to the user. Keep an unconfirmed outcome pending; do not retry submission just because confirmation is missing.
 - Use `google_tracker_auth check --refresh` to verify the separate tracker grant. Use `google_tracker --dry-run` before reconnecting an existing Sheet. Keep the configured 14-column layout and status colors; sync preserves history, existing links and newer Sheet outcomes, and orders whole rows by Applied At newest first. Never clear or rebuild the tracker manually. Restore the token, upload cache, sync receipt and pre-write snapshot from encrypted recovery.
 
@@ -410,10 +410,32 @@ For each candidate job, the scraper fetches the full description and extracts:
 2. Wait for a separate Apply choice for each job. The card's Apply button
    generates the package through `callback_handler.py`. If the user replies in
    text instead, run `python3 callback_handler.py --apply <job_id>` for each
-   selected job. This checks tailoring readiness, generates the resume and
-   cover letter, records `package_generated`, sends both PDFs, and sends the
-   Proceed card only after Telegram confirms both documents. If delivery fails,
-   retry Apply; Proceed remains blocked until both documents are delivered.
+   selected job. This checks tailoring readiness, generates the resume by
+   default, records `package_generated`, sends its PDF, and sends the Proceed
+   card only after Telegram confirms delivery. Generate a cover letter with
+   `--apply <job_id> --cover-letter` only when the user asks for one or the
+   specific posting/application explicitly requires one. First run
+   `python3 jobhunter_interest_flow.py --job-id <job_id> --cover-context` to
+   write an ignored private JSON context with only confirmed public evidence.
+   Draft a separate JSON file under `data/cover-drafts/` with three prose
+   `paragraphs`, 2-8 matching `evidence_ids`, and `review_flags`. Follow
+   `COVER_LETTER_DRAFT_PROMPT` in `jobhunter_interest_flow.py`: tell one or two
+   concrete work stories with verified outcomes, no pasted resume bullets or
+   generic enthusiasm. Criticize the draft for weak fit, unsupported claims,
+   and repeated phrases, then revise it. Run
+   `python3 callback_handler.py --apply <job_id> --cover-letter --cover-draft <private_json_path>`.
+   Surface any major unmet requirement in review_flags and to the candidate;
+   do not stretch adjacent experience into that expertise. A generic file-upload
+   input does not establish a cover-letter requirement. Deliver both PDFs
+   before showing Proceed. If a PDF, delivery-state save, or the Proceed card fails,
+   rerun the owner command with `--cover-letter --cover-draft` and the same
+   reviewed private JSON path. The research card's Apply button prepares a
+   resume by default and is not a cover-package retry. Proceed remains blocked
+   until every generated PDF is delivered. For a resume-only package, retry the
+   normal Apply action.
+   If a cover letter becomes necessary after Proceed, rerun Apply with
+   a newly reviewed cover draft, deliver and review the new package, and wait for a new
+   Proceed choice before continuing application preparation.
    It does not start filling or submitting a browser application. A request
    for more research or clarification stays in the research step.
 3. Wait for a separate Proceed to apply choice after reviewing the package.
@@ -476,7 +498,7 @@ exact candidate-confirmed correction.
    - Do NOT change the person's name, contact info, or education history
 
 Verify the permanent package directory contains only renderer-compatible public
-resume and cover-letter data plus a private `tailoring_manifest.json` with the
+resume data, optional cover-letter data, and a private `tailoring_manifest.json` with the
 tailoring mode, selected variant, profile digest, page count, and passed
 readiness checks. Do not expose evidence metadata, refiner state, private notes,
 or application defaults in the PDFs. Inspect every PDF page for clipping, broken
@@ -484,8 +506,9 @@ words, orphaned headings, MaibornWolff-before-CTO order, and newest-to-oldest
 order for other employers and client sections. Compare its layout with the
 candidate's reviewed two-column PDF. Confirm optional-role omissions, relevant
 confirmed evidence, page limits, and PDF annotations for verified contact and
-certificate links. Review the cover letter for job-specific examples and
-repeated sentences. Keep fixed variant wording unchanged until the candidate
+certificate links. When a cover letter was requested, review it for job-specific
+examples, unsupported claims, repeated sentences, review_flags, and PDF layout.
+Keep fixed variant wording unchanged until the candidate
 approves revised wording. If review finds a problem, repair package generation
 and rerun `--apply` before asking to Proceed.
 
@@ -526,6 +549,8 @@ python3 scraper.py --send-doc <file_path> [caption]
 # Text-reply workflow; each command sends its next-step Telegram card
 python3 callback_handler.py --interested <job_id>
 python3 callback_handler.py --apply <job_id>
+python3 jobhunter_interest_flow.py --job-id <job_id> --cover-context  # private public-evidence context
+python3 callback_handler.py --apply <job_id> --cover-letter --cover-draft data/cover-drafts/<job_id>.json
 python3 callback_handler.py --proceed-apply <job_id>
 
 # Record a negative digest reply with his reason (feedback precedent for the reviewer)

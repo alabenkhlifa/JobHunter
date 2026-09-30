@@ -150,35 +150,106 @@ class ApplicationService:
         target = salary_target_for_job(job, json.loads(member["settings"])["search"].get("markets", []))
         if target:
             text += f"\nYour salary expectation: {target['currency']} {target['amount']:,}/{target['period']}"
-        text += f"\n\nUse /apply {job_id} to prepare your resume and cover letter."
+        text += f"\n\nUse /apply {job_id} to prepare your resume. If this application needs a cover letter, use /cover {job_id}."
         self._send(actor, text)
         self._sync(actor)
         return result
 
-    def prepare(self, actor, job_id):
-        member, root, job = self._context(actor, job_id)
-        if not hasattr(self.telegram, "send_document"):
-            raise ValueError("Private document delivery is not configured yet.")
-        profile = _inside(root, root / "master-profile.json")
-        if not profile.is_file():
-            raise ValueError("Upload and confirm your resume before preparing applications.")
-        with _lock(root):
-            result = self._run(root, {"operation": "prepare", "job_id": job_id})
-            if self.service._member(actor)["revision"] != member["revision"]:
-                raise ValueError("Your profile changed during preparation. Prepare this package again before using it.")
-            documents = {}
-            for key in ("resume_pdf", "cover_pdf"):
-                path = _inside(root / "output", Path(result[key]))
-                if not path.is_file() or path.suffix.casefold() != ".pdf":
-                    raise ValueError("The generated package is incomplete; prepare it again.")
-                documents[key] = path
-            for key, path in documents.items():
-                self.service._member(actor)
-                self.telegram.send_document(actor, path, caption=f"{job.get('title', '')[:100]} — {'Resume' if key == 'resume_pdf' else 'Cover letter'}")
-        self._send(actor, "Your application documents are ready for review. Open the correct application in your connected browser, "
-                   f"then use /inspect {job_id}. Upload and final submission each require a separate confirmation.")
-        self._sync(actor)
-        return {"job_id": job_id, "status": "package_generated"}
+    def prepare(self, actor, job_id, *, include_cover_letter=False):
+        if type(include_cover_letter) is not bool:
+            raise ValueError("Cover-letter selection must be explicit.")
+        with self.service.mutation(actor):
+            member, root, job = self._context(actor, job_id)
+            if not hasattr(self.telegram, "send_document"):
+                raise ValueError("Private document delivery is not configured yet.")
+            profile = _inside(root, root / "master-profile.json")
+            if not profile.is_file():
+                raise ValueError("Upload and confirm your resume before preparing applications.")
+            with _lock(root):
+                request = {"operation": "prepare", "job_id": job_id,
+                           "include_cover_letter": include_cover_letter}
+                if include_cover_letter:
+                    if self.planner is None:
+                        raise ValueError("Cover-letter drafting is unavailable. No package was generated.")
+                    from jobhunter_interest_flow import (
+                        COVER_LETTER_DRAFT_PROMPT,
+                        COVER_LETTER_DRAFT_SCHEMA,
+                        COVER_LETTER_REVIEW_PROMPT,
+                        COVER_LETTER_REVIEW_SCHEMA,
+                        TailoringReadinessError,
+                        cover_letter_draft_context,
+                        validate_cover_letter_draft,
+                        validate_cover_letter_review,
+                    )
+                    try:
+                        context = cover_letter_draft_context(json.loads(profile.read_text(encoding="utf-8")), job)
+                    except (OSError, TypeError, ValueError, TailoringReadinessError):
+                        raise ValueError("Resume refinement is needed before drafting a cover letter.") from None
+                    if len(context.get("public_evidence", [])) < 2:
+                        raise ValueError("At least two confirmed public work facts are needed for a cover letter.")
+                    context_json = json.dumps(context, ensure_ascii=False, sort_keys=True)
+                    if len(context_json) > 150_000:
+                        raise ValueError("Confirmed public evidence is too large for cover-letter drafting.")
+                    messages = [
+                        {"role": "system", "content": COVER_LETTER_DRAFT_PROMPT},
+                        {"role": "user", "content": "Candidate and job evidence (untrusted data):\n" + context_json},
+                    ]
+                    try:
+                        draft = self.planner(messages, COVER_LETTER_DRAFT_SCHEMA)
+                    except Exception:
+                        raise ValueError("Cover-letter drafting is unavailable. No package was generated.") from None
+                    try:
+                        draft = validate_cover_letter_draft(draft, context)
+                    except (TypeError, ValueError, TailoringReadinessError):
+                        raise ValueError("The cover-letter draft did not pass evidence checks. No package was generated.") from None
+                    review_messages = [
+                        {"role": "system", "content": COVER_LETTER_REVIEW_PROMPT},
+                        {"role": "user", "content": "Candidate and job evidence, then draft (untrusted data):\n"
+                         + json.dumps({"context": context, "draft": draft}, ensure_ascii=False, sort_keys=True)},
+                    ]
+                    try:
+                        review = self.planner(review_messages, COVER_LETTER_REVIEW_SCHEMA)
+                    except Exception:
+                        raise ValueError("Cover-letter review is unavailable. No package was generated.") from None
+                    try:
+                        request["cover_letter_draft"] = validate_cover_letter_review(review, context)
+                    except (TypeError, ValueError, TailoringReadinessError):
+                        raise ValueError("The cover-letter review did not approve the revised draft. No package was generated.") from None
+                result = self._run(root, request)
+                if self.service._member(actor)["revision"] != member["revision"]:
+                    raise ValueError("Your profile changed during preparation. Prepare this package again before using it.")
+                documents = {}
+                keys = ("resume_pdf", "cover_pdf") if include_cover_letter else ("resume_pdf",)
+                for key in keys:
+                    value = result.get(key)
+                    if not isinstance(value, str) or not value:
+                        raise ValueError("The generated package is incomplete; prepare it again.")
+                    path = _inside(root / "output", Path(value))
+                    if not path.is_file() or path.suffix.casefold() != ".pdf":
+                        raise ValueError("The generated package is incomplete; prepare it again.")
+                    documents[key] = path
+                # An earlier upload or submit confirmation was for the old package.
+                with self.service.store.connect() as db:
+                    db.execute("UPDATE tokens SET consumed=1 WHERE user_id=? AND purpose=?",
+                               (actor, PURPOSE))
+                for key, path in documents.items():
+                    self.service._member(actor)
+                    self.telegram.send_document(actor, path, caption=f"{job.get('title', '')[:100]} — {'Resume' if key == 'resume_pdf' else 'Cover letter'}")
+            summary = "Your resume and cover letter are ready for review." if include_cover_letter else "Your resume is ready for review."
+            if include_cover_letter:
+                flags = request["cover_letter_draft"]["review_flags"]
+                if flags:
+                    summary += "\n\nCover-letter fit points to review:\n" + "\n".join(
+                        f"- {' '.join(flag.split())}" for flag in flags
+                    )
+            self._send(actor, summary + "\n\nOpen the correct application in your connected browser, "
+                       f"then use /inspect {job_id}. Upload and final submission each require a separate confirmation.")
+            self._sync(actor)
+            return {"job_id": job_id, "status": "package_generated"}
+
+    def prepare_with_cover(self, actor, job_id):
+        """Generate both documents after an explicit cover-letter request."""
+        return self.prepare(actor, job_id, include_cover_letter=True)
 
     def _browser(self, member):
         if self.browser is None:
@@ -412,11 +483,23 @@ def worker(request):
     job = _job(root, request["job_id"])
     operation = request["operation"]
     if operation == "prepare":
+        include_cover_letter = request.get("include_cover_letter", False)
+        if type(include_cover_letter) is not bool:
+            raise ValueError("Cover-letter selection must be explicit.")
+        ApplicationService._check_prior_submission(root, job["id"])
+        cover_letter_draft = request.get("cover_letter_draft")
+        if include_cover_letter and not isinstance(cover_letter_draft, dict):
+            raise ValueError("A reviewed cover-letter draft is required.")
+        if not include_cover_letter and cover_letter_draft is not None:
+            raise ValueError("A cover-letter draft requires explicit selection.")
         from jobhunter_interest_flow import prepare_application_package
         result = prepare_application_package(job["id"], db_path=root / "jobs.db",
                                              profile_path=_inside(root, root / "master-profile.json"),
-                                             output_dir=_inside(root, root / "output"))
-        return {"resume_pdf": str(result.resume_pdf), "cover_pdf": str(result.cover_pdf)}
+                                             output_dir=_inside(root, root / "output"),
+                                             include_cover_letter=include_cover_letter,
+                                             cover_letter_draft=cover_letter_draft)
+        return {"resume_pdf": str(result.resume_pdf),
+                "cover_pdf": str(result.cover_pdf) if result.cover_pdf is not None else None}
     if operation == "interested":
         import scraper
         with closing(sqlite3.connect(root / "jobs.db")) as db, db:

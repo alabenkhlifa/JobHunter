@@ -317,6 +317,27 @@ def test_role_aware_variant_beats_incidental_legacy_technology_match():
     assert selected["id"] == "variant-architect"
 
 
+def test_solutions_architect_matches_confirmed_solution_architect_variant():
+    profile = _v2_profile(
+        resume_variants=[
+            _variant(
+                "variant-architect",
+                role_terms=["solution architect"],
+                match_terms=["cloud architecture"],
+                resume={"headline": "Solution Architect"},
+            )
+        ]
+    )
+    job = {"title": "Solutions Architect", "description": "Design cloud architecture."}
+
+    resume, variant = flow._resume_for_job(profile, job)
+
+    assert variant["id"] == "variant-architect"
+    assert resume["headline"] == "Solution Architect"
+    flow._assert_tailoring_ready(profile, job, variant)
+    assert select_resume_variant(profile, "Cloud architecture", job_title="Solutions Engineer") is None
+
+
 def test_role_terms_block_variant_when_only_supporting_terms_match():
     profile = _v2_profile(
         resume_variants=[
