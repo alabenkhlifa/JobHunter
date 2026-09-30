@@ -26,6 +26,18 @@ def test_extract_salary_keeps_unlabelled_range():
     assert scraper.extract_salary("Salary: AED 30,000 monthly", "Dubai") == "Salary: AED 30,000 monthly"
 
 
+def test_extract_salary_rejects_flight_allowance_as_pay():
+    description = "Competitive compensation includes an annual flight allowance of 2,500 AED."
+
+    assert scraper.extract_salary(description, "Dubai") == ""
+
+
+def test_extract_salary_prefers_base_pay_over_flight_allowance():
+    description = "Base salary AED 28,000 per month; annual flight allowance 2,500 AED."
+
+    assert scraper.extract_salary(description, "Dubai") == "salary AED 28,000 per month"
+
+
 def test_extract_actual_employer_from_known_aggregator_description():
     description = "Job Description About Revolut People deserve more from their money."
 

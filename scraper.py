@@ -3,6 +3,7 @@
 
 import argparse
 from copy import deepcopy
+from dataclasses import dataclass
 import hashlib
 import html
 import json
@@ -493,8 +494,8 @@ def sync_application_tracker_if_enabled():
         log.warning("JOBHUNTER_AUTO_SYNC_TRACKER=true but JOBHUNTER_TRACKER_SYNC_COMMAND is not set")
         return False
 
-    timeout = int(os.getenv("JOBHUNTER_TRACKER_SYNC_TIMEOUT", "120"))
     try:
+        timeout = int(os.getenv("JOBHUNTER_TRACKER_SYNC_TIMEOUT", "120"))
         completed = subprocess.run(
             shlex.split(command),
             cwd=Path.cwd(),
@@ -503,13 +504,13 @@ def sync_application_tracker_if_enabled():
             text=True,
             timeout=timeout,
         )
-    except Exception as exc:  # noqa: BLE001 - tracker sync must never block stage recording
-        log.warning("Application tracker auto-sync failed to start: %s", exc)
+    except Exception:  # noqa: BLE001 - tracker sync must never block stage recording
+        log.warning("Application tracker auto-sync failed to start")
         return False
 
     if completed.returncode != 0:
-        stderr = (completed.stderr or completed.stdout or "").strip()
-        log.warning("Application tracker auto-sync failed with exit %s: %s", completed.returncode, stderr[:500])
+        # The command output can contain private tracker data or OAuth errors.
+        log.warning("Application tracker auto-sync failed with exit %s", completed.returncode)
         return False
     log.info("Application tracker auto-sync completed")
     return True
@@ -521,6 +522,21 @@ def _connection_has_file_database(conn):
     except sqlite3.Error:
         return True
     return any((row[2] if len(row) > 2 else "") for row in rows)
+
+
+@dataclass(frozen=True)
+class ApplicationStageReceipt:
+    """Stage persistence and optional tracker command outcome.
+
+    tracker_sync_succeeded is None when no sync was requested or possible,
+    False when disabled or failed, and True when the configured command exits
+    successfully. Only a tracker command with read-back verification proves the
+    corresponding Sheet rows are present.
+    """
+
+    application_id: int
+    database_committed: bool
+    tracker_sync_succeeded: bool | None
 
 
 def record_application_stage(
@@ -538,8 +554,13 @@ def record_application_stage(
     now=None,
     commit=True,
     sync=True,
+    return_receipt=False,
 ):
-    """Insert or update the latest application-state row for a job."""
+    """Insert or update the latest application-state row for a job.
+
+    Return the integer application ID for existing callers. Callers that need
+    to report tracker completion can opt into an ApplicationStageReceipt.
+    """
     if sync and not commit:
         raise ValueError("sync requires commit=True")
     if package_path and Path(package_path).exists() and not Path(package_path).is_dir():
@@ -605,9 +626,13 @@ def record_application_stage(
         application_id = cur.lastrowid
     if commit:
         conn.commit()
+    tracker_sync_succeeded = None
     if sync and _connection_has_file_database(conn):
-        sync_application_tracker_if_enabled()
-    return int(application_id)
+        tracker_sync_succeeded = bool(sync_application_tracker_if_enabled())
+    application_id = int(application_id)
+    if return_receipt:
+        return ApplicationStageReceipt(application_id, bool(commit), tracker_sync_succeeded)
+    return application_id
 
 
 def normalize_question_key(question_text):
@@ -887,15 +912,23 @@ def prepare_review_candidate(job, *, now=None):
     if not candidate.get("sponsorship_signal") and not candidate.get("sponsorship_evidence"):
         signal, evidence = job_scoring.sponsorship_signal(candidate["description"])
         candidate["sponsorship_signal"], candidate["sponsorship_evidence"] = signal, evidence
+    elif (candidate.get("sponsorship_signal") == "offered"
+          and job_scoring.sponsorship_signal(candidate.get("sponsorship_evidence"))[0] != "offered"):
+        # Old pre-reads could mistake relocation support for a visa promise.
+        candidate["sponsorship_signal"], candidate["sponsorship_evidence"] = (
+            job_scoring.sponsorship_signal(candidate["description"])
+        )
     if candidate.get("sponsorship_signal") == "excluded" and CONFIG.get("matching", {}).get("preset") != "generic":
         # Invited profiles judge authorization per market in jobhunter_matching.
         return candidate, "posting rules out sponsorship"
-    if (CONFIG.get("matching", {}).get("preset") != "generic"
-            and candidate.get("ai_sponsorship") == "offered"
-            and not job_scoring.quote_in_text(candidate.get("sponsorship_evidence"), candidate["description"])):
+    if (candidate.get("ai_sponsorship") == "offered"
+            and (not job_scoring.quote_in_text(candidate.get("sponsorship_evidence"), candidate["description"])
+                 or job_scoring.sponsorship_signal(candidate.get("sponsorship_evidence"))[0] != "offered")):
         # Legacy approvals had no quote field; they cannot take a verified
         # sponsorship slot merely because an old reviewer wrote "offered".
-        candidate["ai_sponsorship"] = "no_info"
+        candidate["ai_sponsorship"] = (
+            "implied" if candidate.get("sponsorship_signal") == "implied" else "no_info"
+        )
     reason = job_scoring.knockout(
         candidate,
         allowed_locations=tuple(loc.lower() for loc in CONFIG.get("allowed_locations", ())),
@@ -951,13 +984,20 @@ def record_review(conn, verdicts, *, report=None):
     conn.row_factory = sqlite3.Row
     candidates = get_review_candidates(conn)
     eligible = {row["id"]: row["location"] for row in candidates}
-    strict = CONFIG.get("matching", {}).get("preset") != "generic"
-    descriptions = {row["id"]: row.get("description") or "" for row in candidates} if strict else None
+    descriptions = {row["id"]: row.get("description") or "" for row in candidates}
+    verified_evidence = (
+        {row["id"]: row.get("sponsorship_evidence") or "" for row in candidates
+         if row.get("sponsorship_signal") == "offered"}
+        if CONFIG.get("matching", {}).get("preset") == "generic" else None
+    )
     ensure_review_columns(conn)
     stamp = datetime.now(timezone.utc).isoformat()
 
     written = []
-    for entry in validated_verdicts(verdicts, eligible, report=report, descriptions=descriptions):
+    for entry in validated_verdicts(
+        verdicts, eligible, report=report, descriptions=descriptions,
+        verified_evidence=verified_evidence,
+    ):
         status_update = ", status = 'rejected'" if entry["ai_verdict"] == "reject" else ""
         conn.execute(
             f"UPDATE jobs SET ai_verdict = ?, ai_verdict_reason = ?, "
@@ -969,7 +1009,8 @@ def record_review(conn, verdicts, *, report=None):
             # A verified quote the pre-read missed becomes the stored evidence,
             # so the fast lane and the weekly pattern review learn from it.
             row = conn.execute("SELECT sponsorship_signal FROM jobs WHERE id = ?", (entry["id"],)).fetchone()
-            if row is not None and row[0] != "offered":
+            if (row is not None and row[0] != "offered"
+                    and job_scoring.sponsorship_signal(entry["evidence"])[0] == "offered"):
                 conn.execute("UPDATE jobs SET sponsorship_signal = 'offered', sponsorship_evidence = ? WHERE id = ?",
                              (entry["evidence"], entry["id"]))
                 if report is not None:
@@ -990,7 +1031,7 @@ def _note(report, job_id, note):
         report.append({"job_id": job_id, "note": note})
 
 
-def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None):
+def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None, verified_evidence=None):
     """Accepted review entries in queue field shape; nothing is written here.
 
     One rejected entry is dropped on its own, but a batch that breaks its own
@@ -999,7 +1040,7 @@ def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None):
     Every drop or rewrite is appended to `report` so the wrapper can print it
     instead of losing a verdict silently.
 
-    With `descriptions` (the owner's strict path) the reads collapse to
+    With `descriptions` the reads collapse to
     offered / no_info / excluded: legacy implied and doubtful become no_info,
     and `offered` must carry an `evidence` quote found in the posting, or it
     is downgraded -- a promise the reviewer cannot point to is a guess.
@@ -1039,11 +1080,14 @@ def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None):
                 _note(report, job_id, f"legacy read {sponsorship} recorded as no_info")
                 sponsorship = _LEGACY_SPONSORSHIP[sponsorship]
             if sponsorship == "offered":
-                quote = " ".join(str(entry.get("evidence") or "").split())
-                if job_scoring.quote_in_text(quote, descriptions.get(job_id, "")):
+                quote = " ".join(str(
+                    entry.get("evidence") or (verified_evidence or {}).get(job_id) or ""
+                ).split())
+                if (job_scoring.quote_in_text(quote, descriptions.get(job_id, ""))
+                        and job_scoring.sponsorship_signal(quote)[0] == "offered"):
                     evidence = quote[:job_scoring.SPONSORSHIP_EVIDENCE_LIMIT]
                 else:
-                    _note(report, job_id, "offered without a quote found in the posting; recorded as no_info")
+                    _note(report, job_id, "offered without a visa/work-permit quote found in the posting; recorded as no_info")
                     sponsorship = "no_info"
         accepted.append({
             "id": job_id,
@@ -1091,10 +1135,15 @@ def plan_reviewed_digest(conn, verdicts=(), *, context_digest=None, report=None)
         candidates = [dict(row, ai_verdict='') if row['id'] not in valid else row for row in candidates]
     # Planning accepted an unquoted offer that recording downgraded, so the
     # same review selected different jobs before and after it was saved.
-    strict = CONFIG.get('matching', {}).get('preset') != 'generic'
-    descriptions = {row['id']: row.get('description') or '' for row in rows} if strict else None
+    descriptions = {row['id']: row.get('description') or '' for row in rows}
+    verified_evidence = (
+        {row['id']: row.get('sponsorship_evidence') or '' for row in rows
+         if row.get('sponsorship_signal') == 'offered'}
+        if CONFIG.get('matching', {}).get('preset') == 'generic' else None
+    )
     reviewed = validated_verdicts(verdicts, {row['id']: row['location'] for row in rows},
-                                  report=report, descriptions=descriptions)
+                                  report=report, descriptions=descriptions,
+                                  verified_evidence=verified_evidence)
     return jobhunter_queue.delivery_plan(candidates, reviewed,
                                          markets=CONFIG.get('markets'),
                                          **CONFIG.get('delivery', {}))
@@ -1111,6 +1160,20 @@ def send_reviewed_digest(token, chat_id, conn, newly_reviewed=()):
 
 
 def mark_interested(conn, job_id):
+    # A repeated Interested click must not move an already submitted
+    # application back to the start of the workflow.
+    row = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None or row[0] == "submitted":
+        return False
+    try:
+        submitted = conn.execute(
+            "SELECT 1 FROM applications WHERE job_id = ? AND submitted_at IS NOT NULL LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        submitted = None
+    if submitted:
+        return False
     cur = conn.execute("UPDATE jobs SET status = 'interested' WHERE id = ?", (job_id,))
     if cur.rowcount == 0:
         conn.commit()
@@ -1126,7 +1189,7 @@ def mark_interested(conn, job_id):
         platform=platform,
         application_type="linkedin_unknown" if platform == "LinkedIn" else None,
         application_url=url,
-        notes="Marked interested from JobHunter; next safe step is package_generated then draft_ready before approval/submission.",
+        notes="Marked interested from JobHunter; show research brief, then Apply to generate a package, then Proceed to apply for draft preparation.",
     )
     record_job_feedback(
         conn,
@@ -2140,8 +2203,39 @@ def _salary_matches_job_location(label, job_location):
     return label.lower() in str(job_location).lower()
 
 
+_SALARY_PAY_CONTEXT = re.compile(
+    r"\b(?:salar(?:y|ies)|base pay|base compensation|total compensation|"
+    r"compensation|remuneration|wages?|pay|per month|monthly|per year|"
+    r"per annum|annual pay)\b|/(?:month|mo|year|yr)\b",
+    re.IGNORECASE,
+)
+_SALARY_BENEFIT_CONTEXT = re.compile(
+    r"\b(?:flights?|airfare|air tickets?|travel|relocation|housing|"
+    r"accommodation|education|meals?|transport(?:ation)?|allowances?|"
+    r"bonus|stipend)\b",
+    re.IGNORECASE,
+)
+
+
+def _salary_has_pay_context(text, start, end):
+    """Reject benefit amounts even when a broad compensation heading precedes them."""
+    before = re.split(r"[.;\n]", text[max(0, start - 120):start])[-1]
+    after = re.split(r"[.;\n]", text[end:end + 60], maxsplit=1)[0]
+    context = f"{before} {text[start:end]} {after}"
+    amount_at = len(before) + len(text[start:end]) / 2
+
+    def closest(pattern):
+        distances = [min(abs(match.start() - amount_at), abs(match.end() - amount_at))
+                     for match in pattern.finditer(context)]
+        return min(distances) if distances else None
+
+    pay_distance = closest(_SALARY_PAY_CONTEXT)
+    benefit_distance = closest(_SALARY_BENEFIT_CONTEXT)
+    return pay_distance is not None and (benefit_distance is None or pay_distance < benefit_distance)
+
+
 def extract_salary(text, job_location=""):
-    """Extract a salary only when its labelled location matches the job location."""
+    """Extract pay for the job's location, excluding nearby benefit allowances."""
     patterns = [
         # Currency then amount: "AED 25,000 - 40,000" or "$90k - $120k" (min 4 digits or k suffix)
         r'(?:aed|usd|sar|us\$|\$|£|€)\s*(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:aed|usd|sar|us\$|\$|£|€)?\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK]))?\s*(?:per\s+(?:month|year|annum)|p\.?[am]\.?|monthly|annually|\/\s*(?:month|year|mo|yr))?',
@@ -2155,7 +2249,17 @@ def extract_salary(text, job_location=""):
         matches.extend(re.finditer(pattern, text, flags=re.IGNORECASE))
     for match in sorted(matches, key=lambda item: item.start()):
         label = _salary_location_label(text, match.start())
-        if _salary_matches_job_location(label, job_location):
+        labelled_range = (
+            bool(label)
+            and bool(re.search(r"\d[^.;\n]*[-–][^.;\n]*\d", match.group(0)))
+            and not re.search(
+                r"\b(?:allowances?|flights?|airfare|housing|relocation)\b",
+                text[max(0, match.start() - 35):match.end() + 35],
+                re.IGNORECASE,
+            )
+        )
+        if (_salary_matches_job_location(label, job_location)
+                and (_salary_has_pay_context(text, match.start(), match.end()) or labelled_range)):
             return match.group(0).strip()
     return ""
 

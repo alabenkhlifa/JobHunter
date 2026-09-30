@@ -318,16 +318,17 @@ Main pieces:
 Start Chromium with remote debugging, open a LinkedIn/ATS application page, then run:
 
 ```bash
-python -m jobhunter_auto_apply.cli inspect --job-id <job_id>
+python -m jobhunter_auto_apply.cli inspect --job-id <job_id> --page-url <current_application_url>
 ```
 
-This records application state and prints a compact page review. It detects common blockers such as CAPTCHA, phone verification, privacy/T&C text, salary, visa/work-authorization, and final-certification language.
+This records application state and prints a compact page review. The exact URL selects the intended tab when several are open. A blank or loading page is rejected. Inspection detects common blockers such as visible CAPTCHA, phone verification, missing required fields, privacy/T&C text, salary, visa/work-authorization, and final-certification language.
 
 ### Upload only with approval
 
 ```bash
 python -m jobhunter_auto_apply.cli upload \
   --job-id <job_id> \
+  --page-url <current_application_url> \
   --selector 'input[type=file]' \
   --file data/output/<job_id>/resume.pdf \
   --approved
@@ -340,11 +341,13 @@ Without `--approved`, the engine blocks and records `blocked_resume_upload_appro
 ```bash
 python -m jobhunter_auto_apply.cli submit \
   --job-id <job_id> \
+  --page-url <current_application_url> \
   --selector 'button[type=submit]' \
   --approved
 ```
 
 Without `--approved`, the engine blocks and records `blocked_submit_approval`.
+Clicking Submit records only `submission_attempted`; verify a receipt for the exact role before recording `submitted` or claiming the Sheet is updated.
 
 ### Human CAPTCHA handoff from a phone
 

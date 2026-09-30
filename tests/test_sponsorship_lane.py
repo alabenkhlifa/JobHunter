@@ -106,6 +106,46 @@ def test_offered_without_any_quote_is_downgraded_and_reported(conn):
     assert report and report[0]["job_id"] == "bare"
 
 
+def test_reviewer_relocation_quote_cannot_create_visa_offer(conn):
+    description = "We offer relocation support to Dubai or Madrid."
+    insert(conn, "relocation", description=description)
+    # Simulate a pre-read that missed the text, so the reviewer upgrade path runs.
+    conn.execute(
+        "UPDATE jobs SET sponsorship_signal = '', sponsorship_evidence = '' WHERE id = 'relocation'"
+    )
+    conn.commit()
+    report = []
+
+    scraper.record_review(conn, [verdict(
+        "relocation", sponsorship="offered", evidence=description,
+    )], report=report)
+
+    row = conn.execute(
+        "SELECT ai_sponsorship, sponsorship_signal, sponsorship_evidence FROM jobs WHERE id = 'relocation'"
+    ).fetchone()
+    assert tuple(row) == ("no_info", "", "")
+    assert report and "visa/work-permit quote" in report[0]["note"]
+
+
+def test_old_relocation_offer_is_downgraded_when_read(conn):
+    description = "We offer relocation support to Dubai or Madrid."
+    insert(conn, "old-relocation", description=description)
+    conn.execute(
+        """UPDATE jobs SET sponsorship_signal = 'offered', sponsorship_evidence = ?,
+                  ai_sponsorship = 'offered' WHERE id = 'old-relocation'""",
+        (description,),
+    )
+    conn.commit()
+
+    [candidate] = scraper.get_review_candidates(conn, now=NOW)
+
+    assert candidate["sponsorship_signal"] != "offered"
+    assert candidate["ai_sponsorship"] == "implied"
+    digest = scraper.format_digest_message([dict(candidate, market="dubai")], 0, [], today=NOW)
+    assert "Visa unconfirmed" in digest
+    assert "Visa offered" not in digest
+
+
 @pytest.mark.parametrize("legacy", ["implied", "doubtful"])
 def test_legacy_reads_normalise_to_no_info_with_a_note(conn, legacy):
     insert(conn, "old")

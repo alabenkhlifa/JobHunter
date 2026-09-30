@@ -144,7 +144,7 @@ Blocked    → generate nothing and record no package stage → Refine resume / 
 Proceed   → begin application prep only; final submit remains explicitly approval-gated
 ```
 
-The research card is intentionally brief and warning-only. It does a best-effort web lookup for company/recruiter/salary context, then falls back to stored metadata if search fails. It summarizes company context, recruiter/poster info when stored, obvious legitimacy concerns, and a salary note compared with the configurable monthly AED target:
+The research card is intentionally brief and warning-only. It does a best-effort web lookup for company/recruiter/salary context, then falls back to stored metadata if search fails. It summarizes company context, recruiter/poster info when stored, obvious legitimacy concerns, and salary guidance in the job market's currency. The monthly AED target applies only to UAE roles:
 
 ```env
 JOBHUNTER_TARGET_SALARY_AED_MONTHLY=30000
@@ -155,7 +155,7 @@ JOBHUNTER_WEB_RESEARCH_TIMEOUT=8
 Inspect the currently open application page through Chromium CDP:
 
 ```bash
-python -m jobhunter_auto_apply.cli inspect --job-id <job_id>
+python -m jobhunter_auto_apply.cli inspect --job-id <job_id> --page-url <current_application_url>
 ```
 
 Upload only after explicit approval:
@@ -163,6 +163,7 @@ Upload only after explicit approval:
 ```bash
 python -m jobhunter_auto_apply.cli upload \
   --job-id <job_id> \
+  --page-url <current_application_url> \
   --selector 'input[type=file]' \
   --file data/output/<job_id>/resume.pdf \
   --approved
@@ -173,9 +174,12 @@ Submit only after explicit approval:
 ```bash
 python -m jobhunter_auto_apply.cli submit \
   --job-id <job_id> \
+  --page-url <current_application_url> \
   --selector 'button[type=submit]' \
   --approved
 ```
+
+The submit helper records `submission_attempted`. Confirm the exact role's receipt and evidence screenshot before recording `submitted` or reporting tracker completion.
 
 ## Repository layout
 

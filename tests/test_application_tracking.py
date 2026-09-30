@@ -129,14 +129,18 @@ def test_record_application_stage_can_defer_commit_and_tracker_sync(tmp_path, mo
         lambda: sync_calls.append("sync"),
     )
 
-    scraper.record_application_stage(
+    receipt = scraper.record_application_stage(
         conn,
         "li-transactional",
         "package_generated",
         commit=False,
         sync=False,
+        return_receipt=True,
     )
 
+    assert isinstance(receipt, scraper.ApplicationStageReceipt)
+    assert receipt.database_committed is False
+    assert receipt.tracker_sync_succeeded is None
     observer = sqlite3.connect(db_path)
     assert observer.execute(
         "SELECT COUNT(*) FROM applications WHERE job_id = ?",
@@ -171,7 +175,7 @@ def test_mark_interested_records_application_stage():
         "LinkedIn",
         "linkedin_unknown",
         "https://example.com",
-        "Marked interested from JobHunter; next safe step is package_generated then draft_ready before approval/submission.",
+        "Marked interested from JobHunter; show research brief, then Apply to generate a package, then Proceed to apply for draft preparation.",
     )
 
 
@@ -184,6 +188,17 @@ def test_mark_interested_missing_job_does_not_create_application():
     scraper.init_application_tracking(conn)
     count = conn.execute("SELECT COUNT(*) FROM applications WHERE job_id = 'missing'").fetchone()[0]
     assert count == 0
+
+
+def test_mark_interested_preserves_submitted_application():
+    conn = make_conn_with_jobs()
+    scraper.record_application_stage(conn, "li-1", "submitted", sync=False)
+    conn.execute("UPDATE jobs SET status = 'interested' WHERE id = 'li-1'")
+    conn.commit()
+
+    assert scraper.mark_interested(conn, "li-1") is False
+    assert conn.execute("SELECT stage FROM applications WHERE job_id = 'li-1'").fetchone()[0] == "submitted"
+    assert conn.execute("SELECT status FROM jobs WHERE id = 'li-1'").fetchone()[0] == "interested"
 
 
 def test_record_application_stage_auto_syncs_when_enabled_for_file_db(tmp_path, monkeypatch):
@@ -228,8 +243,13 @@ def test_record_application_stage_auto_syncs_when_enabled_for_file_db(tmp_path, 
     monkeypatch.setenv("JOBHUNTER_TRACKER_SYNC_COMMAND", "/tmp/sync-tracker --fast")
     monkeypatch.setattr(scraper.subprocess, "run", fake_run)
 
-    scraper.record_application_stage(conn, "li-1", "package_generated")
+    receipt = scraper.record_application_stage(
+        conn, "li-1", "package_generated", return_receipt=True,
+    )
 
+    assert receipt.application_id == conn.execute("SELECT id FROM applications").fetchone()[0]
+    assert receipt.database_committed is True
+    assert receipt.tracker_sync_succeeded is True
     assert calls
     assert calls[0][0] == ["/tmp/sync-tracker", "--fast"]
     assert calls[0][1]["check"] is False
@@ -246,10 +266,49 @@ def test_record_application_stage_auto_sync_failure_does_not_block(tmp_path, mon
     monkeypatch.setenv("JOBHUNTER_TRACKER_SYNC_COMMAND", "/tmp/sync-tracker")
     monkeypatch.setattr(scraper.subprocess, "run", fake_run)
 
-    app_id = scraper.record_application_stage(conn, "li-1", "blocked_captcha")
+    receipt = scraper.record_application_stage(
+        conn, "li-1", "blocked_captcha", return_receipt=True,
+    )
 
-    assert isinstance(app_id, int)
+    assert isinstance(receipt.application_id, int)
+    assert receipt.database_committed is True
+    assert receipt.tracker_sync_succeeded is False
     assert conn.execute("SELECT stage FROM applications WHERE job_id = 'li-1'").fetchone()[0] == "blocked_captcha"
+
+
+def test_stage_receipt_distinguishes_disabled_and_in_memory_tracker(tmp_path, monkeypatch):
+    monkeypatch.setenv("JOBHUNTER_AUTO_SYNC_TRACKER", "false")
+    with sqlite3.connect(tmp_path / "jobs.db") as conn:
+        receipt = scraper.record_application_stage(
+            conn, "file-job", "submitted", return_receipt=True,
+        )
+        assert receipt.database_committed is True
+        assert receipt.tracker_sync_succeeded is False
+
+    with sqlite3.connect(":memory:") as conn:
+        receipt = scraper.record_application_stage(
+            conn, "memory-job", "submitted", return_receipt=True,
+        )
+        assert receipt.database_committed is True
+        assert receipt.tracker_sync_succeeded is None
+
+
+def test_tracker_failure_output_is_not_logged(tmp_path, monkeypatch, caplog):
+    class FailedResult:
+        returncode = 1
+        stdout = "private spreadsheet identifier"
+        stderr = "private OAuth response"
+
+    monkeypatch.setenv("JOBHUNTER_AUTO_SYNC_TRACKER", "true")
+    monkeypatch.setenv("JOBHUNTER_TRACKER_SYNC_COMMAND", "/tmp/sync-tracker")
+    monkeypatch.setattr(scraper.subprocess, "run", lambda *args, **kwargs: FailedResult())
+    with sqlite3.connect(tmp_path / "jobs.db") as conn:
+        receipt = scraper.record_application_stage(
+            conn, "job", "submitted", return_receipt=True,
+        )
+
+    assert receipt.tracker_sync_succeeded is False
+    assert "private" not in caplog.text
 
 
 def test_package_reference_rejects_document_file_without_changing_record(tmp_path):

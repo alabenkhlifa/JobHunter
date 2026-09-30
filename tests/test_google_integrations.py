@@ -458,7 +458,16 @@ def test_monitor_full_email_rejection_updates_database_sheet_and_notification(tm
     sheets.spreadsheets().get().execute.return_value = {"sheets": [{"properties": {
         "sheetId": 123, "title": "Applications", "gridProperties": {"rowCount": 100},
     }}]}
-    sheets.spreadsheets().values().get().execute.return_value = {"values": before}
+    reads = []
+    def read_sheet():
+        reads.append(True)
+        if len(reads) < 3:
+            return {"values": before}
+        incoming = google_tracker.rows_from_db(db, tmp_path)
+        merged, _ = google_tracker_sync.merge_rows(before, incoming, repo_root=tmp_path)
+        _, newest_first = google_tracker_sync.newest_first_requests(123, merged)
+        return {"values": newest_first}
+    sheets.spreadsheets().values().get().execute.side_effect = read_sheet
     monkeypatch.setattr(google_tracker, "google_services", lambda _: (sheets, drive))
     tracker_args = argparse.Namespace(
         google_token=tmp_path / "tracker-token.json", spreadsheet_id="test-sheet", sheet_id=123,

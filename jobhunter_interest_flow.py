@@ -165,14 +165,14 @@ class TailoringReadinessError(RuntimeError):
     """Raised when a safe, role-appropriate application package cannot be generated."""
 
 
-def salary_market(job: dict[str, Any] | None = None) -> str:
-    """Which pay market a job belongs to, from its displayed location."""
-    if not job:
+def salary_market(job: dict[str, Any] | None = None) -> str | None:
+    """Return a configured pay market only when the location identifies one."""
+    if job is None:
         return DEFAULT_SALARY_MARKET
     location = scraper.normalize_location(job.get("location", "")).lower()
     if not location:
-        return DEFAULT_SALARY_MARKET
-    best_market, best_len = DEFAULT_SALARY_MARKET, 0
+        return None
+    best_market, best_len = None, 0
     for market, aliases in SALARY_MARKET_ALIASES.items():
         for alias in aliases:
             if alias in location and len(alias) > best_len:
@@ -180,9 +180,12 @@ def salary_market(job: dict[str, Any] | None = None) -> str:
     return best_market
 
 
-def salary_target(job: dict[str, Any] | None = None) -> dict[str, Any]:
+def salary_target(job: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """The configured ask for a job's market, env override applied."""
-    target = dict(SALARY_TARGETS[salary_market(job)])
+    market = salary_market(job)
+    if market is None:
+        return None
+    target = dict(SALARY_TARGETS[market])
     env = f"JOBHUNTER_TARGET_SALARY_{target['currency']}_{target['period'].upper()}LY"
     raw = os.getenv(env, "").strip()
     digits = re.sub(r"[^0-9]", "", raw)
@@ -204,6 +207,8 @@ def format_salary(amount: int, currency: str, period: str) -> str:
 
 def target_salary_label(job: dict[str, Any] | None = None) -> str:
     target = salary_target(job)
+    if target is None:
+        return "No configured target for this location"
     return format_salary(target["amount"], target["currency"], target["period"])
 
 
@@ -313,8 +318,25 @@ def web_search_results(
 
 
 def salary_search_queries(title: str, location: str) -> list[str]:
-    city = str(location or "Dubai").split(",", 1)[0].strip() or "Dubai"
+    city = str(location or "").split(",", 1)[0].strip()
     normalized_title = " ".join(str(title or "software architect").replace("/", " ").split())
+    market = salary_market({"location": location})
+    if market is None:
+        place = city or "the job location"
+        return [
+            f"site:glassdoor.com {place} {normalized_title} salary",
+            f"site:indeed.com {place} {normalized_title} salary",
+            f"{place} {normalized_title} salary",
+        ]
+    if market != "uae":
+        target = SALARY_TARGETS[market]
+        place = city or location
+        return [
+            f"site:glassdoor.com {place} {normalized_title} salary",
+            f"site:indeed.com {place} {normalized_title} salary",
+            f"{place} {normalized_title} salary {target['currency']}",
+        ]
+    city = city or "Dubai"
     return [
         f"site:gulftalent.com UAE {normalized_title} salary",
         f"site:payscale.com Dubai {normalized_title} salary",
@@ -363,7 +385,7 @@ def salary_role_title(title: str) -> str:
 
 
 def company_salary_search_queries(company: str, title: str, location: str) -> list[str]:
-    city = str(location or "Dubai").split(",", 1)[0].strip() or "Dubai"
+    city = str(location or "").split(",", 1)[0].strip()
     role = salary_role_title(title)
     search_company = company_search_name(company)
     if not search_company:
@@ -447,18 +469,11 @@ def fetch_levels_salary_source(
             continue
 
         lines = [" ".join(line.split()) for line in markdown.splitlines() if line.strip()]
-        salary_line = next(
-            (
-                line for line in lines
-                if "aed" in line.lower()
-                and any(term in line.lower() for term in ("compensation", "salary", "pay", "ranges from"))
-            ),
-            "",
-        )
+        salary_line = next((line for line in lines if _looks_like_salary_amount(line)), "")
         if salary_line:
             salary_line = re.split(r"(?<=[A-Za-z0-9])\.(?=\s+[A-Z])", salary_line, maxsplit=1)[0].rstrip(".") + "."
         evidence = {"title": " ".join(lines[:12]), "url": "", "snippet": salary_line}
-        location_evidence = {"title": "", "url": candidate_url, "snippet": f"{salary_line} {' '.join(lines[:20])}"}
+        location_evidence = {"title": " ".join(lines[:20]), "snippet": salary_line}
         if (
             not salary_line
             or not _result_matches_company(company, evidence)
@@ -621,9 +636,20 @@ def validated_job_salary(job: dict[str, Any]) -> str:
     description = str(job.get("description") or "")
     normalized_stored = re.sub(r"[\s,]+", "", stored).lower()
     normalized_description = re.sub(r"[\s,]+", "", description).lower()
-    if description and normalized_stored and normalized_stored in normalized_description:
-        return scraper.extract_salary(description, str(job.get("location") or ""))
-    return stored
+    if not description or not normalized_stored or normalized_stored not in normalized_description:
+        return ""
+    # Legacy extraction could select a benefit such as an annual flight
+    # allowance. Only trust the stored amount when the posting itself puts
+    # it in pay context and its location label matches this vacancy.
+    matches = list(re.finditer(re.escape(stored), description, flags=re.IGNORECASE))
+    for match in matches:
+        label = scraper._salary_location_label(description, match.start())
+        if (
+            scraper._salary_matches_job_location(label, str(job.get("location") or ""))
+            and _amount_has_pay_context(description, match.start(), match.end())
+        ):
+            return stored
+    return ""
 
 
 def company_profile_search_queries(company: str, title: str, location: str) -> list[str]:
@@ -1035,8 +1061,16 @@ def research_job(job: dict[str, Any]) -> JobResearch:
         research.company_salary_sources = company_salary_sources
         research.company_salary_checks = company_salary_check_labels(str(company))
         research.verified_signals.append("Company-specific compensation evidence found.")
-        first_company_salary = company_salary_sources[0]
-        research.salary_range = f"Company-specific: {first_company_salary['snippet'][:180]}"
+        numeric_salary = next((
+            item for item in company_salary_sources
+            if item.get("source") != "Company careers page"
+            and _looks_like_salary_amount(str(item.get("snippet") or ""))
+            and _salary_source_matches_job_location(item, str(location))
+        ), None)
+        if numeric_salary:
+            research.salary_range = f"Company-specific: {numeric_salary['snippet'][:180]}"
+        else:
+            research.missing_signals.append("No company-specific salary range found.")
         research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in company_salary_sources)]))[:8]
     else:
         research.company_salary_checks = company_salary_check_labels(str(company))
@@ -1047,6 +1081,8 @@ def research_job(job: dict[str, Any]) -> JobResearch:
 def format_salary_band(band_name: str, job: dict[str, Any] | None = None) -> str:
     """A rough pay band for the job's market, derived from the configured ask."""
     target = salary_target(job)
+    if target is None:
+        return ""
     low_ratio, high_ratio = SALARY_BANDS[band_name]
     step = 1000 if target["period"] == "month" else 5000
     low = int(round(target["amount"] * low_ratio / step) * step)
@@ -1060,8 +1096,13 @@ def estimate_salary_range(job: dict[str, Any]) -> str:
     We keep this intentionally brief and transparent. Live research can replace
     or augment this text, but callbacks need a no-network fallback.
     """
-    if (job.get("salary") or "").strip():
-        return f"Published salary: {job['salary']}. Target ask: {target_salary_label(job)}."
+    published_salary = validated_job_salary(job)
+    target = salary_target(job)
+    if published_salary:
+        target_note = f" Target ask: {target_salary_label(job)}." if target else ""
+        return f"Published salary: {published_salary}.{target_note}"
+    if target is None:
+        return "Salary not published; no configured target for this location."
     title = (job.get("title") or "").lower()
     tech = (job.get("tech_required") or "").lower()
     exp = job.get("min_experience") or -1
@@ -1147,18 +1188,65 @@ def _esc(value: Any) -> str:
     return html.escape(str(value or "").strip())
 
 
+_CURRENCY_AMOUNT = re.compile(
+    r"(?:(?:AED|USD|SAR|EUR|CHF|GBP|US\$|[$£€])\s*\d[\d,]*(?:\.\d+)?[kK]?"
+    r"|\d[\d,]*(?:\.\d+)?[kK]?\s*(?:AED|USD|SAR|EUR|CHF|GBP))",
+    flags=re.IGNORECASE,
+)
+_PAY_CONTEXT = re.compile(
+    r"\b(?:salar(?:y|ies)|base pay|base compensation|total compensation|compensation|"
+    r"remuneration|wages?|per month|monthly|per year|per annum|annual pay)\b"
+    r"|/(?:month|mo|year|yr)\b",
+    flags=re.IGNORECASE,
+)
+_BENEFIT_CONTEXT = re.compile(
+    r"\b(?:flights?|airfare|air tickets?|travel|relocation|housing|accommodation|"
+    r"education|meals?|transport(?:ation)?|allowances?|bonus|stipend)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _amount_has_pay_context(text: str, start: int, end: int) -> bool:
+    """Distinguish a salary figure from a nearby benefit amount."""
+    before = re.split(r"[.;\n]", text[max(0, start - 90):start])[-1]
+    after = re.split(r"[.;\n]", text[end:end + 60], maxsplit=1)[0]
+    context = f"{before} {after}"
+    amount_at = len(before)
+
+    def closest(pattern: re.Pattern[str]) -> int | None:
+        distances = [
+            min(abs(match.start() - amount_at), abs(match.end() - amount_at))
+            for match in pattern.finditer(context)
+        ]
+        return min(distances) if distances else None
+
+    pay_distance = closest(_PAY_CONTEXT)
+    benefit_distance = closest(_BENEFIT_CONTEXT)
+    return pay_distance is not None and (benefit_distance is None or pay_distance < benefit_distance)
+
+
 def _looks_like_salary_amount(text: str) -> bool:
-    value = text or ""
-    amount = r"(?:(?:AED|USD|SAR)\s*\d[\d,]*(?:\.\d+)?[kK]?|[$£€]\s*\d[\d,]*(?:\.\d+)?[kK]?|\d[\d,]*(?:\.\d+)?[kK]?\s*(?:AED|USD|SAR))"
-    context = r"(?:salary|salaries|pay|compensation|base|total|range|/month|per month|monthly|/year|per year|yearly|annually)"
-    return bool(
-        re.search(rf"{context}.{{0,60}}{amount}|{amount}.{{0,60}}{context}", value, flags=re.IGNORECASE)
+    value = str(text or "")
+    return any(
+        _amount_has_pay_context(value, match.start(), match.end())
+        for match in _CURRENCY_AMOUNT.finditer(value)
     )
 
 
 def _salary_source_matches_job_location(item: dict[str, str], job_location: str) -> bool:
     text = f"{item.get('title') or ''} {item.get('snippet') or ''}".lower()
     location_group = scraper._salary_location_group(job_location)
+    # AED results occasionally appear in an international site's default
+    # locale. Without a matching local-currency figure, they are not evidence
+    # of compensation for a Madrid or Zurich vacancy.
+    if location_group != "uae" and re.search(r"\bAED\b", text, flags=re.IGNORECASE):
+        local_currency = {
+            "spain": r"\bEUR\b|€",
+            "saudi_arabia": r"\bSAR\b",
+            "switzerland": r"\bCHF\b",
+        }.get(location_group)
+        if local_currency is None or not re.search(local_currency, text, flags=re.IGNORECASE):
+            return False
     if location_group:
         aliases = scraper.SALARY_LOCATION_GROUPS[location_group]
         return any(re.search(rf"\b{re.escape(alias)}\b", text) for alias in aliases)
@@ -1189,7 +1277,7 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
     numeric_salary = sorted([
         item for item in research.company_salary_sources
         if item.get("source") != "Company careers page"
-        and _looks_like_salary_amount(f"{item.get('title') or ''} {item.get('snippet') or ''}")
+        and _looks_like_salary_amount(str(item.get("snippet") or ""))
         and _salary_source_matches_job_location(item, str(job.get("location") or ""))
     ], key=lambda item: salary_source_priority.get(str(item.get("source") or ""), 99))[:1]
     compensation_notes = [
@@ -1220,7 +1308,7 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
 
 <b>Company:</b> {_esc(company_line)}
 <b>Pay:</b> {pay_line}{benefits_block}
-<b>Ask:</b> Fixed monthly salary and bonus/equity terms.
+<b>Ask:</b> Base salary, currency, pay period and bonus/equity terms.
 
 Choose next step:"""
 

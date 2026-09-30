@@ -12,6 +12,8 @@ from jobhunter_auto_apply.engine import (
     inspect_page,
     inspection_to_markdown,
 )
+from jobhunter_auto_apply.cdp import CDPError, CDPTarget, connect_first_page
+from jobhunter_auto_apply.cli import build_parser
 
 
 class FakeClient:
@@ -53,6 +55,57 @@ def test_inspect_page_detects_sensitive_questions_and_blockers():
     assert not inspection.safe_to_continue
 
 
+def test_inspect_page_requires_loaded_page_and_complete_fields():
+    blank = inspect_page(FakeClient({"url": "about:blank", "title": "", "text": ""}))
+    assert not blank.loaded_application_page
+    assert not blank.safe_to_continue
+
+    incomplete = inspect_page(FakeClient({
+        "url": "https://jobs.example.test/apply",
+        "title": "Apply",
+        "text": "Application",
+        "inputs": [{"label": "Current salary", "required": True, "value_present": False, "invalid": True}],
+        "challenge_visible": True,
+    }))
+    assert incomplete.missing_required == ["Current salary"]
+    assert incomplete.invalid_fields == ["Current salary"]
+    assert "human verification" in incomplete.blockers
+    assert not incomplete.safe_to_continue
+
+
+def test_engine_does_not_record_blank_inspection(tmp_path):
+    db = tmp_path / "jobs.db"
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False),
+                             client=FakeClient({"url": "about:blank", "title": "", "text": ""}))
+    with pytest.raises(CDPError, match="blank or still loading"):
+        engine.inspect("job-1")
+    assert not db.exists()
+
+
+def test_cdp_connection_requires_unambiguous_application_tab(monkeypatch):
+    targets = [
+        CDPTarget("blank", "", "about:blank", "page", "ws://localhost/blank"),
+        CDPTarget("one", "One", "https://jobs.example.test/one", "page", "ws://localhost/one"),
+        CDPTarget("two", "Two", "https://jobs.example.test/two", "page", "ws://localhost/two"),
+    ]
+    monkeypatch.setattr("jobhunter_auto_apply.cdp.list_targets", lambda *args: targets)
+    selected = Mock()
+    monkeypatch.setattr("jobhunter_auto_apply.cdp.CDPClient", lambda url, timeout: selected if url.endswith("/two") else None)
+    with pytest.raises(CDPError, match="multiple application tabs"):
+        connect_first_page()
+    assert connect_first_page(expected_url="https://jobs.example.test/two") is selected
+    with pytest.raises(CDPError, match="application page not found"):
+        connect_first_page(expected_url="https://jobs.example.test/other")
+
+
+def test_mutating_cli_commands_require_exact_page_url():
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["upload", "--job-id", "job-1", "--selector", "input[type=file]", "--file", "resume.pdf", "--approved"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["submit", "--job-id", "job-1", "--selector", "button[type=submit]", "--approved"])
+
+
 def test_markdown_summary_includes_required_fields():
     inspection = PageInspection(
         url="https://example.test/apply",
@@ -86,6 +139,19 @@ def test_submit_requires_approval(tmp_path):
         engine.click_submit("job-1", "button[type=submit]", approved=False)
 
 
+def test_mutations_require_exact_application_url(tmp_path):
+    document = tmp_path / "resume.pdf"
+    document.write_bytes(b"pdf")
+    client = Mock()
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db")), client)
+    with pytest.raises(PermissionError, match="page URL is required"):
+        engine.upload_file("job-1", "input[type=file]", str(document), approved=True)
+    with pytest.raises(PermissionError, match="page URL is required"):
+        engine.click_submit("job-1", "button[type=submit]", approved=True)
+    client.upload_file.assert_not_called()
+    client.evaluate.assert_not_called()
+
+
 def test_approved_upload_preserves_permanent_package_directory(tmp_path, monkeypatch):
     db = tmp_path / "jobs.db"
     package = tmp_path / "output" / "job-1"
@@ -95,8 +161,9 @@ def test_approved_upload_preserves_permanent_package_directory(tmp_path, monkeyp
     cached.write_bytes(b"test-only PDF placeholder")
     with closing(sqlite3.connect(db)) as conn, conn:
         scraper.record_application_stage(conn, "job-1", "package_generated", package_path=str(package), sync=False)
-    client = FakeClient()
-    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), output_dir=str(tmp_path)), client=client)
+    client = FakeClient("https://example.test/apply")
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), output_dir=str(tmp_path),
+                                        expected_page_url="https://example.test/apply"), client=client)
     monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
     monkeypatch.setattr(engine, "inspect", lambda *args, **kwargs: None)
     engine.upload_file("job-1", "input[type=file]", str(cached), approved=True)
@@ -124,10 +191,22 @@ def test_scoped_submit_records_attempt_and_skips_global_tracker(tmp_path, monkey
 def test_scoped_missing_submit_control_never_records_success(tmp_path, monkeypatch):
     client = Mock()
     client.evaluate.return_value = {"ok": False}
-    engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), tracker_sync=False, verify_submission=True), client)
-    with pytest.raises(PermissionError, match="not available"):
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), tracker_sync=False, verify_submission=True,
+                                        expected_page_url="https://example.test/apply"), client)
+    with pytest.raises(PermissionError, match="not submitted"):
         engine.click_submit("job-1", '[id="submit"]', approved=True)
     assert not (tmp_path / "jobs.db").exists()
+
+
+def test_submit_is_only_an_attempt_until_receipt_is_verified(tmp_path, monkeypatch):
+    client = FakeClient()
+    monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), tracker_sync=False,
+                                        expected_page_url="https://example.test/apply"), client)
+    monkeypatch.setattr(engine, "inspect", Mock())
+    engine.click_submit("job-1", "button[type=submit]", approved=True)
+    with closing(sqlite3.connect(tmp_path / "jobs.db")) as db:
+        assert db.execute("SELECT stage FROM applications").fetchone()[0] == "submission_attempted"
 
 
 def test_scoped_upload_checks_url_at_mutation_time(tmp_path):
@@ -172,7 +251,8 @@ def test_container_upload_rejects_other_candidate_file_or_symlink(tmp_path, syml
         document.symlink_to(foreign)
     client = Mock()
     engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), output_dir=str(output),
-                                        tracker_sync=False, browser_output_dir="/documents"), client)
+                                        tracker_sync=False, browser_output_dir="/documents",
+                                        expected_page_url="https://example.test/apply"), client)
     with pytest.raises(PermissionError, match="outside"):
         engine.upload_file("job-1", '[id="resume"]', str(document), approved=True)
     client.upload_file.assert_not_called()

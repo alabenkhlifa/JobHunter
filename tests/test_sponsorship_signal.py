@@ -10,7 +10,6 @@ import job_scoring
     "Either remote or UAE based (with visa sponsorship). Paid access to tools.",
     "Benefits can include family visas, annual flight tickets, medical insurance.",
     "Planned support includes a UAE employment visa, medical insurance, the initial flight.",
-    "We offer a comprehensive relocation package for international candidates.",
     "Work permit support is provided for the successful candidate.",
     "Visa sponsorship is available for this position.",
     "Relocation assistance and visa support provided.",
@@ -19,18 +18,36 @@ import job_scoring
     "Benefits: Family benefits: visa, insurance, yearly airline ticket.",
     "Salary: 40k/50k AED PM Tax Free + Visa + Healthcare for self and family.",
     "The gross salary is maximum 26,000 AED with company provided visa, health insurance and yearly airfare.",
-    "Red Hat will support relocation to the UAE for a successful candidate.",
-    "25 days of annual leave, variety of pension plans, and relocation packages.",
-    "Competitive tax-free salary + full relocation + premium airline travel benefits.",
     "The employer covers visa and accommodation costs, and candidates go through interviews.",
-    "We help you with your relocation.",
     "Is role eligible for Immigration Sponsorship?: Yes",
-    "Relocation & Residency: Full support for UAE residency and assistance with the UAE Golden Visa.",
 ])
 def test_positive_wordings_read_as_offered(text):
     signal, evidence = job_scoring.sponsorship_signal(text)
     assert signal == "offered"
     assert evidence and evidence in " ".join(text.split())
+
+
+@pytest.mark.parametrize("text", [
+    "We offer a comprehensive relocation package for international candidates.",
+    "Red Hat will support relocation to the UAE for a successful candidate.",
+    "25 days of annual leave, variety of pension plans, and relocation packages.",
+    "Competitive tax-free salary + full relocation + premium airline travel benefits.",
+    "We help you with your relocation.",
+    "Relocation & Residency: Full support for UAE residency and assistance with the UAE Golden Visa.",
+    "Relocation support to Dubai or Madrid is available.",
+    "Huspy supports relocation to Dubai or Madrid.",
+])
+def test_relocation_without_work_permission_reads_as_unconfirmed(text):
+    signal, evidence = job_scoring.sponsorship_signal(text)
+    assert signal == "implied"
+    assert evidence and evidence in " ".join(text.split())
+
+
+def test_explicit_work_visa_offer_outranks_relocation_only_signal():
+    text = "We offer relocation support to Madrid. Work permit support is provided."
+    signal, evidence = job_scoring.sponsorship_signal(text)
+    assert signal == "offered"
+    assert "Work permit support" in evidence
 
 
 @pytest.mark.parametrize("text", [

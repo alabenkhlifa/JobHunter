@@ -53,9 +53,19 @@ def test_salary_market_resolves_from_job_location():
     assert flow.salary_market(sample_job(location="Zurich, Switzerland")) == "switzerland"
 
 
-def test_salary_market_falls_back_to_uae_when_location_is_unknown():
-    assert flow.salary_market(sample_job(location="")) == "uae"
+def test_salary_market_requires_a_location_on_an_actual_job():
+    assert flow.salary_market(sample_job(location="")) is None
+    assert flow.salary_market({}) is None
     assert flow.salary_market(None) == "uae"
+
+
+def test_madrid_does_not_inherit_uae_salary_guidance():
+    job = sample_job(location="Madrid, Spain", title="Backend Software Engineer")
+
+    assert flow.salary_market(job) is None
+    assert flow.salary_target(job) is None
+    assert flow.estimate_salary_range(job) == "Salary not published; no configured target for this location."
+    assert all("AED" not in query and "Dubai" not in query for query in flow.salary_search_queries(job["title"], job["location"]))
 
 
 def test_target_salary_label_uses_the_market_currency_and_period():
@@ -291,6 +301,13 @@ def test_company_aliases_and_role_family_are_generic():
 
     assert all('"Amazon"' in query for query in queries)
     assert all('"Solutions Architect"' in query for query in queries[1:])
+
+
+def test_company_salary_search_does_not_assume_dubai_for_missing_location():
+    queries = flow.company_salary_search_queries("Huspy", "Backend Engineer", "")
+
+    assert queries
+    assert all("Dubai" not in query and "UAE" not in query for query in queries)
 
 
 def test_company_salary_search_accepts_alias_and_rejects_wrong_role(monkeypatch):
@@ -608,6 +625,33 @@ def test_legacy_salary_for_another_country_is_not_displayed():
     assert "No published range; no Google pay data" in message
 
 
+def test_annual_flight_allowance_is_not_reported_as_published_salary():
+    job = sample_job(
+        company="Hantec Trader",
+        salary="AED 2,500",
+        description="Competitive compensation includes an annual flight allowance of AED 2,500.",
+    )
+    research = flow.JobResearch(company_summary="Hantec Trader careers page.", legitimacy="")
+
+    assert flow.validated_job_salary(job) == ""
+    assert "AED 2,500" not in flow.estimate_salary_range(job)
+    message = flow.build_research_brief_message(job, research)
+    assert "No published range" in message
+    assert "AED 2,500" not in message
+
+
+def test_stored_salary_without_posting_evidence_is_not_reported_as_published():
+    job = sample_job(salary="AED 28,000", description="Build backend services.")
+    assert flow.validated_job_salary(job) == ""
+    assert "Published salary" not in flow.estimate_salary_range(job)
+
+
+def test_salary_and_flight_allowance_in_one_posting_are_distinguished():
+    description = "Base salary AED 28,000 per month; annual flight allowance AED 2,500."
+    assert flow.validated_job_salary(sample_job(salary="AED 28,000", description=description)) == "AED 28,000"
+    assert flow.validated_job_salary(sample_job(salary="AED 2,500", description=description)) == ""
+
+
 def test_fetch_verified_company_pages_uses_only_discovered_official_domain():
     calls = []
 
@@ -712,7 +756,7 @@ def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
     assert "Glassdoor, Indeed, PayScale, GulfTalent or Levels.fyi" in message
     assert "market" not in message.lower()
     assert "AED 25k" not in message
-    assert "Fixed monthly salary and bonus/equity terms" in message
+    assert "Base salary, currency, pay period and bonus/equity terms" in message
     assert len(message) < 600
 
 
@@ -790,6 +834,60 @@ def test_company_salary_for_another_location_is_not_displayed():
     assert "No published range; no Google pay data" in message
 
 
+def test_salary_page_title_does_not_turn_allowance_into_pay():
+    research = flow.JobResearch(
+        company_summary="Hantec Trader careers page.",
+        legitimacy="",
+        company_salary_sources=[{
+            "source": "Glassdoor",
+            "title": "Hantec Trader Java Backend Developer salary in Dubai",
+            "snippet": "Benefits include an AED 2,500 annual flight allowance.",
+            "url": "https://glassdoor.example/hantec",
+        }],
+    )
+    message = flow.build_research_brief_message(sample_job(company="Hantec Trader"), research)
+
+    assert "No published range" in message
+    assert "AED 2,500" not in message
+
+
+def test_madrid_research_rejects_aed_default_locale_pay():
+    research = flow.JobResearch(
+        company_summary="Huspy careers page.",
+        legitimacy="",
+        company_salary_sources=[{
+            "source": "Levels.fyi",
+            "title": "Huspy Software Engineer salary in Madrid",
+            "snippet": "Madrid total compensation AED 250K per year.",
+            "url": "https://levels.example/huspy-madrid",
+        }],
+    )
+    message = flow.build_research_brief_message(
+        sample_job(company="Huspy", location="Madrid, Spain"), research
+    )
+
+    assert "No published range" in message
+    assert "AED 250K" not in message
+
+
+def test_madrid_research_accepts_local_euro_pay_evidence():
+    research = flow.JobResearch(
+        company_summary="Huspy careers page.",
+        legitimacy="",
+        company_salary_sources=[{
+            "source": "Glassdoor",
+            "title": "Huspy Software Engineer salary in Madrid",
+            "snippet": "Madrid average base salary €65,000 per year.",
+            "url": "https://glassdoor.example/huspy",
+        }],
+    )
+    message = flow.build_research_brief_message(
+        sample_job(company="Huspy", location="Madrid, Spain"), research
+    )
+
+    assert "Glassdoor: Madrid average base salary €65,000 per year." in message
+
+
 def test_official_compensation_note_is_shown_as_benefits_not_salary():
     research = flow.JobResearch(
         company_summary="TrueForge is a Dubai-based technology consultancy.",
@@ -829,7 +927,7 @@ def test_low_confidence_research_is_actionable_not_generic(monkeypatch):
     assert "quick public web/company-page check" not in message
     assert "No independent company evidence" in message
     assert "No published range; no TrueForge pay data" in message
-    assert "Fixed monthly salary and bonus/equity terms" in message
+    assert "Base salary, currency, pay period and bonus/equity terms" in message
 
 
 def test_research_brief_keyboard_has_apply_ignore_and_details():

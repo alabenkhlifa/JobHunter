@@ -233,7 +233,13 @@ def sync_locked(args, state_dir):
         if needed_rows > 0:
             requests.insert(0, {"appendDimension": {"sheetId": sheet_id, "dimension": "ROWS", "length": needed_rows}})
         sheets.spreadsheets().batchUpdate(spreadsheetId=args.spreadsheet_id, body={"requests": requests}).execute()
+    # A successful batch response alone does not prove the application rows
+    # are visible in the Sheet. Keep the success marker behind this read-back.
+    visible = read_values()
+    if [normalized_row(row) for row in visible] != [normalized_row(row) for row in sorted_rows]:
+        raise RuntimeError("Tracker read-back did not match the expected rows; retry the sync.")
     write_private_json(state_path, {"format_signature": signature, "last_success_at": dt.datetime.now(dt.timezone.utc).isoformat(), "rows": len(after) - 1})
     summary["changed_cells"] = len(cell_requests(sheet_id, before, after))
     summary["moved_rows"] = len(moves)
+    summary["verified_rows"] = len(sorted_rows) - 1
     return summary

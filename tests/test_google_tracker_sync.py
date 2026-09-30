@@ -116,7 +116,11 @@ def test_newest_first_moves_whole_rows_across_months_and_is_idempotent():
 def services(tmp_path, monkeypatch):
     sheets, drive = Mock(), Mock()
     sheets.spreadsheets().get().execute.return_value = {"sheets": [{"properties": {"sheetId": 123, "title": "Applications", "gridProperties": {"rowCount": 100}}}]}
-    sheets.spreadsheets().values().get().execute.return_value = {"values": [tracker.HEADERS, row("old")]}
+    before = [tracker.HEADERS, row("old")]
+    after = [tracker.HEADERS, row("new", applied="03/09/2026 10:00"), row("old")]
+    sheets.spreadsheets().values().get().execute.side_effect = [
+        {"values": before}, {"values": before}, {"values": after},
+    ]
     monkeypatch.setattr(tracker, "google_services", Mock(return_value=(sheets, drive)))
     monkeypatch.setattr(tracker, "rows_from_db", Mock(return_value=[row("new", applied="03/09/2026 10:00")]))
     args = argparse.Namespace(google_token=tmp_path / "token.json", spreadsheet_id="test-sheet", sheet_id=123, tab_name="Applications", db_path=tmp_path / "jobs.db", repo_root=tmp_path, drive_state=tmp_path / "state/tracker_drive_files.json", drive_folder_name="Evidence", dry_run=False)
@@ -180,6 +184,8 @@ def test_sync_backs_up_then_writes_cells_colors_and_moves_in_one_batch(services)
     batch.side_effect = checked_batch
     result = sync.sync_tracker(args)
     assert result["rows"] == 2
+    assert result["verified_rows"] == 2
+    assert (args.drive_state.parent / "tracker_sync_state.json").exists()
     batch.assert_called_once()
     sheets.spreadsheets().values().clear.assert_not_called()
 
@@ -201,6 +207,18 @@ def test_failed_batch_keeps_snapshot_and_does_not_mark_success(services):
     with pytest.raises(RuntimeError):
         sync.sync_tracker(args)
     assert (args.drive_state.parent / "tracker_before_sync.json").exists()
+    assert not (args.drive_state.parent / "tracker_sync_state.json").exists()
+
+
+def test_readback_mismatch_does_not_mark_success(services):
+    args, sheets, _ = services
+    before = {"values": [tracker.HEADERS, row("old")]}
+    sheets.spreadsheets().values().get().execute.side_effect = [before, before, before]
+
+    with pytest.raises(RuntimeError, match="read-back did not match"):
+        sync.sync_tracker(args)
+
+    sheets.spreadsheets().batchUpdate.assert_called_once()
     assert not (args.drive_state.parent / "tracker_sync_state.json").exists()
 
 
@@ -235,7 +253,12 @@ def test_confirmation_upload_replaces_form_link_and_retry_is_idempotent(services
     incoming = row()
     incoming[11] = str(screenshot)
     monkeypatch.setattr(tracker, "rows_from_db", Mock(return_value=[incoming]))
-    sheets.spreadsheets().values().get().execute.return_value = {"values": [tracker.HEADERS, old]}
+    verified = [*old]
+    verified[11] = '=HYPERLINK("https://drive.google.com/confirmation", "Open screenshot")'
+    before = {"values": [tracker.HEADERS, old]}
+    sheets.spreadsheets().values().get().execute.side_effect = [
+        before, before, {"values": [tracker.HEADERS, verified]},
+    ]
     args.drive_state.parent.mkdir()
     args.drive_state.write_text(json.dumps({"folder_id": "managed-folder", "files": {}}))
     drive.files().create().execute.return_value = {"id": "confirmation", "webViewLink": "https://drive.google.com/confirmation"}
@@ -247,7 +270,9 @@ def test_confirmation_upload_replaces_form_link_and_retry_is_idempotent(services
     link = cells[0]["rows"][0]["values"][0]["userEnteredValue"]["formulaValue"]
     assert link == '=HYPERLINK("https://drive.google.com/confirmation", "Open screenshot")'
     old[11] = link
-    sheets.spreadsheets().values().get().execute.return_value = {"values": [tracker.HEADERS, old]}
+    sheets.spreadsheets().values().get().execute.side_effect = [
+        {"values": [tracker.HEADERS, old]}, {"values": [tracker.HEADERS, old]},
+    ]
     drive.files().create.reset_mock()
     sheets.spreadsheets().batchUpdate.reset_mock()
     assert sync.sync_tracker(args)["changed_cells"] == 0

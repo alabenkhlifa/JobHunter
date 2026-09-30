@@ -170,8 +170,22 @@ def list_targets(host: str = "127.0.0.1", port: int = 9222, timeout: float = 3.0
     return result
 
 
-def connect_first_page(host: str = "127.0.0.1", port: int = 9222, timeout: float = 10.0) -> CDPClient:
-    pages = [t for t in list_targets(host, port, timeout) if t.type == "page"]
+def connect_first_page(
+    host: str = "127.0.0.1",
+    port: int = 9222,
+    timeout: float = 10.0,
+    *,
+    expected_url: str | None = None,
+) -> CDPClient:
+    """Connect only when the application tab is unambiguous and loaded."""
+    pages = [
+        target for target in list_targets(host, port, timeout)
+        if target.type == "page" and urllib.parse.urlsplit(target.url).scheme in {"http", "https"}
+    ]
+    if expected_url is not None:
+        pages = [target for target in pages if target.url == expected_url]
     if not pages:
-        raise CDPError("no CDP page targets found")
+        raise CDPError("application page not found; open it in Chromium and inspect the current URL")
+    if len(pages) != 1:
+        raise CDPError("multiple application tabs found; select the exact page URL")
     return CDPClient(pages[0].websocket_url, timeout=timeout)

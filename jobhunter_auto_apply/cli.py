@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 
+from .cdp import CDPError
 from .engine import ApplyConfig, AutoApplyEngine, inspection_to_markdown
 
 
@@ -20,16 +21,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     inspect = sub.add_parser("inspect", help="Inspect current browser page and record draft/blocker state")
     inspect.add_argument("--job-id", required=True)
+    inspect.add_argument("--page-url", help="Exact URL when multiple browser tabs are open")
     inspect.add_argument("--json", action="store_true", help="Emit JSON instead of Markdown")
 
     upload = sub.add_parser("upload", help="Upload a file to a file input after explicit approval")
     upload.add_argument("--job-id", required=True)
+    upload.add_argument("--page-url", required=True, help="Exact URL of the approved application tab")
     upload.add_argument("--selector", required=True, help="CSS selector for input[type=file]")
     upload.add_argument("--file", required=True)
     upload.add_argument("--approved", action="store_true", help="Required to perform upload")
 
     submit = sub.add_parser("submit", help="Click final submit after explicit approval")
     submit.add_argument("--job-id", required=True)
+    submit.add_argument("--page-url", required=True, help="Exact URL of the approved application tab")
     submit.add_argument("--selector", required=True, help="CSS selector for submit button")
     submit.add_argument("--approved", action="store_true", help="Required to submit")
 
@@ -38,7 +42,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config = ApplyConfig(db_path=args.db, output_dir=args.output_dir, cdp_host=args.cdp_host, cdp_port=args.cdp_port)
+    config = ApplyConfig(
+        db_path=args.db,
+        output_dir=args.output_dir,
+        cdp_host=args.cdp_host,
+        cdp_port=args.cdp_port,
+        expected_page_url=args.page_url,
+        verify_submission=True,
+    )
     engine = AutoApplyEngine(config)
 
     try:
@@ -50,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
             inspection = engine.click_submit(args.job_id, args.selector, approved=args.approved)
         else:  # pragma: no cover
             raise AssertionError(args.command)
-    except PermissionError as exc:
+    except (PermissionError, CDPError, OSError) as exc:
         print(f"Blocked: {exc}", file=sys.stderr)
         return 2
 

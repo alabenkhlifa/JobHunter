@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 import scraper
 
@@ -82,10 +83,23 @@ class PageInspection:
     links: list[dict[str, Any]] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     sensitive_questions: list[str] = field(default_factory=list)
+    missing_required: list[str] = field(default_factory=list)
+    invalid_fields: list[str] = field(default_factory=list)
+
+    @property
+    def loaded_application_page(self) -> bool:
+        url = urlsplit(self.url)
+        return url.scheme in {"http", "https"} and bool(url.netloc)
 
     @property
     def safe_to_continue(self) -> bool:
-        return not self.blockers and not self.sensitive_questions
+        return (
+            self.loaded_application_page
+            and not self.blockers
+            and not self.sensitive_questions
+            and not self.missing_required
+            and not self.invalid_fields
+        )
 
 
 def _connect_db(db_path: str) -> sqlite3.Connection:
@@ -126,6 +140,13 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     const aria = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || el.id || '';
     return aria.trim();
   };
+  const valuePresent = (el) => {
+    if (el.type === 'radio') {
+      return [...document.querySelectorAll('input[type=radio]')].some(other => other.name === el.name && other.checked);
+    }
+    if (el.type === 'checkbox') return el.checked;
+    return !!(el.value || '').trim();
+  };
   return {
     url: location.href,
     title: document.title,
@@ -137,7 +158,8 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       name: el.name || '',
       label: labelFor(el),
       required: !!el.required,
-      value_present: ['checkbox', 'radio'].includes(el.type) ? el.checked : !!(el.value || '').trim(),
+      value_present: valuePresent(el),
+      invalid: el.getAttribute('aria-invalid') === 'true' || !el.checkValidity(),
       options: el.tagName === 'SELECT' ? [...el.options].slice(0, 25).map(o => o.text.trim()).filter(Boolean) : []
     })),
     buttons: [...document.querySelectorAll('button, input[type=submit], input[type=button]')].filter(visible).slice(0, 50).map((el) => ({
@@ -149,14 +171,35 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     links: [...document.querySelectorAll('a[href]')].filter(visible).slice(0, 80).map((el) => ({
       text: (el.innerText || el.getAttribute('aria-label') || '').trim().slice(0, 120),
       href: el.href
-    }))
+    })),
+    challenge_visible: [...document.querySelectorAll('iframe')].some(el => {
+      const src = el.getAttribute('src') || '';
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return /recaptcha|hcaptcha/i.test(src) && style.display !== 'none' && style.visibility !== 'hidden'
+        && rect.width >= 120 && rect.height >= 100;
+    })
   };
 })()
 """
     data = client.evaluate(expression)
+    if not isinstance(data, dict):
+        raise CDPError("application page inspection returned no document")
     text = data.get("text") or ""
     lower = text.lower()
     blockers = [term for term in blocklist_terms if term.lower() in lower]
+    if data.get("challenge_visible") and "human verification" not in blockers:
+        blockers.append("human verification")
+
+    inputs = data.get("inputs") or []
+    missing_required = [
+        item.get("label") or item.get("name") or item.get("id") or item.get("tag") or "field"
+        for item in inputs if item.get("required") and not item.get("value_present")
+    ]
+    invalid_fields = [
+        item.get("label") or item.get("name") or item.get("id") or item.get("tag") or "field"
+        for item in inputs if item.get("invalid")
+    ]
 
     sensitive = []
     lines = [" ".join(line.split()) for line in text.splitlines()]
@@ -172,11 +215,13 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
         url=data.get("url", ""),
         title=data.get("title", ""),
         text_excerpt=text[:2000],
-        inputs=data.get("inputs") or [],
+        inputs=inputs,
         buttons=data.get("buttons") or [],
         links=data.get("links") or [],
         blockers=blockers,
         sensitive_questions=sensitive,
+        missing_required=missing_required,
+        invalid_fields=invalid_fields,
     )
 
 
@@ -189,12 +234,18 @@ class AutoApplyEngine:
 
     def connect(self) -> CDPClient:
         if self.client is None:
-            self.client = connect_first_page(self.config.cdp_host, self.config.cdp_port)
+            self.client = connect_first_page(
+                self.config.cdp_host,
+                self.config.cdp_port,
+                expected_url=self.config.expected_page_url,
+            )
         return self.client
 
     def inspect(self, job_id: str, *, stage: str = "draft_inspected") -> PageInspection:
         client = self.connect()
         inspection = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
+        if not inspection.loaded_application_page:
+            raise CDPError("application page is blank or still loading; no draft state was recorded")
         evidence_path = None
         if self.config.evidence_enabled:
             evidence_path = str(_job_output_dir(self.config.output_dir, job_id) / f"{stage}.png")
@@ -218,6 +269,8 @@ class AutoApplyEngine:
                     "safe_to_continue": inspection.safe_to_continue,
                     "blockers": inspection.blockers,
                     "sensitive_questions": inspection.sensitive_questions,
+                    "missing_required": inspection.missing_required,
+                    "invalid_fields": inspection.invalid_fields,
                 },
                 ensure_ascii=False,
             ),
@@ -235,6 +288,8 @@ class AutoApplyEngine:
                 error="resume_upload_requires_approval",
             )
             raise PermissionError("file upload requires explicit approval")
+        if self.config.expected_page_url is None:
+            raise PermissionError("the approved application page URL is required for upload")
         if not Path(file_path).is_file():
             raise FileNotFoundError(file_path)
         upload_path = str(Path(file_path).resolve())
@@ -265,11 +320,29 @@ class AutoApplyEngine:
                 error="submit_requires_approval",
             )
             raise PermissionError("submit requires explicit approval")
+        if self.config.expected_page_url is None:
+            raise PermissionError("the approved application page URL is required for submission")
         client = self.connect()
         result = client.evaluate(
             f"""
 (() => {{
   if ({json.dumps(self.config.expected_page_url)} !== null && location.href !== {json.dumps(self.config.expected_page_url)}) return {{ok:false, reason:'page changed'}};
+  if (!/^https?:$/.test(location.protocol) || !document.body) return {{ok:false, reason:'application page is not loaded'}};
+  const required = [...document.querySelectorAll('input[required],select[required],textarea[required]')];
+  const missing = required.filter(el => {{
+    if (el.type === 'radio') return ![...document.querySelectorAll('input[type=radio]')].some(other => other.name === el.name && other.checked);
+    if (el.type === 'checkbox') return !el.checked;
+    return !(el.value || '').trim();
+  }});
+  if (missing.length || document.querySelector('[aria-invalid=true]')) return {{ok:false, reason:'required or invalid fields remain'}};
+  const challenge = [...document.querySelectorAll('iframe')].some(frame => {{
+    const src = frame.getAttribute('src') || '';
+    const rect = frame.getBoundingClientRect();
+    const style = getComputedStyle(frame);
+    return /recaptcha|hcaptcha/i.test(src) && style.display !== 'none' && style.visibility !== 'hidden'
+      && rect.width >= 120 && rect.height >= 100;
+  }});
+  if (challenge) return {{ok:false, reason:'human verification is open'}};
   const el = document.querySelector({json.dumps(selector)});
   if (!el || el.disabled) return {{ok:false, reason:'selector unavailable'}};
   el.click();
@@ -277,14 +350,12 @@ class AutoApplyEngine:
 }})()
 """
         )
-        if self.config.verify_submission and (not isinstance(result, dict) or result.get("ok") is not True):
-            raise PermissionError("The submit control was not available; no submission was confirmed.")
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            reason = result.get("reason", "submit control unavailable") if isinstance(result, dict) else "submit control unavailable"
+            raise PermissionError(f"The application was not submitted: {reason}.")
         time.sleep(2)
-        if self.config.verify_submission:
-            _record(self.config, job_id, "submission_attempted", notes="Submit control clicked; a matching application receipt still requires review.")
-            return self.inspect(job_id, stage="submission_attempted")
-        _record(self.config, job_id, "submitted")
-        return self.inspect(job_id, stage="submission_result")
+        _record(self.config, job_id, "submission_attempted", notes="Submit control clicked; a matching application receipt still requires review.")
+        return self.inspect(job_id, stage="submission_attempted")
 
 
 def _platform_from_url(url: str) -> str | None:
@@ -314,6 +385,12 @@ def inspection_to_markdown(inspection: PageInspection) -> str:
         lines += ["", "### Blockers", *[f"- {b}" for b in inspection.blockers]]
     if inspection.sensitive_questions:
         lines += ["", "### Sensitive / approval-gated text", *[f"- {q}" for q in inspection.sensitive_questions]]
+    if not inspection.loaded_application_page:
+        lines += ["", "### Blockers", "- Application page is blank or still loading"]
+    if inspection.missing_required:
+        lines += ["", "### Missing required fields", *[f"- {name}" for name in inspection.missing_required[:20]]]
+    if inspection.invalid_fields:
+        lines += ["", "### Invalid fields", *[f"- {name}" for name in inspection.invalid_fields[:20]]]
     required = [i for i in inspection.inputs if i.get("required")]
     if required:
         lines += ["", "### Required fields seen", *[f"- {i.get('label') or i.get('name') or i.get('id') or i.get('tag')}" for i in required[:20]]]

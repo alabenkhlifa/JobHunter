@@ -45,9 +45,10 @@ Use `jobhunter_auto_apply` conservatively:
 - A variant with `max_pages` must pass the renderer-reported page limit before `package_generated` is recorded.
 - Research-card **Ignore/Pause** records skip/paused feedback without affecting other profiles or listeners.
 - Final application prep starts only after the **Proceed to apply** CTA, and final submission remains separately approval-gated.
-- `python -m jobhunter_auto_apply.cli inspect --job-id <job_id>` to inspect current ATS/browser page.
+- `python -m jobhunter_auto_apply.cli inspect --job-id <job_id> --page-url <current_application_url>` to inspect the intended ATS/browser tab. A blank page or ambiguous tab is a blocker.
 - `upload ... --approved` only after explicit approval to upload a document.
-- `submit ... --approved` only after explicit approval to submit.
+- `upload` and `submit` require the exact current `--page-url` as well as approval.
+- `submit ... --approved` records an attempt; verify an exact-role receipt before recording `submitted`.
 - Record states through the existing application tracking functions in `scraper.py`.
 
 When missing fields appear, inspect local profile data and cached confirmed answers first. Ask only for unconfirmed or sensitive fields, with clear CTA-style options.

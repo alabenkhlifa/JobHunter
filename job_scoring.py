@@ -981,6 +981,7 @@ SENDABLE_SPONSORSHIP = ("offered", "implied", "no_info")
 SPONSORSHIP_EVIDENCE_LIMIT = 240
 
 _VISA_WORDS = r"(?:visas?|work[ -]permits?|residence[ -]permits?|sponsorship|relocation)"
+_WORK_AUTH_WORDS = r"(?:visas?|work[ -]permits?|residence[ -]permits?|immigration sponsorship)"
 # Patterns were audited against every sentence in the 5,732-description
 # corpus that mentions visas, permits, sponsorship or relocation; each group
 # below names the wording that produced it. Order matters: a sentence that is
@@ -1008,18 +1009,25 @@ _SPONSORSHIP_OFFERED = [re.compile(p, re.IGNORECASE) for p in (
     # Benefits, salary and package enumerations that list the visa as an item.
     r"\b(?:benefits?|perks?|we offer|what'?s on offer|what we offer|salary(?: package)?|remuneration|package)\b"
     r"[^.!?]{0,200}?\bvisas?\b",
+    r"\bwork[ -]permit (?:support|sponsorship|assistance|provided|arranged|included)\b",
+    r"\b(?:we|company|employer|client) (?:will |can |do )?(?:sponsor|provide|arrange|cover)\b[^.]{0,40}?" + _WORK_AUTH_WORDS,
+    r"\b(?:the (?:employer|company|client)|(?:the )?package)\b[^.!?]{0,60}\b(?:covers?|pays? for|includes?)\b[^.!?]{0,80}\bvisas?\b",
+    r"\brelocation and visa support\b",
+    r"\b(?:immigration|visa) (?:sponsorship|assistance)\b[^.\n]{0,15}[:?]+\s*yes\b",
+)]
+_SPONSORSHIP_IMPLIED = [re.compile(p, re.IGNORECASE) for p in (
+    # Relocation/residency help does not establish a work visa or permit offer.
     r"\brelocation\s*(?:/\s*shipping\s*)?(?:packages?|support|assistance|allowance|benefits?|bonus|budget|costs?|expenses|provided|offered|included|covered)\b",
     r"\+\s*full relocation\b|\bfull (?:family )?relocation\b",
     r"\b(?:allowance|bonus|leave|scheme|plan)\s+relocat",
     r"\bwe offer\b[^.!?]{0,160}\bbenefits\b[^.!?]{0,160}\brelocation\b",
     r"\b(?:will|can|we|they)\s+(?:fully |also )?support\s+(?:the |your )?relocation\b",
-    r"\bwork[ -]permit (?:support|sponsorship|assistance|provided|arranged|included)\b",
-    r"\b(?:we|company|employer|client) (?:will |can |do )?(?:sponsor|provide|arrange|cover)\b[^.]{0,40}?" + _VISA_WORDS,
-    r"\b(?:the (?:employer|company|client)|(?:the )?package)\b[^.!?]{0,60}\b(?:covers?|pays? for|includes?)\b[^.!?]{0,80}\b(?:visas?|relocation)\b",
+    r"\b(?:support|supports|provide|provides|offer|offers)\s+(?:the |your )?relocation\b",
+    r"\b(?:the (?:employer|company|client)|(?:the )?package)\b[^.!?]{0,60}\b(?:covers?|pays? for|includes?)\b[^.!?]{0,80}\brelocation\b",
     r"\bhelp(?:s)? you with (?:your )?relocation\b|\bwilling to relocate (?:the )?(?:right )?(?:candidate|you)\b",
-    r"\brelocation and (?:immigration|employment|visa) support\b",
+    r"\brelocation and (?:immigration|employment) support\b",
     r"\bsupport for \w*\s*residency\b|\bassistance with the \w*\s*golden visa\b",
-    r"\b(?:immigration|visa|relocation) (?:sponsorship|assistance)\b[^.\n]{0,15}[:?]+\s*yes\b",
+    r"\brelocation (?:sponsorship|assistance)\b[^.\n]{0,15}[:?]+\s*yes\b",
     r"\brelocation\s+(?:for [^.!?]{0,40})?available\b|\bcan consider relocation for\b",
 )]
 _SPONSORSHIP_EXCLUDED = [re.compile(p, re.IGNORECASE) for p in (
@@ -1065,7 +1073,7 @@ def _evidence(sentence, match):
 
 
 def sponsorship_signal(text):
-    """("offered" | "excluded" | "", evidence sentence) from the posting's words.
+    """("offered" | "implied" | "excluded" | "", evidence) from the posting.
 
     An explicit refusal anywhere outranks an offer elsewhere: a stated barrier
     is exactly what the collection filter exists to respect. The evidence is
@@ -1073,6 +1081,7 @@ def sponsorship_signal(text):
     runs its whole benefits list into one sentence.
     """
     offered = None
+    implied = None
     for sentence in _sentences(text):
         if any(pattern.search(sentence) for pattern in _SPONSORSHIP_UNRELATED):
             continue
@@ -1086,7 +1095,17 @@ def sponsorship_signal(text):
                 if match:
                     offered = _evidence(sentence, match)
                     break
-    return ("offered", offered) if offered else ("", "")
+        if implied is None:
+            for pattern in _SPONSORSHIP_IMPLIED:
+                match = pattern.search(sentence)
+                if match:
+                    implied = _evidence(sentence, match)
+                    break
+    if offered:
+        return "offered", offered
+    if implied:
+        return "implied", implied
+    return "", ""
 
 
 def quote_in_text(quote, text):
