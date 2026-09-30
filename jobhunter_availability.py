@@ -1,8 +1,10 @@
-"""Anonymous, conservative live availability checks for supported job listings.
+"""Anonymous, conservative source-listing checks for supported job listings.
 
 A successful HTTP response is not proof that applications are open. Only an
 identified listing with a description and an explicit application control can
-be delivered. Transport failures and ambiguous source pages remain retryable.
+be delivered. An ``open`` result verifies the source listing only; it never
+verifies that an external ATS form has rendered or accepts applications.
+Transport failures and ambiguous source pages remain retryable.
 """
 
 from __future__ import annotations
@@ -352,7 +354,8 @@ def check(job, session=None, now=None):
         raise ValueError("Availability checks require a timezone-aware time.")
     now = now.astimezone(timezone.utc)
     listing = _listing(job)
-    result = {"state": "unknown", "reason": "unsupported_listing", "checked_at": now.isoformat(timespec="seconds"),
+    result = {"state": "unknown", "reason": "unsupported_listing", "verification_scope": "source_listing",
+              "checked_at": now.isoformat(timespec="seconds"),
               "job_id": str(job.get("id") or ""), "url": listing.url if listing else "",
               "source_job_id": listing.source_id if listing else "", "matched": False}
     if listing is None:

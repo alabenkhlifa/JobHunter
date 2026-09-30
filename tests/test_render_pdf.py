@@ -316,6 +316,108 @@ def test_long_experience_keeps_personal_details_on_second_page():
     assert "(continued)" in document[1].get_text()
 
 
+def _resume_with_sidebar_overflow(bullet_count):
+    return {
+        "name": "Candidate",
+        "summary": "Backend engineering and technical leadership in production services.",
+        "skills": {f"Category {index}": [f"Skill {skill}" for skill in range(6)]
+                   for index in range(5)},
+        "certifications": [f"Certificate {index}" for index in range(6)],
+        "experience": [{
+            "title": "Senior Software Engineer",
+            "company": "Example Company",
+            "dates": "2020 - Present",
+            "bullets": [f"Delivered reliable production backend services for customer group {index}."
+                        for index in range(bullet_count)],
+        }],
+        "additional": {"languages": "Arabic (Native) | English (C1) | French (C1)"},
+        "education": [{
+            "degree": "Software Engineering Diploma",
+            "school": "Example University",
+            "dates": "2018 - 2023",
+        }],
+    }
+
+
+def test_personal_details_fill_main_column_when_sidebar_alone_would_need_page_two():
+    fitz = pytest.importorskip("fitz")
+    profile = _resume_with_sidebar_overflow(12)
+    planned = ResumePDF(profile)
+    planned._plan_sidebar()
+    assert planned._sidebar_page_count == 2
+    assert planned._second_page_only_has_personal_details()
+
+    _, output = _pdf(profile)
+    document = fitz.open(stream=output, filetype="pdf")
+
+    assert len(document) == 1
+    page = document[0]
+    words = page.get_text("words")
+    experience = next(word for word in words if word[4] == "EXPERIENCE")
+    languages = next(word for word in words if word[4] == "LANGUAGES")
+    education = next(word for word in words if word[4] == "EDUCATION")
+    assert languages[0] < planned.SIDE_X
+    assert languages[1] > experience[1]
+    assert languages[1] > page.search_for("customer group 11.")[-1].y1 + 6
+    assert education[1] > languages[1]
+    assert "Senior Software Engineer" in page.get_text()
+    assert "Software Engineering Diploma" in page.get_text()
+    assert all(0 <= x0 < x1 <= page.rect.width + 0.5 and
+               0 <= y0 < y1 <= page.rect.height + 0.5
+               for x0, y0, x1, y1, *_ in words)
+
+
+def test_personal_details_use_compact_columns_when_full_width_stack_does_not_fit():
+    fitz = pytest.importorskip("fitz")
+    _, output = _pdf(_resume_with_sidebar_overflow(42))
+    document = fitz.open(stream=output, filetype="pdf")
+
+    assert len(document) == 1
+    page = document[0]
+    words = page.get_text("words")
+    languages = next(word for word in words if word[4] == "LANGUAGES")
+    education = next(word for word in words if word[4] == "EDUCATION")
+    assert abs(languages[1] - education[1]) < 0.5
+    assert languages[2] < education[0]
+    assert languages[1] > page.search_for("customer group 41.")[-1].y1 + 6
+    assert "French" in page.get_text()
+    assert "Software Engineering Diploma" in page.get_text()
+    assert all(y1 <= page.rect.height + 0.5 for _, _, _, y1, *_ in words)
+
+
+def test_languages_can_finish_sidebar_while_education_fits_below_experience():
+    fitz = pytest.importorskip("fitz")
+    _, output = _pdf(_resume_with_sidebar_overflow(47))
+    document = fitz.open(stream=output, filetype="pdf")
+
+    assert len(document) == 1
+    page = document[0]
+    words = page.get_text("words")
+    languages = next(word for word in words if word[4] == "LANGUAGES")
+    education = next(word for word in words if word[4] == "EDUCATION")
+    assert languages[0] >= ResumePDF.SIDE_X - 1
+    assert education[0] < ResumePDF.SIDE_X
+    assert education[1] > page.search_for("customer group 46.")[-1].y1 + 6
+    assert "Arabic: Native" in page.get_text()
+    assert "Software Engineering Diploma" in page.get_text()
+    assert all(y1 <= page.rect.height + 0.5 for _, _, _, y1, *_ in words)
+
+
+def test_personal_details_keep_second_page_when_main_column_has_no_room():
+    fitz = pytest.importorskip("fitz")
+    _, output = _pdf(_resume_with_sidebar_overflow(52))
+    document = fitz.open(stream=output, filetype="pdf")
+
+    assert len(document) == 2
+    assert "Senior Software Engineer" in document[0].get_text()
+    assert "Senior Software Engineer" not in document[1].get_text()
+    assert "LANGUAGES" not in document[0].get_text()
+    assert "EDUCATION" not in document[0].get_text()
+    assert "LANGUAGES" in document[1].get_text()
+    assert "EDUCATION" in document[1].get_text()
+    assert all(word[0] >= ResumePDF.SIDE_X - 1 for word in document[1].get_text("words"))
+
+
 def test_roles_that_fit_stay_on_first_page_and_certifications_stay_together():
     fitz = pytest.importorskip("fitz")
     profile = {

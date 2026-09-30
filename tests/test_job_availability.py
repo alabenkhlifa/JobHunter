@@ -75,6 +75,7 @@ def run(body, job=LINKEDIN):
 def test_open_requires_identified_title_company_description_and_application_control(job, source):
     result = run(page(source=source), job)
     assert result["state"] == "open" and result["matched"] is True
+    assert result["verification_scope"] == "source_listing"
     assert result["reason"] == "application_control"
     assert result["job_id"] == job["id"] and result["checked_at"] == "2026-09-09T12:00:00+00:00"
     assert "trackingId" not in result["url"]

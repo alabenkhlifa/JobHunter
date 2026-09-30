@@ -23,6 +23,8 @@ class FakeClient:
         self.clicked = []
 
     def evaluate(self, expression, **kwargs):
+        if expression.strip() == "location.href":
+            return self.payload.get("url") if isinstance(self.payload, dict) else self.payload
         if "document.querySelector" in expression and ".click" in expression:
             self.clicked.append(expression)
             return {"ok": True}
@@ -80,6 +82,182 @@ def test_engine_does_not_record_blank_inspection(tmp_path):
     with pytest.raises(CDPError, match="blank or still loading"):
         engine.inspect("job-1")
     assert not db.exists()
+
+
+def _job_db(path, title="Staff Software Engineer (UAE)"):
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT, company TEXT)")
+        db.execute("INSERT INTO jobs VALUES(?, ?, ?)", ("li-4472734248", title, "Ode with Anthropic"))
+
+
+def _rendered_form(*, heading="Staff Software Engineer (UAE)", url="https://jobs.ashbyhq.com/odewithanthropic/a546a133-5856-4372-a960-f3632bec207f/application"):
+    return {"url": url, "title": "Apply | Ode", "text": heading + "\nApply for this job",
+            "headings": [heading],
+            "inputs": [{"tag": "input", "type": "email", "label": "Email", "disabled": False,
+                        "required": True, "value_present": False},
+                       {"tag": "input", "type": "text", "label": "Full Name", "disabled": False,
+                        "required": True, "value_present": False}],
+            "buttons": [{"text": "Submit Application", "type": "submit", "disabled": True}]}
+
+
+def test_generic_ats_jobs_shell_cannot_be_recorded_as_draft_inspected(tmp_path):
+    db = tmp_path / "jobs.db"
+    _job_db(db)
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False, tracker_sync=False),
+                             client=FakeClient({"url": "https://jobs.ashbyhq.com/odewithanthropic", "title": "Jobs",
+                                                "text": "Jobs", "headings": ["Jobs"], "inputs": [], "buttons": []}))
+    with pytest.raises(CDPError, match="exact role and actionable application form"):
+        engine.inspect("li-4472734248")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage FROM applications").fetchone()[0] == "blocked_application_unverified"
+
+
+def test_source_apply_control_and_search_form_are_not_an_application_form():
+    source = PageInspection("https://www.linkedin.com/jobs/view/4472734248", "Staff Software Engineer (UAE)",
+                            "Staff Software Engineer (UAE)", headings=["Staff Software Engineer (UAE)"],
+                            buttons=[{"text": "Apply now", "type": "button"}])
+    assert not source.verifies_application_for("Staff Software Engineer (UAE)")
+    search = PageInspection("https://jobs.ashbyhq.com/odewithanthropic", "Jobs", "Search jobs",
+                            headings=["Staff Software Engineer (UAE)"],
+                            inputs=[{"tag": "input", "type": "search", "label": "Search jobs"}],
+                            buttons=[{"text": "Submit", "type": "submit"}])
+    assert not search.verifies_application_for("Staff Software Engineer (UAE)")
+
+
+def test_wrong_role_redirect_cannot_be_recorded_as_draft_inspected(tmp_path):
+    db = tmp_path / "jobs.db"
+    _job_db(db)
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False, tracker_sync=False),
+                             client=FakeClient(_rendered_form(heading="Software Engineer", url="https://jobs.ashbyhq.com/odewithanthropic/other/application")))
+    with pytest.raises(CDPError, match="exact role"):
+        engine.inspect("li-4472734248")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage FROM applications").fetchone()[0] == "blocked_application_unverified"
+
+
+def test_rendered_exact_role_unlisted_ats_form_can_be_inspected(tmp_path):
+    db = tmp_path / "jobs.db"
+    _job_db(db)
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False, tracker_sync=False),
+                             client=FakeClient(_rendered_form()))
+    inspection = engine.inspect("li-4472734248")
+    assert inspection.verifies_application_for("Staff Software Engineer (UAE)", "Ode with Anthropic")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage FROM applications").fetchone()[0] == "draft_inspected"
+
+
+def test_application_heading_can_wrap_exact_role_after_employer_headings():
+    page = inspect_page(FakeClient({
+        **_rendered_form(heading="Apply for Staff Software Engineer (UAE) at Ode"),
+        "headings": ["Ode", "Careers", "Open roles", "About us",
+                     "Apply for Staff Software Engineer (UAE) at Ode"],
+    }))
+    assert page.verifies_application_for("Staff Software Engineer (UAE)", "Ode with Anthropic")
+    assert not page.verifies_application_for("Staff Software Engineer (UAE)", "Another Employer")
+
+
+@pytest.mark.parametrize("heading", ["Apply for Staff Software Engineer (UAE)",
+                                    "Application for Staff Software Engineer (UAE)",
+                                    "Job application for Staff Software Engineer (UAE)"])
+def test_standard_application_heading_prefixes_keep_exact_role_match(heading):
+    page = inspect_page(FakeClient(_rendered_form(heading=heading)))
+    assert page.verifies_application_for("Staff Software Engineer (UAE)", "Ode with Anthropic")
+
+
+def test_same_role_at_wrong_employer_cannot_be_recorded_as_draft_inspected(tmp_path):
+    db = tmp_path / "jobs.db"
+    _job_db(db)
+    wrong_company = _rendered_form(
+        url="https://jobs.ashbyhq.com/anotheremployer/role/application",
+    )
+    wrong_company["title"] = "Apply | Another Employer"
+    wrong_company["headings"] = ["Another Employer", "Staff Software Engineer (UAE)"]
+    engine = AutoApplyEngine(
+        ApplyConfig(db_path=str(db), evidence_enabled=False, tracker_sync=False),
+        client=FakeClient(wrong_company),
+    )
+
+    with pytest.raises(CDPError, match="exact role and actionable application form"):
+        engine.inspect("li-4472734248")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage FROM applications").fetchone()[0] == "blocked_application_unverified"
+
+
+@pytest.mark.parametrize("action", ["upload", "submit"])
+def test_direct_cli_rejects_wrong_employer_before_browser_action(tmp_path, monkeypatch, action):
+    db = tmp_path / "jobs.db"
+    _job_db(db)
+    document = tmp_path / "resume.pdf"
+    document.write_bytes(b"test-only PDF placeholder")
+    wrong_company = _rendered_form(
+        url="https://jobs.ashbyhq.com/anotheremployer/role/application",
+    )
+    wrong_company["title"] = "Apply | Another Employer"
+    wrong_company["headings"] = ["Another Employer", "Staff Software Engineer (UAE)"]
+    client = FakeClient(wrong_company)
+    engine = AutoApplyEngine(ApplyConfig(
+        db_path=str(db), evidence_enabled=False, tracker_sync=False,
+        expected_page_url=wrong_company["url"],
+    ), client=client)
+    monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
+
+    with pytest.raises(CDPError, match="exact role and employer application form"):
+        if action == "upload":
+            engine.upload_file("li-4472734248", "input[type=file]", str(document), approved=True)
+        else:
+            engine.click_submit("li-4472734248", "button[type=submit]", approved=True)
+    assert client.uploads == [] and client.clicked == []
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage FROM applications").fetchone()[0] == "blocked_application_unverified"
+
+
+def test_direct_cli_allows_verified_employer_form_before_browser_action(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    _job_db(db)
+    document = tmp_path / "resume.pdf"
+    document.write_bytes(b"test-only PDF placeholder")
+    form = _rendered_form()
+    client = FakeClient(form)
+    engine = AutoApplyEngine(ApplyConfig(
+        db_path=str(db), evidence_enabled=False, tracker_sync=False,
+        expected_page_url=form["url"],
+    ), client=client)
+    monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
+
+    engine.upload_file("li-4472734248", "input[type=file]", str(document), approved=True)
+    assert client.uploads == [("input[type=file]", str(document.resolve()))]
+    engine.click_submit("li-4472734248", "button[type=submit]", approved=True)
+    assert len(client.clicked) == 1
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage FROM applications ORDER BY id DESC LIMIT 1").fetchone()[0] == "submission_attempted"
+
+
+def test_browser_inspection_failure_records_blocked_not_draft_inspected(tmp_path):
+    db = tmp_path / "jobs.db"
+    _job_db(db)
+    client = Mock()
+    client.evaluate.side_effect = CDPError("remote debugging unavailable")
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False, tracker_sync=False), client=client)
+    with pytest.raises(CDPError, match="remote debugging unavailable"):
+        engine.inspect("li-4472734248")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage FROM applications").fetchone()[0] == "blocked_application_unverified"
+
+
+def test_skipped_job_keeps_application_history_when_browser_inspection_fails(tmp_path):
+    db = tmp_path / "jobs.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT, company TEXT, status TEXT)")
+        conn.execute("INSERT INTO jobs VALUES(?,?,?,?)",
+                     ("li-4472734248", "Staff Software Engineer (UAE)", "Ode with Anthropic", "skipped"))
+        scraper.record_application_stage(conn, "li-4472734248", "package_generated", sync=False)
+    client = Mock()
+    client.evaluate.side_effect = CDPError("browser unavailable")
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False, tracker_sync=False), client=client)
+    with pytest.raises(CDPError):
+        engine.inspect("li-4472734248")
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage FROM applications").fetchone()[0] == "package_generated"
 
 
 def test_cdp_connection_requires_unambiguous_application_tab(monkeypatch):
@@ -166,6 +344,7 @@ def test_approved_upload_preserves_permanent_package_directory(tmp_path, monkeyp
                                         expected_page_url="https://example.test/apply"), client=client)
     monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
     monkeypatch.setattr(engine, "inspect", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args: None)
     engine.upload_file("job-1", "input[type=file]", str(cached), approved=True)
     with closing(sqlite3.connect(db)) as conn, conn:
         assert conn.execute("SELECT package_path,stage FROM applications").fetchone() == (str(package), "resume_uploaded")
@@ -173,7 +352,7 @@ def test_approved_upload_preserves_permanent_package_directory(tmp_path, monkeyp
 
 
 def test_scoped_submit_records_attempt_and_skips_global_tracker(tmp_path, monkeypatch):
-    client = FakeClient()
+    client = FakeClient("https://example.test/apply")
     tracker = Mock()
     monkeypatch.setattr(scraper, "sync_application_tracker_if_enabled", tracker)
     monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
@@ -181,6 +360,7 @@ def test_scoped_submit_records_attempt_and_skips_global_tracker(tmp_path, monkey
                                         tracker_sync=False, verify_submission=True,
                                         expected_page_url="https://example.test/apply"), client)
     monkeypatch.setattr(engine, "inspect", Mock())
+    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args: None)
     engine.click_submit("job-1", '[id="submit"]', approved=True)
     with closing(sqlite3.connect(tmp_path / "jobs.db")) as db, db:
         assert db.execute("SELECT stage FROM applications").fetchone()[0] == "submission_attempted"
@@ -190,20 +370,22 @@ def test_scoped_submit_records_attempt_and_skips_global_tracker(tmp_path, monkey
 
 def test_scoped_missing_submit_control_never_records_success(tmp_path, monkeypatch):
     client = Mock()
-    client.evaluate.return_value = {"ok": False}
+    client.evaluate.side_effect = ["https://example.test/apply", {"ok": False}]
     engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), tracker_sync=False, verify_submission=True,
                                         expected_page_url="https://example.test/apply"), client)
+    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args: None)
     with pytest.raises(PermissionError, match="not submitted"):
         engine.click_submit("job-1", '[id="submit"]', approved=True)
     assert not (tmp_path / "jobs.db").exists()
 
 
 def test_submit_is_only_an_attempt_until_receipt_is_verified(tmp_path, monkeypatch):
-    client = FakeClient()
+    client = FakeClient("https://example.test/apply")
     monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
     engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), tracker_sync=False,
                                         expected_page_url="https://example.test/apply"), client)
     monkeypatch.setattr(engine, "inspect", Mock())
+    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args: None)
     engine.click_submit("job-1", "button[type=submit]", approved=True)
     with closing(sqlite3.connect(tmp_path / "jobs.db")) as db:
         assert db.execute("SELECT stage FROM applications").fetchone()[0] == "submission_attempted"
@@ -234,6 +416,7 @@ def test_container_upload_uses_readonly_mount_path_after_host_validation(tmp_pat
                                         expected_page_url="https://example.test/approved"), client)
     monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
     monkeypatch.setattr(engine, "inspect", Mock())
+    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args: None)
     engine.upload_file("job-1", '[id="resume"]', str(document), approved=True)
     client.upload_file.assert_called_once_with('[id="resume"]', "/documents/job package/Resume.pdf")
     assert document.stat().st_mode & 0o777 == 0o600

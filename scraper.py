@@ -2451,6 +2451,7 @@ def format_job_message(job):
         f"\U0001f3e2 {job['company']}",
         f"\U0001f4cd {job['location']}",
         f"\U0001f4e1 Source: {job['source']}",
+        "Source listing checked; application form not yet verified.",
     ]
 
     if wm != "on-site":
@@ -2553,6 +2554,7 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None, 
     lines = [
         f"<b>Job matches · {today.strftime('%-d %b')}</b>",
         f"{len(sent)} sent · {queued_count} queued",
+        "Source listings checked · application forms not yet verified",
         "",
     ]
     visa_labels = {
@@ -2673,7 +2675,7 @@ def send_digest(token, chat_id, conn, selected):
         if result['state'] == 'open' and result.get('matched') is True:
             verified.append(job)
     if not verified:
-        raise RuntimeError('No listings could be confirmed open; jobs remain pending unless explicitly closed.')
+        raise RuntimeError('No source listings could be verified; jobs remain pending unless explicitly closed.')
     _send_digest_verified(token, chat_id, conn, verified)
     return [job['id'] for job in verified]
 
@@ -2721,7 +2723,9 @@ def notify_new_jobs(token, chat_id, jobs, *, conn=None):
         return []
     sorted_jobs = sorted(verified, key=lambda j: j['score'], reverse=True)
 
-    send_telegram(token, chat_id, f"<b>\U0001f4bc {len(sorted_jobs)} matching job(s) confirmed open!</b>")
+    send_telegram(token, chat_id,
+                  f"<b>\U0001f4bc {len(sorted_jobs)} matching source listing(s) verified.</b>\n"
+                  "Application forms have not yet been checked.")
     time.sleep(1)
 
     confirmed_ids = []

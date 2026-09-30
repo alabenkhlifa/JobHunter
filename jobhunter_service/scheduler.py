@@ -124,7 +124,7 @@ class Scheduler:
                         result['selected_ids'])
                 else:
                     evidence = result.get('availability', {})
-                    self.client.send_message(user_id, 'No listings could be confirmed open. Uncertain checks remain queued for retry.' if evidence.get('unknown') or evidence.get('unchecked') else 'The review completed; no open jobs cleared your current requirements.')
+                    self.client.send_message(user_id, 'No source listings could be verified. Uncertain checks remain queued for retry.' if evidence.get('unknown') or evidence.get('unchecked') else 'The review completed; no source listings cleared your current requirements.')
             status, error = 'complete', None
         except Exception:
             status, error = 'failed', 'Run failed or became stale; inspect private run state.'

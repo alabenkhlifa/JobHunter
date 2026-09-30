@@ -760,6 +760,64 @@ def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
     assert len(message) < 600
 
 
+def test_research_brief_surfaces_ode_role_bar_ai_check_and_posting_visa_evidence():
+    job = sample_job(
+        title="Staff Software Engineer (UAE)",
+        company="Ode with Anthropic",
+        description=(
+            "Requirements: 8+ years of software engineering experience. "
+            "You will deliver production applied AI systems with clients. "
+            "Benefits include visa sponsorship."
+        ),
+        min_experience=8,
+        score_breakdown="knocked out: wants 8+ years, over the 7 cap",
+        sponsorship_signal="offered",
+        sponsorship_evidence="Benefits include visa sponsorship.",
+    )
+    research = flow.JobResearch(company_summary="Job post describes a product engineering team.", legitimacy="")
+
+    message = flow.build_research_brief_message(job, research)
+
+    assert "Posting asks for 8+ years (above local 7-year search cap)" in message
+    assert "Posting mentions production applied AI; confirm direct delivery evidence" in message
+    assert "Posting says “Benefits include visa sponsorship.”" in message
+    assert "confirm eligibility and terms" in message
+    assert "candidate lacks" not in message.lower()
+
+
+def test_research_brief_does_not_turn_stale_metadata_or_ai_assistance_into_job_requirements():
+    job = sample_job(
+        description="Build Java services. The company uses AI-assisted coding tools.",
+        min_experience=8,
+        score_breakdown="knocked out: wants 8+ years, over the 7 cap",
+        sponsorship_signal="offered",
+        sponsorship_evidence="Visa sponsorship",
+    )
+
+    message = flow.build_research_brief_message(job, flow.JobResearch(company_summary="Known company.", legitimacy=""))
+
+    assert "<b>Fit checks:</b>" not in message
+    assert "<b>Visa:</b>" not in message
+
+
+def test_research_brief_does_not_call_relocation_visa_sponsorship():
+    job = sample_job(description="We offer relocation support for this role.")
+
+    message = flow.build_research_brief_message(job, flow.JobResearch(company_summary="Known company.", legitimacy=""))
+
+    assert "visa sponsorship is unconfirmed" in message
+    assert "Posting says" not in message
+
+
+def test_research_brief_reports_explicit_sponsorship_exclusion_over_offer():
+    job = sample_job(description="Benefits include visa sponsorship. No visa sponsorship for this role.")
+
+    message = flow.build_research_brief_message(job, flow.JobResearch(company_summary="Known company.", legitimacy=""))
+
+    assert "Posting rules out sponsorship" in message
+    assert "Posting says" not in message
+
+
 def test_research_brief_shows_company_salary_when_found():
     research = flow.JobResearch(
         company_summary="Official company page found.",
@@ -1679,6 +1737,93 @@ def test_backend_tailoring_keeps_current_lead_first_and_omits_unneeded_cto():
     assert "engagements" not in serialized
     assert "PRIVATE_" not in cover_serialized
     assert "UNCONFIRMED_" not in cover_serialized
+
+
+def test_staff_role_for_former_engineering_leaders_keeps_public_cto_experience():
+    profile = {
+        "name": "Candidate",
+        "summary": (
+            "Software engineer with seven years of experience. "
+            "CTO and team leader for a product company. "
+            "Built backend services on AWS. "
+            "Delivered web features with React."
+        ),
+        "experience": [
+            {
+                "id": "exp-cto", "title": "Chief Technology Officer", "company": "Venture",
+                "dates": "October 2025 - Present", "bullets": ["Led product engineering."],
+            },
+            {
+                "id": "exp-lead", "title": "Lead Software Engineer", "company": "Consultancy",
+                "dates": "October 2024 - Present", "bullets": ["Built backend services on AWS."],
+            },
+            {
+                "id": "exp-senior", "title": "Senior Software Engineer", "company": "Consultancy",
+                "dates": "October 2022 - October 2024", "bullets": ["Built Java services."],
+            },
+        ],
+        "evidence_bank": [
+            {
+                "id": "ev-cto", "experience_id": "exp-cto",
+                "public_text": "Owned technical delivery for a small engineering team.",
+                "confirmation": "candidate-confirmed", "confidentiality": "public",
+                "visibility": ["resume"],
+            },
+            {
+                "id": "ev-private", "experience_id": "exp-cto",
+                "public_text": "PRIVATE_CTO_DETAIL",
+                "confirmation": "candidate-confirmed", "confidentiality": "private",
+                "visibility": ["resume"],
+            },
+            {
+                "id": "ev-unconfirmed", "experience_id": "exp-cto",
+                "public_text": "UNCONFIRMED_CTO_RESULT",
+                "confirmation": "unconfirmed", "confidentiality": "public",
+                "visibility": ["resume"],
+            },
+        ],
+    }
+    job = {
+        "title": "Staff Software Engineer (UAE)",
+        "description": (
+            "This role is designed for former engineering leaders (IC or EM) or founders "
+            "who are comfortable owning end-to-end technical outcomes but specifically "
+            "want to continue being impactful as individual contributors and spend more "
+            "time in the code."
+        ),
+    }
+
+    resume = flow._tailor_resume(profile, job)
+
+    assert [item["company"] for item in resume["experience"]] == [
+        "Venture", "Consultancy", "Consultancy",
+    ]
+    assert resume["experience"][0]["dates"] == "October 2025 - Present"
+    assert "Owned technical delivery for a small engineering team." in resume["experience"][0]["bullets"]
+    assert "CTO and team leader for a product company." in resume["summary"]
+    assert "PRIVATE_" not in json.dumps(resume)
+    assert "UNCONFIRMED_" not in json.dumps(resume)
+
+
+@pytest.mark.parametrize("title, description", [
+    ("Staff Software Engineer", "Collaborate with former engineering leaders and founders."),
+    ("Staff Software Engineer", "This role is designed for backend engineers at a founder-led company."),
+    ("Senior Backend Engineer", "This role is designed for former engineering leaders or founders."),
+])
+def test_cto_role_is_omitted_without_staff_leadership_candidate_intent(title, description):
+    profile = {
+        "name": "Candidate",
+        "experience": [
+            {"title": "Chief Technology Officer", "company": "Venture",
+             "dates": "October 2025 - Present", "bullets": ["Led product engineering."]},
+            {"title": "Lead Software Engineer", "company": "Consultancy",
+             "dates": "October 2024 - Present", "bullets": ["Built backend services."]},
+        ],
+    }
+
+    resume = flow._tailor_resume(profile, {"title": title, "description": description})
+
+    assert [item["company"] for item in resume["experience"]] == ["Consultancy"]
 
 
 def test_optional_older_role_needs_direct_stack_match_and_current_roles_stay_chronological():

@@ -8,7 +8,8 @@ DEFAULT_PRESENTATION = {
     'show_match_reason': False,
     'group_by_market': False,
 }
-ACTION_HINT = 'Use /interested <job_id> to track a role, then /apply <job_id> to prepare documents.'
+ACTION_HINT = ('Source listing checked; application form not yet verified. '
+               'Use /interested <job_id> to track a role, then /apply <job_id> to prepare documents.')
 
 
 def _options(value):

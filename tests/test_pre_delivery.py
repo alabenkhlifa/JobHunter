@@ -61,6 +61,7 @@ def test_today_dubai_jobs_backfill_all_other_markets_from_approved_queue(databas
     report = scraper.send_reviewed_digest('synthetic', 'private', database, written)
     assert report['sent'] == 8 and len(calls) == 8
     assert 'No matches' not in sent[0]
+    assert 'application forms not yet verified' in sent[0]
     assert all(name in sent[0] for name in ('DUBAI', 'MADRID', 'VALENCIA', 'JEDDAH', 'RIYADH', 'SWITZERLAND'))
     assert database.execute('SELECT COUNT(*) FROM jobs WHERE notified=1').fetchone()[0] == 8
 
@@ -114,7 +115,7 @@ def test_direct_digest_and_individual_cards_cannot_bypass_availability(database,
     uncertain = insert(database, 101)
     source_responses(monkeypatch, closed=[closed['id']], unknown=[uncertain['id']])
     monkeypatch.setattr(scraper, 'send_telegram', lambda *args, **kwargs: pytest.fail('No known-open listing'))
-    with pytest.raises(RuntimeError, match='confirmed open'):
+    with pytest.raises(RuntimeError, match='source listings could be verified'):
         scraper.send_digest('test', 'private', database, [closed, uncertain])
     assert scraper.notify_new_jobs('test', 'private', [uncertain], conn=database) == []
 

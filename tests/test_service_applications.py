@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from jobhunter_auto_apply.cdp import CDPError
 from jobhunter_service.applications import ApplicationService, PURPOSE, _selector, run_worker, worker
 from jobhunter_service.dispatch import ApplicationTelegramHandler
 from jobhunter_service.service import JobHunterService
@@ -48,6 +49,7 @@ def app(tmp_path):
         (root / "master-profile.json").write_text("{}")
     pages = {actor: {"url": f"https://jobs.example.com/{actor}", "title": f"Apply for {actor}", "target_id": f"tab-{actor}",
                      "blockers": [], "sensitive_questions": [], "missing_required": False,
+                     "exact_role_form_verified": True,
                      "upload_selector": '[id="resume"]', "submit_selector": '[id="submit"]'} for actor in roots}
     browser, telegram = Mock(), Mock()
     browser.status.side_effect = lambda profile: {"profile_id": profile, "status": "running", "cdp_port": 9500 + int(profile[1:])}
@@ -439,6 +441,46 @@ def test_page_different_from_posting_is_explicitly_shown_before_confirmation(app
     assert "https://ats.example.com/application-form" in telegram.send_message.call_args.args[1]
 
 
+def test_hermes_inspect_rejects_unverified_browser_page_and_records_blocked(app):
+    facade, _, roots, pages, _, telegram = app
+    pages[11]["url"] = "https://jobs.ashbyhq.com/example"
+    pages[11]["title"] = "Jobs"
+    pages[11]["exact_role_form_verified"] = False
+    with pytest.raises(ValueError, match="rendered page does not verify"):
+        facade.inspect(11, "same-job")
+    assert not (roots[11] / "state" / "application-page-same-job.json").exists()
+    telegram.send_message.assert_not_called()
+    with closing(sqlite3.connect(roots[11] / "jobs.db")) as db:
+        assert db.execute("SELECT stage FROM applications").fetchone()[0] == "blocked_application_unverified"
+
+
+@pytest.mark.parametrize("failure", [OSError("remote debugging unavailable"),
+                                     CDPError("CDP unavailable")])
+def test_hermes_inspect_browser_failure_never_claims_form_verified(app, failure):
+    facade, _, roots, _, browser, telegram = app
+    browser.status.side_effect = failure
+    with pytest.raises(type(failure)):
+        facade.inspect(11, "same-job")
+    assert not (roots[11] / "state" / "application-page-same-job.json").exists()
+    telegram.send_message.assert_not_called()
+    with closing(sqlite3.connect(roots[11] / "jobs.db")) as db:
+        assert db.execute("SELECT stage FROM applications").fetchone()[0] == "blocked_application_unverified"
+
+
+def test_skipped_job_keeps_package_stage_when_hermes_browser_fails(app):
+    facade, _, roots, _, browser, telegram = app
+    with closing(sqlite3.connect(roots[11] / "jobs.db")) as db, db:
+        db.execute("UPDATE jobs SET status='skipped' WHERE id='same-job'")
+        import scraper
+        scraper.record_application_stage(db, "same-job", "package_generated", sync=False)
+    browser.status.side_effect = CDPError("CDP unavailable")
+    with pytest.raises(CDPError):
+        facade.inspect(11, "same-job")
+    telegram.send_message.assert_not_called()
+    with closing(sqlite3.connect(roots[11] / "jobs.db")) as db:
+        assert db.execute("SELECT stage FROM applications").fetchone()[0] == "package_generated"
+
+
 @pytest.mark.parametrize("blocked", ["blockers", "sensitive_questions", "missing_required"])
 def test_unresolved_questions_or_verification_prevent_submit(app, blocked):
     facade, _, _, pages, _, _ = app
@@ -478,6 +520,7 @@ def test_approved_worker_upload_uses_container_document_path_and_candidate_db(ap
     monkeypatch.setattr("jobhunter_service.applications._browser_page", lambda *_: (client, pages[11]))
     monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
     monkeypatch.setattr("jobhunter_auto_apply.engine.AutoApplyEngine.inspect", Mock(return_value=PageInspection(pages[11]["url"], "Apply", "")))
+    monkeypatch.setattr("jobhunter_auto_apply.engine.AutoApplyEngine._verify_before_mutation", lambda *args: None)
     worker({**payload, "root": str(roots[11]), "approved": True})
     client.upload_file.assert_called_once_with('[id="resume"]', "/documents/same-job-package/Resume.pdf")
     client.close.assert_called_once()
@@ -518,6 +561,37 @@ def test_container_cdp_discovery_is_remapped_only_to_broker_port(monkeypatch, ad
     discover.assert_called_once_with("127.0.0.1", 49511)
     connect.assert_called_once_with("ws://127.0.0.1:49511/devtools/page/tab-11")
     assert page["target_id"] == "tab-11"
+
+
+def test_worker_browser_requires_exact_role_and_form_without_board_api(monkeypatch):
+    from jobhunter_auto_apply.cdp import CDPTarget
+    from jobhunter_auto_apply.engine import PageInspection
+    from jobhunter_service.applications import _browser_page
+
+    target = CDPTarget("tab-11", "Apply", "https://jobs.ashbyhq.com/odewithanthropic/posting/application",
+                       "page", "ws://127.0.0.1:9222/devtools/page/tab-11")
+    client = Mock()
+    monkeypatch.setattr("jobhunter_auto_apply.cdp.list_targets", lambda *_: [target])
+    monkeypatch.setattr("jobhunter_auto_apply.cdp.CDPClient", lambda *_: client)
+    valid = PageInspection(target.url, "Apply", "Staff Software Engineer (UAE)",
+                           headings=["Staff Software Engineer (UAE)"],
+                           inputs=[{"tag": "input", "type": "email", "disabled": False},
+                                   {"tag": "input", "type": "text", "label": "Full Name", "disabled": False}],
+                           buttons=[{"text": "Submit Application", "type": "submit", "disabled": True}])
+    monkeypatch.setattr("jobhunter_auto_apply.engine.inspect_page", lambda *_: valid)
+    _, page = _browser_page(9222, "tab-11", "Staff Software Engineer (UAE)", "Ode with Anthropic")
+    assert page["exact_role_form_verified"] is True
+
+    valid.headings = ["Ode", "Careers", "Open roles", "About us",
+                      "Apply for Staff Software Engineer (UAE) at Ode"]
+    _, wrapped = _browser_page(9222, "tab-11", "Staff Software Engineer (UAE)", "Ode with Anthropic")
+    assert wrapped["exact_role_form_verified"] is True
+
+    monkeypatch.setattr("jobhunter_auto_apply.engine.inspect_page", lambda *_: PageInspection(
+        target.url, "Jobs", "Jobs", headings=["Jobs"]))
+    with pytest.raises(ValueError, match="rendered page does not verify"):
+        _browser_page(9222, "tab-11", "Staff Software Engineer (UAE)", "Ode with Anthropic")
+    client.close.assert_called_once()
 
 
 @pytest.mark.parametrize("advertised", ["ws://external.example:9222/devtools/page/tab-11",

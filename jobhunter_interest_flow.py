@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 from typing import Any
 
+import job_scoring
 import scraper
 from resume_refiner import (
     apply_resume_variant,
@@ -1270,6 +1271,44 @@ def _compact_benefits(sources: list[dict[str, str]]) -> str:
     return f"{', '.join(benefits)} mentioned; no figures."
 
 
+def _posting_fit_checks(job: dict[str, Any]) -> list[str]:
+    """Show material role requirements without inferring candidate experience."""
+    description = str(job.get("description") or "")
+    years = scraper.extract_min_experience(description)
+    breakdown = str(job.get("score_breakdown") or "")
+    cap = re.search(r"\bwants\s+(\d+)\+\s+years,\s+over\s+the\s+(\d+)\s+cap\b", breakdown)
+    checks: list[str] = []
+    if years >= 8 or (cap is not None and years == int(cap.group(1))):
+        years_note = f"Posting asks for {years}+ years"
+        if cap is not None and years == int(cap.group(1)):
+            years_note += f" (above local {cap.group(2)}-year search cap)"
+        checks.append(years_note)
+
+    production_ai = re.search(
+        r"\bproduction[\s-]+(?:applied[\s-]+)?(?:AI|ML|artificial intelligence|machine learning)"
+        r"(?:[\s-]+(?:systems|products|applications|solutions))?\b",
+        description,
+        flags=re.IGNORECASE,
+    )
+    if production_ai:
+        topic = "production applied AI" if re.search(r"\bapplied\b", production_ai.group(), re.I) else "production AI/ML"
+        checks.append(f"Posting mentions {topic}; confirm direct delivery evidence")
+    return checks
+
+
+def _posting_visa_note(job: dict[str, Any]) -> str:
+    """Use the current posting text; stale stored classifications are not proof."""
+    signal, evidence = job_scoring.sponsorship_signal(job.get("description") or "")
+    if signal == "offered":
+        excerpt = evidence[:160].rstrip() + ("…" if len(evidence) > 160 else "")
+        return f'Posting says “{excerpt}”; confirm eligibility and terms.'
+    if signal == "excluded":
+        return "Posting rules out sponsorship; check eligibility before applying."
+    if signal == "implied":
+        return "Relocation support is mentioned; visa sponsorship is unconfirmed."
+    return ""
+
+
 def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> str:
     company_name = str(research.employer_name or job.get("company") or "company")
     published_salary = validated_job_salary(job)
@@ -1300,6 +1339,10 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
 
     company_line = " ".join(str(research.company_summary or "Company details not verified.").split())[:180]
     benefits_block = f"\n<b>Benefits:</b> {_esc(benefits_line)}" if benefits_line else ""
+    fit_checks = _posting_fit_checks(job)
+    fit_block = f"\n<b>Fit checks:</b> {_esc('; '.join(fit_checks))}." if fit_checks else ""
+    visa_note = _posting_visa_note(job)
+    visa_block = f"\n<b>Visa:</b> {_esc(visa_note)}" if visa_note else ""
 
     return f"""🔎 <b>Research</b>
 
@@ -1307,7 +1350,7 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
 {_esc(company_name)} — {_esc(job.get('location'))}{f" (via {_esc(research.posting_company)})" if research.posting_company else ""}
 
 <b>Company:</b> {_esc(company_line)}
-<b>Pay:</b> {pay_line}{benefits_block}
+<b>Pay:</b> {pay_line}{benefits_block}{fit_block}{visa_block}
 <b>Ask:</b> Base salary, currency, pay period and bonus/equity terms.
 
 Choose next step:"""
@@ -1525,6 +1568,22 @@ def _skill_category_score(category: str, values: Any, job_text: str, job_title: 
     return score
 
 
+def _staff_role_seeks_former_leaders(job_title: str, job_text: str) -> bool:
+    """Recognize a Staff posting that asks candidates to bring past leadership."""
+    title = _normalized_relevance_text(job_title)
+    if not (
+        _contains_relevance_term(title, "staff")
+        and _contains_relevance_term(title, "software engineer")
+    ):
+        return False
+    description = _normalized_relevance_text(job_text)
+    return re.search(
+        r"\b(?:role|position)\s+(?:is\s+)?(?:designed|intended)\s+for\s+"
+        r"(?:former\s+(?:engineering|technical)\s+leaders?|(?:former\s+)?founders?)\b",
+        description,
+    ) is not None
+
+
 def _focused_summary(summary: str, job_text: str, job_title: str = "", *, limit: int = 3) -> str:
     sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", summary.strip()) if part.strip()]
     if len(sentences) <= limit:
@@ -1534,7 +1593,10 @@ def _focused_summary(summary: str, job_text: str, job_title: str = "", *, limit:
     def role_score(sentence: str) -> int:
         value = _normalized_relevance_text(sentence)
         score = _relevance_score(sentence, job_text)
-        if any(_contains_relevance_term(title, term) for term in ("manager", "head of engineering")):
+        if (
+            any(_contains_relevance_term(title, term) for term in ("manager", "head of engineering"))
+            or _staff_role_seeks_former_leaders(job_title, job_text)
+        ):
             score += 20 * sum(
                 _contains_relevance_term(value, term)
                 for term in ("cto", "engineering teams", "technical leader", "led")
@@ -1870,7 +1932,7 @@ def _filter_optional_experiences(
 ) -> list[dict[str, Any]]:
     """Keep current progression and show side roles only when they fit the role."""
     title = _normalized_relevance_text(job_title)
-    leadership_role = any(
+    leadership_role = _staff_role_seeks_former_leaders(job_title, job_text) or any(
         _contains_relevance_term(title, term)
         for term in ("manager", "lead", "architect", "director", "head", "principal", "chief")
     )

@@ -41,13 +41,19 @@ def test_network_failure_does_not_expose_token_in_log(caplog):
 def test_individual_notifications_return_only_confirmed_ids():
     jobs = [{"id": "sent", "title": "Backend Lead", "company": "Test", "score": 80},
             {"id": "failed", "title": "Backend Engineer", "company": "Test", "score": 70}]
-    with mock.patch.object(scraper, "send_telegram", side_effect=[True, True, False]), \
+    messages = []
+    def send(_, __, message, **kwargs):
+        messages.append(message)
+        return [True, True, False][len(messages) - 1]
+    with mock.patch.object(scraper, "send_telegram", side_effect=send), \
          mock.patch.object(scraper, "format_job_message", return_value="card"), \
          mock.patch.object(scraper, "job_inline_keyboard", return_value={}), \
          mock.patch.object(scraper.time, "sleep"), \
          mock.patch.object(scraper, 'prepare_review_candidate', side_effect=lambda job: (job, None)), \
          mock.patch('jobhunter_availability.check', return_value={'state': 'open', 'matched': True}):
         assert scraper.notify_new_jobs("tok", "chat", jobs) == ["sent"]
+    assert "matching source listing(s) verified" in messages[0]
+    assert "Application forms have not yet been checked" in messages[0]
 
 
 def test_empty_notifications_return_no_confirmed_ids():

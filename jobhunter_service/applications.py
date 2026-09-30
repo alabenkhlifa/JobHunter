@@ -20,6 +20,8 @@ import subprocess
 import sys
 from urllib.parse import urlsplit
 
+from jobhunter_auto_apply.cdp import CDPError
+
 from .state import private_json
 
 PURPOSE = "application_approval"
@@ -266,6 +268,8 @@ class ApplicationService:
         result = self._run(root, {"operation": "observe", "job_id": job_id, "cdp_port": port,
                                   "target_id": target_id})
         _page_url(result.get("url", ""))
+        if result.get("exact_role_form_verified") is not True:
+            raise ValueError("The rendered page does not verify this role and an actionable application form.")
         if not isinstance(result.get("target_id"), str) or not result["target_id"]:
             raise ValueError("The application browser page is unavailable.")
         return result
@@ -273,12 +277,28 @@ class ApplicationService:
     def inspect(self, actor, job_id):
         member, root, job = self._context(actor, job_id)
         with _lock(root):
-            port = self._browser(member)
-            page = self._observe(root, job_id, port)
+            try:
+                port = self._browser(member)
+                page = self._observe(root, job_id, port)
+            except (ValueError, PermissionError, OSError, CDPError):
+                import scraper
+                with closing(sqlite3.connect(root / "jobs.db")) as db, db:
+                    try:
+                        prior = db.execute("SELECT stage FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                                           (job_id,)).fetchone()
+                    except sqlite3.Error:
+                        prior = None
+                    if str(job.get("status") or "").casefold() != "skipped" and (
+                            not prior or prior[0] not in {"submitted", "submission_attempted", "skipped"}):
+                        scraper.record_application_stage(
+                            db, job_id, "blocked_application_unverified",
+                            notes="The rendered exact-role application form was not verified.",
+                            error="exact_role_form_not_verified", sync=False)
+                raise
             snapshot = {"job_id": job_id, "revision": member["revision"], "cdp_port": port,
                         "target_id": page["target_id"], "url": page["url"], "job_digest": _digest(job)}
             private_json(root / "state" / f"application-page-{job_id}.json", snapshot)
-        text = _card(job) + "\n\nCurrent browser page:\n" + str(page.get("title", ""))[:250] + "\n" + page["url"][:700]
+        text = _card(job) + "\n\nRendered exact-role application form verified:\n" + str(page.get("title", ""))[:250] + "\n" + page["url"][:700]
         if page["url"] != job.get("url"):
             text += "\nThis differs from the collected posting URL. Verify that this page is the application for the role shown above."
         blockers = page.get("blockers", [])
@@ -442,7 +462,7 @@ def _selector(items, *, upload=False):
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _browser_page(port, target_id=None):
+def _browser_page(port, target_id=None, expected_title=None, expected_company=None):
     from jobhunter_auto_apply.cdp import CDPClient, list_targets
     from jobhunter_auto_apply.engine import inspect_page
 
@@ -468,9 +488,12 @@ def _browser_page(port, target_id=None):
     try:
         inspection = inspect_page(client)
         _page_url(inspection.url)
+        if expected_title is not None and not inspection.verifies_application_for(expected_title, expected_company):
+            raise ValueError("The rendered page does not verify this role and an actionable application form.")
         result = asdict(inspection)
         result.update(target_id=target.id, upload_selector=_selector(inspection.inputs, upload=True),
                       submit_selector=_selector(inspection.buttons),
+                      exact_role_form_verified=expected_title is not None,
                       missing_required=any(item.get("required") and not item.get("value_present") for item in inspection.inputs))
         return client, result
     except Exception:
@@ -510,7 +533,7 @@ def worker(request):
         return {"job_id": job["id"], "status": "interested"}
     if operation not in {"observe", "upload", "submit"}:
         raise ValueError("Unknown application operation.")
-    client, page = _browser_page(request["cdp_port"], request.get("target_id"))
+    client, page = _browser_page(request["cdp_port"], request.get("target_id"), job["title"], job.get("company"))
     try:
         if operation == "observe":
             return page

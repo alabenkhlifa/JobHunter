@@ -29,9 +29,9 @@ class StyledResumePDF(FPDF):
     SIDE_W = 187.7
     BOTTOM = 792
     PAGE_TOP = 27
-    SKILL_ROW_STEP = 20.0
+    SKILL_ROW_STEP = 19.0
     SKILL_CATEGORY_TOP = 22.0
-    SKILL_CATEGORY_GAP = 5.0
+    SKILL_CATEGORY_GAP = 3.0
     LANGUAGE_ROW_STEP = 22.0
 
     def __init__(self, profile):
@@ -45,6 +45,8 @@ class StyledResumePDF(FPDF):
         self.add_font("Rubik", "B", str(ASSETS / "Rubik-Bold-full.ttf"))
         self._side_schedule = {}
         self._sidebar_page_count = 1
+        self._sidebar_final_page = 1
+        self._sidebar_final_y = self._side_start(1)
         self._page_two_sidebar_after = 28
 
     @staticmethod
@@ -263,6 +265,21 @@ class StyledResumePDF(FPDF):
         order = {"arabic": 0, "english": 1, "french": 2}
         return sorted(result, key=lambda item: order.get(item[0].lower(), 3))
 
+    def _education_layout(self, item, width):
+        degree = str(item.get("degree") or "")
+        school = str(item.get("school") or "")
+        if item.get("location") and str(item["location"]).lower() not in school.lower():
+            school += ", " + str(item["location"])
+        degree_lines = self._wrap(degree, width - 25, "Rubik", "B", 9.15)
+        school_lines = self._wrap(school, width - 25, "Rubik", "B", 8.8)
+        required = 13 + 11.4 * len(degree_lines) + 11.2 * len(school_lines) + 18
+        return {
+            "degree": degree_lines,
+            "school": school_lines,
+            "dates": str(item.get("dates") or ""),
+            "image": self._school_image(item),
+        }, required
+
     def _plan_language_education(self):
         page, y = 2, 28
         languages = self._parse_languages()
@@ -280,17 +297,9 @@ class StyledResumePDF(FPDF):
             self._side_add(page, "section", y, title="Education")
             y += 20
             for item in education:
-                degree = str(item.get("degree") or "")
-                school = str(item.get("school") or "")
-                if item.get("location") and item["location"].lower() not in school.lower():
-                    school += ", " + str(item["location"])
-                degree_lines = self._wrap(degree, self.SIDE_W - 25, "Rubik", "B", 9.15)
-                school_lines = self._wrap(school, self.SIDE_W - 25, "Rubik", "B", 8.8)
-                required = 13 + 11.4 * len(degree_lines) + 11.2 * len(school_lines) + 18
+                data, required = self._education_layout(item, self.SIDE_W)
                 page, y = self._side_next(page, y, required)
-                self._side_add(page, "education", y, degree=degree_lines,
-                               school=school_lines, dates=str(item.get("dates") or ""),
-                               image=self._school_image(item))
+                self._side_add(page, "education", y, **data)
                 y += required
         self._page_two_sidebar_after = y + 18 if page == 2 else 28
         return bool(languages or education), page
@@ -372,7 +381,90 @@ class StyledResumePDF(FPDF):
                     self._side_add(1, kind, command_y + shift, **data)
                 details_end_page = 1
 
+        self._sidebar_final_page = page
+        self._sidebar_final_y = y
         self._sidebar_page_count = max(page, details_end_page if personal_details else 1)
+
+    def _language_commands(self, start_y):
+        commands = []
+        y = start_y
+        languages = self._parse_languages()
+        if languages:
+            commands.append(("section", y, {"title": "Languages"}))
+            y += 17
+            for name, level in languages:
+                commands.append(("language", y, {"name": name, "level": level}))
+                y += self.LANGUAGE_ROW_STEP
+        return commands, y
+
+    def _education_commands(self, start_y, width):
+        commands = []
+        y = start_y
+        education = self.profile.get("education") or []
+        if education:
+            commands.append(("section", y, {"title": "Education"}))
+            y += 20
+            for item in education:
+                data, required = self._education_layout(item, width)
+                commands.append(("education", y, data))
+                y += required
+        return commands, y
+
+    def _main_personal_details(self, start_y):
+        """Plan a full-width block beneath Experience without drawing it."""
+        languages, y = self._language_commands(start_y)
+        education, end_y = self._education_commands(
+            y + (10 if languages else 0), self.MAIN_W)
+        return [(command, self.MAIN_X, self.MAIN_W)
+                for command in languages + education], end_y
+
+    def _compact_main_personal_details(self, start_y):
+        """Fit Languages and Education beside each other when both exist."""
+        language_entries = self._parse_languages()
+        if not language_entries or not self.profile.get("education"):
+            return [], self.BOTTOM + 1
+        language_width = max(130, max(
+            self._width(name, "Rubik", "B", 9.1)
+            + self._width(level, size=8.8) + 12
+            for name, level in language_entries
+        ))
+        education_x = self.MAIN_X + language_width + 14
+        education_width = self.MAIN_W - language_width - 14
+        if education_width < 150:
+            return [], self.BOTTOM + 1
+        languages, language_end = self._language_commands(start_y)
+        education, education_end = self._education_commands(start_y, education_width)
+        commands = ([(command, self.MAIN_X, language_width) for command in languages]
+                    + [(command, education_x, education_width) for command in education])
+        return commands, max(language_end, education_end)
+
+    def _split_personal_details_across_columns(self, start_y):
+        """Place education below Experience and a short language line after sidebar content."""
+        if self._sidebar_final_page != 1:
+            return [], [], self.BOTTOM + 1
+        education, education_end = self._education_commands(start_y, self.MAIN_W)
+        languages = self._parse_languages()
+        if not education or not languages:
+            return [], [], self.BOTTOM + 1
+        language_text = "  |  ".join(f"{name}: {level}" for name, level in languages)
+        lines = self._wrap(language_text, self.SIDE_W, size=8.3)
+        side_y = self._sidebar_final_y + 14
+        side_commands = [
+            ("section", side_y, {"title": "Languages"}),
+            ("compact_languages", side_y + 17, {"lines": lines}),
+        ]
+        side_end = side_y + 17 + 10.8 * len(lines) + 5
+        return education, side_commands, max(education_end, side_end)
+
+    def _second_page_only_has_personal_details(self):
+        if self._sidebar_page_count != 2:
+            return False
+        commands = self._side_schedule.get(2, [])
+        return bool(commands) and all(
+            kind in ("language", "education")
+            or kind == "section" and data["title"] in ("Languages", "Education")
+            for kind, _, data in commands
+        )
 
     @staticmethod
     def _issuer(title):
@@ -400,9 +492,10 @@ class StyledResumePDF(FPDF):
             return "isimm.png"
         return None
 
-    def _draw_side_command(self, command):
+    def _draw_side_command(self, command, *, x=None, width=None):
         kind, y, data = command
-        x, right = self.SIDE_X, self.SIDE_X + self.SIDE_W
+        x = self.SIDE_X if x is None else x
+        right = x + (self.SIDE_W if width is None else width)
         if kind == "section":
             self._section(data["title"], x, right, y)
         elif kind == "skill_category":
@@ -437,6 +530,9 @@ class StyledResumePDF(FPDF):
             self._text(data["level"], right - self._width(data["level"], size=8.8),
                        y + 8, size=8.8, color=GRAY)
             self._rule(x, right, y + 19, dashed=True)
+        elif kind == "compact_languages":
+            for index, line in enumerate(data["lines"]):
+                self._text(line, x, y + index * 10.8, size=8.3)
         elif kind == "education":
             if data["image"]:
                 self._image(data["image"], x, y + 1, width=20, height=20)
@@ -703,6 +799,27 @@ class StyledResumePDF(FPDF):
         y += 8
         self._section("Experience", self.MAIN_X, self.MAIN_X + self.MAIN_W, y)
         y += 22.5
-        self._render_experience(self.profile.get("experience") or [], y)
+        y = self._render_experience(self.profile.get("experience") or [], y)
+        # A short experience column can leave room for Languages and Education
+        # while their reserved sidebar page would otherwise be mostly empty.
+        # Decide only after rendering experience, using its actual end position.
+        if self.page_no() == 1 and self._second_page_only_has_personal_details():
+            commands, end_y = self._main_personal_details(y + 14)
+            if end_y > self.BOTTOM:
+                commands, end_y = self._compact_main_personal_details(y + 14)
+            if end_y <= self.BOTTOM:
+                for command, x, width in commands:
+                    self._draw_side_command(command, x=x, width=width)
+                self._side_schedule.pop(2)
+                self._sidebar_page_count = 1
+            else:
+                education, languages, end_y = self._split_personal_details_across_columns(y + 14)
+                if end_y <= self.BOTTOM:
+                    for command in education:
+                        self._draw_side_command(command, x=self.MAIN_X, width=self.MAIN_W)
+                    for command in languages:
+                        self._draw_side_command(command)
+                    self._side_schedule.pop(2)
+                    self._sidebar_page_count = 1
         while self.page_no() < self._sidebar_page_count:
             self.add_page()

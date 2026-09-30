@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -81,6 +83,7 @@ class PageInspection:
     inputs: list[dict[str, Any]] = field(default_factory=list)
     buttons: list[dict[str, Any]] = field(default_factory=list)
     links: list[dict[str, Any]] = field(default_factory=list)
+    headings: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     sensitive_questions: list[str] = field(default_factory=list)
     missing_required: list[str] = field(default_factory=list)
@@ -94,12 +97,99 @@ class PageInspection:
     @property
     def safe_to_continue(self) -> bool:
         return (
-            self.loaded_application_page
+            self.actionable_application_form
             and not self.blockers
             and not self.sensitive_questions
             and not self.missing_required
             and not self.invalid_fields
         )
+
+    @property
+    def actionable_application_form(self) -> bool:
+        if not self.loaded_application_page:
+            return False
+        applicant_fields = [item for item in self.inputs if (
+            item.get("tag") in {"input", "select", "textarea"}
+            and str(item.get("type") or "").casefold() not in
+            {"hidden", "submit", "button", "reset", "image", "password"}
+            and not item.get("disabled")
+            and (
+                str(item.get("type") or "").casefold() in {"email", "tel", "file"}
+                or re.search(r"\b(?:name|email|phone|resume|curriculum vitae|cv)\b",
+                             " ".join(str(item.get(key) or "") for key in ("label", "name", "id")), re.I)
+            )
+        )]
+        editable = len(applicant_fields) >= 2 and any(
+            str(item.get("type") or "").casefold() in {"tel", "file"}
+            or re.search(r"\b(?:name|phone|resume|curriculum vitae|cv)\b",
+                         " ".join(str(item.get(key) or "") for key in ("label", "name", "id")), re.I)
+            for item in applicant_fields
+        )
+        submit = any(
+            str(item.get("type") or "").casefold() == "submit"
+                or re.fullmatch(r"(?:submit(?: application)?|send application|apply(?: now| for this job)?|continue|next)",
+                                str(item.get("text") or "").strip(), re.I)
+            for item in self.buttons
+        )
+        return editable and submit
+
+    def verifies_application_for(self, job_title: str, job_company: str | None = None) -> bool:
+        """A source Apply link and an ATS shell cannot verify this application."""
+        return bool(
+            self.actionable_application_form
+            and any(_heading_matches_job(heading, job_title, job_company) for heading in self.headings)
+            and _page_identifies_company(self.url, self.title, self.headings, job_company)
+        )
+
+
+def _title_tokens(value: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"\w+", unicodedata.normalize("NFKC", str(value or "")).casefold()))
+
+
+_APPLICATION_HEADING_PREFIXES = (
+    ("apply", "for"), ("application", "for"), ("job", "application", "for"),
+    ("apply", "to", "be", "a"), ("apply", "to", "be", "an"),
+)
+_COMPANY_FILLER = {"at", "with", "and", "the", "of", "inc", "llc", "ltd"}
+_COMPANY_LEGAL_SUFFIXES = {"inc", "llc", "ltd", "limited", "gmbh", "corp", "corporation"}
+
+
+def _page_identifies_company(url: str, title: str, headings: list[str], company: str | None) -> bool:
+    """Require employer evidence from the rendered page or its Ashby tenant."""
+    words = list(_title_tokens(company or ""))
+    while words and words[-1] in _COMPANY_LEGAL_SUFFIXES:
+        words.pop()
+    if not words:
+        return False
+    expected = tuple(words)
+    for value in (title, *headings):
+        actual = _title_tokens(value)
+        if any(actual[index:index + len(expected)] == expected
+               for index in range(len(actual) - len(expected) + 1)):
+            return True
+    parsed = urlsplit(url)
+    if parsed.hostname == "jobs.ashbyhq.com":
+        tenant = parsed.path.strip("/").split("/", 1)[0]
+        return "".join(_title_tokens(tenant)) == "".join(expected)
+    return False
+
+
+def _heading_matches_job(heading: str, job_title: str, job_company: str | None) -> bool:
+    title = _title_tokens(job_title)
+    if not title:
+        return False
+    tokens = _title_tokens(heading)
+    for prefix in _APPLICATION_HEADING_PREFIXES:
+        if tokens[:len(prefix)] == prefix:
+            tokens = tokens[len(prefix):]
+            break
+    if tokens == title:
+        return True
+    if tokens[:len(title)] != title or not job_company:
+        return False
+    suffix = tuple(word for word in tokens[len(title):] if word not in _COMPANY_FILLER)
+    company = {word for word in _title_tokens(job_company) if word not in _COMPANY_FILLER}
+    return bool(suffix and company and set(suffix) <= company)
 
 
 def _connect_db(db_path: str) -> sqlite3.Connection:
@@ -124,6 +214,46 @@ def _record(config: ApplyConfig, job_id: str, stage: str, **kwargs: Any) -> int:
         conn.close()
 
 
+def _expected_job(db_path: str, job_id: str) -> tuple[str, str | None, str | None]:
+    path = Path(db_path)
+    if not path.is_file():
+        raise CDPError("collected job is unavailable; application form was not verified")
+    try:
+        with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as conn:
+            columns = {item[1] for item in conn.execute("PRAGMA table_info(jobs)")}
+            company = "company" if "company" in columns else "NULL"
+            status = "status" if "status" in columns else "NULL"
+            row = conn.execute(f"SELECT title, {company}, {status} FROM jobs WHERE id=?", (job_id,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    if not row or not isinstance(row[0], str) or not row[0].strip():
+        raise CDPError("collected job is unavailable; application form was not verified")
+    return row[0], row[1], row[2]
+
+
+def _record_unverified(config: ApplyConfig, job_id: str, *, url: str | None = None) -> None:
+    try:
+        _, _, job_status = _expected_job(config.db_path, job_id)
+        if str(job_status or "").casefold() == "skipped":
+            return
+        with sqlite3.connect(Path(config.db_path).resolve().as_uri() + "?mode=ro", uri=True) as conn:
+            try:
+                row = conn.execute("SELECT stage FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                                   (job_id,)).fetchone()
+            except sqlite3.Error:
+                row = None
+        if row and row[0] in {"submitted", "submission_attempted", "skipped"}:
+            return
+        _record(config, job_id, "blocked_application_unverified",
+                application_url=url,
+                notes="The rendered exact-role application form was not verified.",
+                error="exact_role_form_not_verified")
+    except (CDPError, OSError, sqlite3.Error):
+        # Preserve the browser failure; an unavailable job database cannot
+        # become positive or negative form evidence.
+        pass
+
+
 def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAULT_BLOCKLIST_TERMS) -> PageInspection:
     """Return a compact, non-secret summary of the current browser page."""
 
@@ -132,7 +262,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
   const visible = (el) => {
     const style = window.getComputedStyle(el);
     const rect = el.getBoundingClientRect();
-    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width >= 0 && rect.height >= 0;
+    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
   };
   const labelFor = (el) => {
     const labels = el.labels ? [...el.labels].map(l => l.innerText.trim()).filter(Boolean) : [];
@@ -151,12 +281,17 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     url: location.href,
     title: document.title,
     text: document.body ? document.body.innerText.slice(0, 7000) : '',
+    headings: [...document.querySelectorAll('h1, h2, h3, [role=heading]')]
+      .filter(el => visible(el) && !el.closest('aside, nav, [class*="recommend" i], [class*="similar" i], [class*="related" i]'))
+      .slice(0, 20)
+      .map(el => (el.innerText || '').trim().slice(0, 200)).filter(Boolean),
     inputs: [...document.querySelectorAll('input, select, textarea')].filter(visible).slice(0, 80).map((el) => ({
       tag: el.tagName.toLowerCase(),
       type: el.type || '',
       id: el.id || '',
       name: el.name || '',
       label: labelFor(el),
+      disabled: !!el.disabled,
       required: !!el.required,
       value_present: valuePresent(el),
       invalid: el.getAttribute('aria-invalid') === 'true' || !el.checkValidity(),
@@ -164,6 +299,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     })),
     buttons: [...document.querySelectorAll('button, input[type=submit], input[type=button]')].filter(visible).slice(0, 50).map((el) => ({
       text: (el.innerText || el.value || el.getAttribute('aria-label') || '').trim(),
+      type: el.type || '',
       id: el.id || '',
       name: el.name || '',
       disabled: !!el.disabled
@@ -218,6 +354,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
         inputs=inputs,
         buttons=data.get("buttons") or [],
         links=data.get("links") or [],
+        headings=data.get("headings") or [],
         blockers=blockers,
         sensitive_questions=sensitive,
         missing_required=missing_required,
@@ -241,11 +378,33 @@ class AutoApplyEngine:
             )
         return self.client
 
+    def _verify_before_mutation(self, job_id: str, client: CDPClient) -> None:
+        """Check the current rendered form before sending a document or clicking submit."""
+        try:
+            inspection = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
+            title, company, _ = _expected_job(self.config.db_path, job_id)
+        except (CDPError, OSError):
+            _record_unverified(self.config, job_id)
+            raise
+        if not inspection.verifies_application_for(title, company):
+            _record_unverified(self.config, job_id, url=inspection.url)
+            raise CDPError("exact role and employer application form were not verified; no browser action was taken")
+
     def inspect(self, job_id: str, *, stage: str = "draft_inspected") -> PageInspection:
-        client = self.connect()
-        inspection = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
+        try:
+            client = self.connect()
+            inspection = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
+        except (CDPError, OSError):
+            _record_unverified(self.config, job_id)
+            raise
         if not inspection.loaded_application_page:
+            _record_unverified(self.config, job_id)
             raise CDPError("application page is blank or still loading; no draft state was recorded")
+        if stage != "submission_attempted":
+            title, company, _ = _expected_job(self.config.db_path, job_id)
+            if not inspection.verifies_application_for(title, company):
+                _record_unverified(self.config, job_id, url=inspection.url)
+                raise CDPError("exact role and actionable application form were not verified; no draft state was recorded")
         evidence_path = None
         if self.config.evidence_enabled:
             evidence_path = str(_job_output_dir(self.config.output_dir, job_id) / f"{stage}.png")
@@ -267,6 +426,7 @@ class AutoApplyEngine:
                 {
                     "title": inspection.title,
                     "safe_to_continue": inspection.safe_to_continue,
+                    "exact_role_form_verified": stage != "submission_attempted",
                     "blockers": inspection.blockers,
                     "sensitive_questions": inspection.sensitive_questions,
                     "missing_required": inspection.missing_required,
@@ -305,6 +465,9 @@ class AutoApplyEngine:
         client = self.connect()
         if self.config.expected_page_url is not None and client.evaluate("location.href") != self.config.expected_page_url:
             raise PermissionError("The approved application page changed before upload.")
+        self._verify_before_mutation(job_id, client)
+        if client.evaluate("location.href") != self.config.expected_page_url:
+            raise PermissionError("The approved application page changed before upload.")
         client.upload_file(selector, upload_path)
         time.sleep(1)
         _record(self.config, job_id, "resume_uploaded")
@@ -323,6 +486,9 @@ class AutoApplyEngine:
         if self.config.expected_page_url is None:
             raise PermissionError("the approved application page URL is required for submission")
         client = self.connect()
+        if client.evaluate("location.href") != self.config.expected_page_url:
+            raise PermissionError("The approved application page changed before submission.")
+        self._verify_before_mutation(job_id, client)
         result = client.evaluate(
             f"""
 (() => {{
