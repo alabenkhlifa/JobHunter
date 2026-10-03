@@ -342,40 +342,119 @@ def vendor_description(job):
 # Non-English Swiss bodies reached review 108 times, with zero sends and
 # 24 rejects. Whole-word counts avoid reading English substrings as language.
 # That review outcome does not establish a language barrier: Ala speaks
-# French, English and Arabic, so only German and Italian are checked.
+# French, English and Arabic, so German, Italian and Spanish are checked.
+# Spanish joined on 2026-10-01 with the Spain-only markets, whose LinkedIn
+# searches carry many Spanish-only postings.
 _LANGUAGE_WORDS = {
     "German": "und wir sie mit für nicht eine aufgaben erfahrung",
     "Italian": "noi voi con per della delle degli una esperienza competenze",
+    "Spanish": "los las para una del por nuestro nuestra experiencia conocimientos buscamos equipo desarrollo"
+               " empresa requisitos funciones ofrecemos proyectos puesto trabajo años",
 }
+# A bilingual posting (a Spanish text beside its English version) is open to
+# English speakers: a body with a substantial English part is not a barrier.
+# Fifteen English function words is more than a boilerplate closing line
+# ("we are an equal opportunity employer") and less than any real English
+# section of a posting.
+_ENGLISH_WORDS = frozenset("the and with for you our are will this that from".split())
+_BODY_LANGUAGE_THRESHOLD = 25
+_ENGLISH_PRESENCE = 15
 
 
 def language_body_barrier(job):
     words = re.findall(r"\b\w+\b", str(job.get("description") or "").lower())
+    english = sum(word in _ENGLISH_WORDS for word in words)
     for language, stopwords in _LANGUAGE_WORDS.items():
         vocabulary = set(stopwords.split())
-        if sum(word in vocabulary for word in words) >= 25:
+        if (sum(word in vocabulary for word in words) >= _BODY_LANGUAGE_THRESHOLD
+                and english < _ENGLISH_PRESENCE):
             return f"language barrier: {language}"
     return None
 
 
 # Explicit language requirements: 58 rows, one send and 18 rejects. Optional
 # language skills must stay optional even beside a required English skill.
+# "Spanish" is mostly an adjective in postings for Spain ("Spanish market",
+# "a Spanish bank with excellent benefits"); those nouns are excluded so only
+# the language is matched, and a Spanish sentence must also talk about
+# speaking or a level before it counts as a requirement.
+_SPANISH_NOT_THE_LANGUAGE = (
+    r"market|markets|company|companies|startup|start-up|team|teams|client|clients|customer|customers|user|users"
+    r"|payroll|law|laws|labou?r|legal|legislation|regulation|regulations|bank|banks|banking|entity|entities|public"
+    r"|office|offices|government|administration|economy|branch|subsidiary|subsidiaries|group|firm|firms|employer"
+    r"|employers|headquarters|hq|unit|business|businesses|operations|side|sector|industry|territory|region|nationality"
+    r"|citizen\w*|passport|id|dni|nie|residen\w*|social security|contract|contracts|employment|working|work|tax"
+    r"|taxes|holidays|culture|lifestyle|city|cities|coast|sun|food|leader|leaders|scale-?up|unicorn|fintech|insurer"
+    r"|retailer|airline|utility|telco|operator|site|sites|branch|division|product|products|brand|brands|version"
+)
 _LANGUAGE_NAMES = {
     "German": r"german|deutsch", "Italian": r"italian|italiano",
+    "Spanish": rf"spanish(?![ -](?:{_SPANISH_NOT_THE_LANGUAGE})\b)|español|espanol|castellano|castilian",
 }
-_LANGUAGE_LEVEL = r"fluent|fluency|c1|c2|native|mandatory|required|must|proficien\w*|business|excellent|very good|strong|verhandlungssicher|sehr gute|niveau|stufe"
-_LANGUAGE_OPTIONAL = re.compile(r"\b(?:plus|advantage|asset|nice[ -]to[ -]have|desirable|preferred|bonus)\b", re.I)
+_LANGUAGE_LEVEL = (r"fluent|fluency|c1|c2|native|mandatory|required|must|proficien\w*|business|excellent|very good|strong"
+                   r"|command of|verhandlungssicher|sehr gute|niveau|stufe"
+                   # Spanish postings write the level in Spanish.
+                   r"|nivel|alto|imprescindible|requerido|requerida|necesario|necesaria|nativo|nativa|biling[üu]e|dominio|fluido|fluida|avanzado|avanzada")
+_LANGUAGE_CONTEXT = re.compile(
+    r"\b(?:speak\w*|language|languages|fluen\w*|proficien\w*|native|bilingual|biling[üu]e|level|nivel|c1|c2|b2|idioma"
+    r"|idiomas|written|spoken|verbal|communicat\w*|command of|hablar|habla|hablado|conversational|dominio)\b", re.I)
+_LANGUAGE_OPTIONAL = re.compile(r"\b(?:plus|advantage|asset|nice[ -]to[ -]have|desirable|preferred|bonus|optional|valorable|deseable)\b", re.I)
+# "No Spanish required", "Spanish is not needed": the English-speaking boards
+# say this in the posting body, and the level words must not read it as a
+# requirement. The reviewer still judges the full text.
+_LANGUAGE_WAIVED = re.compile(
+    r"\b(?:no|not|without|isn['\u2019]t|non)\b[^.!?;\n]{0,40}?\b(?:required|requirement|needed|necessary|mandatory|essential|a must)\b"
+    r"|\bno need (?:for|of|to speak)\b|\bno (?:spanish|español|espanol|castellano)\b"
+    r"|\b(?:spanish|español|espanol|castellano) (?:is )?(?:not|isn['\u2019]t) (?:required|needed|necessary|mandatory|essential)\b"
+    r"|\bsin (?:necesidad de )?(?:español|castellano)\b"
+    # "C1 in either English or Spanish", "fluent in English and/or Spanish":
+    # one of his languages is enough.
+    r"|\beither\b[^.!?;\n]{0,40}\bor\b|\band/or\b"
+    r"|\b(?:spanish|español|espanol|castellano) or (?:english|inglés|ingles|french|arabic)\b"
+    r"|\b(?:english|inglés|ingles|french|arabic) or (?:spanish|español|espanol|castellano)\b", re.I)
 
 
 def language_requirement_barrier(job):
     # "German (min. C1)" keeps its level in the same requirement sentence.
     for sentence in re.split(r"(?<!\bmin\.)(?<=[.!?;])\s+|\n+", str(job.get("description") or ""), flags=re.I):
-        if _LANGUAGE_OPTIONAL.search(sentence):
+        if _LANGUAGE_OPTIONAL.search(sentence) or _LANGUAGE_WAIVED.search(sentence):
             continue
         for language, names in _LANGUAGE_NAMES.items():
+            if language == "Spanish" and not _LANGUAGE_CONTEXT.search(sentence):
+                continue
             pattern = rf"\b(?:{names})\b.{{0,60}}\b(?:{_LANGUAGE_LEVEL})\b|\b(?:{_LANGUAGE_LEVEL})\b.{{0,60}}\b(?:{names})\b"
             if re.search(pattern, sentence, re.I):
                 return f"language barrier: {language}"
+    return None
+
+
+# What a Spain board states about languages, as plain text in
+# ``language_requirement`` ("board: fluent Spanish required", "board: ad
+# written in Spanish, Spanish requirement not stated", "...; Turkish
+# required"). SpainJobs.io machine-translates Spanish ads into English, so the
+# body rule cannot see them; the board's reading is the only trace.
+_BOARD_SPOKEN = ("english", "french", "arabic")
+_BOARD_LANGUAGE = re.compile(
+    r"\b(?:fluent |native |professional |business |c1 |c2 )?([a-z]+) (?:is )?(?:required|needed|mandatory|imprescindible)\b")
+_BOARD_NEGATED = re.compile(r"\b(?:no|not|without|optional|plus|nice)\b")
+_LANGUAGE_WORDS_NOT_LANGUAGES = frozenset(
+    "level skills skill fluency proficiency language languages experience degree visa permit it".split())
+
+
+def board_language_barrier(job):
+    note = str(job.get("language_requirement") or "").lower()
+    if not note.startswith("board:"):
+        return None
+    for clause in re.split(r"[;,.]", note):
+        if _BOARD_NEGATED.search(clause):
+            continue
+        if re.search(r"\bad (?:is )?written in spanish\b", clause):
+            return "language barrier: Spanish (board: ad written in Spanish)"
+        for match in _BOARD_LANGUAGE.finditer(clause):
+            language = match.group(1)
+            if language in _BOARD_SPOKEN or language in _LANGUAGE_WORDS_NOT_LANGUAGES:
+                continue
+            return f"language barrier: {language.capitalize()} (board)"
     return None
 
 
@@ -461,7 +540,7 @@ def duplicate_key(job, *, matching=None, markets=None):
 MARKET_COUNTRIES = {
     "uae": ("dubai", "abu dhabi"),
     "ksa": ("jeddah", "jiddah", "riyadh"),
-    "es": ("madrid", "valencia", "valència"),
+    "es": ("madrid", "valencia", "valència", "barcelona"),
     "ch": (
         "switzerland", "schweiz", "suisse", "svizzera",
         "zurich", "zürich", "geneva", "genève", "genf",
@@ -470,8 +549,7 @@ MARKET_COUNTRIES = {
     ),
 }
 DEFAULT_MARKETS = (
-    "dubai", "madrid", "valencia", "valència", "jeddah", "jiddah", "riyadh",
-    *MARKET_COUNTRIES["ch"],
+    "valencia", "valència", "madrid", "barcelona",
 )
 
 # Names that place a location in a country without naming a chosen market.
@@ -489,11 +567,13 @@ COUNTRY_NAMES = {
 _SPANISH_CITY_TERMS = {
     "madrid": ("madrid",),
     "valencia": ("valencia", "valència"),
+    "barcelona": ("barcelona",),
 }
 _SPANISH_LOCATION_CONTEXT = (
     "spain", "españa", "community of madrid", "comunidad de madrid",
     "valencian community", "comunitat valenciana", "comunidad valenciana",
     "province of valencia", "provincia de valencia",
+    "catalonia", "cataluña", "catalunya",
 )
 
 
@@ -513,7 +593,7 @@ def _spanish_market(location):
 
 
 def location_allowed(location, allowed_locations):
-    """Match configured cities while disambiguating Madrid and Valencia."""
+    """Match configured cities while disambiguating Spanish namesakes."""
     location = str(location or "").lower()
     spanish = _spanish_market(location)
     spanish_terms = {term for terms in _SPANISH_CITY_TERMS.values() for term in terms}
@@ -625,7 +705,7 @@ def knockout(job, *, allowed_locations, max_experience=8, seen_keys=frozenset(),
             if phrase in description:
                 return f"refuses sponsorship: {phrase}"
 
-    for rule in (language_body_barrier, language_requirement_barrier, nationals_only, vendor_description):
+    for rule in (language_body_barrier, language_requirement_barrier, board_language_barrier, nationals_only, vendor_description):
         reason = rule(job)
         if reason:
             return reason

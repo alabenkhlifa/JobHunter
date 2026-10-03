@@ -17,10 +17,35 @@ from pathlib import Path
 from jobhunter_integrations.gmail_auth import (
     GmailAuthError, default_token_path, expected_account, gmail_service, write_private_json,
 )
-from jobhunter_integrations.gmail_watcher import extract_text, header_value
+from jobhunter_integrations.gmail_watcher import extract_text, extract_visible_text, header_value
 
 
-def find_message(service, *, account: str, sender_domain: str, after: dt.datetime, now: dt.datetime | None = None):
+def extract_verification_code(text: str, *, subject: str = "", length: int = 8) -> str | None:
+    """Return one unambiguous, case-preserved code from visible email copy."""
+    if not 4 <= length <= 12:
+        raise ValueError("Unsupported verification code length.")
+    if not re.search(r"\b(?:verification|security|confirmation|one[- ]time)\b|\bcode\b", subject + " " + text, re.I):
+        return None
+    token = rf"([A-Za-z0-9]{{{length}}})(?![A-Za-z0-9])"
+    labelled = re.findall(
+        rf"\b(?:verification\s+|security\s+|confirmation\s+|one[- ]time\s+)?code"
+        rf"(?:\s+(?:is|below))?\s*[:：=-]?\s*{token}", text, re.I,
+    )
+    standalone = re.findall(rf"(?m)^\s*{token}\s*$", text)
+    candidates = set(labelled + standalone)
+    # HTML mail often places the code in a separate element, flattened to spaces.
+    # A mixed alphanumeric token near a code label is still distinct from prose.
+    for match in re.finditer(rf"(?<![A-Za-z0-9]){token}", text):
+        value = match.group(1)
+        if any(c.isdigit() for c in value) and re.search(
+            r"\bcode\b", text[max(0, match.start() - 160):match.start()], re.I
+        ):
+            candidates.add(value)
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def find_message(service, *, account: str, sender_domain: str, after: dt.datetime, now: dt.datetime | None = None,
+                 code_length: int | None = None):
     now = now or dt.datetime.now(dt.timezone.utc)
     if after.tzinfo is None or not dt.timedelta(0) <= now - after <= dt.timedelta(minutes=15):
         raise ValueError("--after must be a timezone-aware time within the last 15 minutes.")
@@ -51,12 +76,18 @@ def find_message(service, *, account: str, sender_domain: str, after: dt.datetim
                 or not after.timestamp() * 1000 <= stamp <= now.timestamp() * 1000
             ):
                 continue
+            subject = header_value(headers, "Subject")
+            text = extract_visible_text(payload) if code_length is not None else extract_text(payload)
+            code = extract_verification_code(text, subject=subject, length=code_length) if code_length is not None else None
+            if code_length is not None and code is None:
+                continue
             if newest is None or stamp > newest["internal_date_ms"]:
                 newest = {
                     "message_id": message["id"], "internal_date_ms": stamp,
-                    "subject": header_value(headers, "Subject"), "sender": sender,
-                    "text": extract_text(payload),
+                    "subject": subject, "sender": sender, "text": text,
                 }
+                if code is not None:
+                    newest["code"] = code
         page_token = page.get("nextPageToken")
         if not page_token:
             return newest

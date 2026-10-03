@@ -26,7 +26,7 @@ def database(tmp_path, monkeypatch):
     conn.close()
 
 
-def insert(conn, number, location='Dubai', *, status='new', notified=0, verdict='send', score=80, days=2, sponsorship='implied'):
+def insert(conn, number, location='Valencia', *, status='new', notified=0, verdict='send', score=80, days=2, sponsorship='implied'):
     job_id = f'li-{number}'
     date = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     conn.execute('INSERT INTO jobs(id,title,company,location,url,source,score,date_scraped,date_posted,description,status,notified,ai_verdict,ai_sponsorship,ai_rank) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
@@ -48,10 +48,10 @@ def source_responses(monkeypatch, *, closed=(), unknown=()):
     return calls
 
 
-def test_today_dubai_jobs_backfill_all_other_markets_from_approved_queue(database, monkeypatch):
+def test_today_valencia_jobs_backfill_all_other_markets_from_approved_queue(database, monkeypatch):
     for number in range(100, 103):
         insert(database, number, days=0)
-    for number, market in enumerate(('Madrid, Spain', 'Valencia, Spain', 'Jeddah', 'Riyadh', 'Zurich, Switzerland'), 200):
+    for number, market in enumerate(('Madrid, Spain', 'Barcelona, Spain'), 200):
         insert(database, number, market, days=5, score=60)
     calls = source_responses(monkeypatch)
     sent = []
@@ -59,11 +59,11 @@ def test_today_dubai_jobs_backfill_all_other_markets_from_approved_queue(databas
     written = scraper.record_review(database, [{'job_id': f'li-{number}', 'verdict': 'send', 'sponsorship': 'implied',
                                               'reason': 'Confirmed match', 'rank': number - 99} for number in range(100, 103)])
     report = scraper.send_reviewed_digest('synthetic', 'private', database, written)
-    assert report['sent'] == 8 and len(calls) == 8
+    assert report['sent'] == 5 and len(calls) == 5
     assert 'No matches' not in sent[0]
     assert 'application forms not yet verified' in sent[0]
-    assert all(name in sent[0] for name in ('DUBAI', 'MADRID', 'VALENCIA', 'JEDDAH', 'RIYADH', 'SWITZERLAND'))
-    assert database.execute('SELECT COUNT(*) FROM jobs WHERE notified=1').fetchone()[0] == 8
+    assert all(name in sent[0] for name in ('VALENCIA', 'MADRID', 'BARCELONA'))
+    assert database.execute('SELECT COUNT(*) FROM jobs WHERE notified=1').fetchone()[0] == 5
 
 
 def test_explicitly_closed_choice_is_replaced_with_older_open_job_in_same_market(database, monkeypatch):
@@ -104,7 +104,7 @@ def test_backfill_never_promotes_holds_rejects_notified_old_or_filtered_rows(dat
 
 def test_queue_more_reopens_listings_and_refills_skipped_closed_job(database, monkeypatch):
     insert(database, 100)
-    insert(database, 101, 'Riyadh', score=60)
+    insert(database, 101, 'Barcelona', score=60)
     calls = source_responses(monkeypatch, closed=['li-100'])
     assert scraper.list_queued_jobs(database, limit=1, revalidate=True)[0]['id'] == 'li-101'
     assert calls == ['li-100', 'li-101']
@@ -122,14 +122,14 @@ def test_direct_digest_and_individual_cards_cannot_bypass_availability(database,
 
 def test_unknown_region_is_reported_separately_from_no_matches(database, monkeypatch):
     insert(database, 100)
-    insert(database, 101, 'Riyadh')
+    insert(database, 101, 'Barcelona')
     source_responses(monkeypatch, unknown=['li-101'])
     sent = []
     monkeypatch.setattr(scraper, 'send_telegram', lambda token, chat, text: sent.append(text) or True)
     assert scraper.send_reviewed_digest('test', 'private', database)['sent'] == 1
-    assert 'Availability not confirmed: Riyadh' in sent[0]
+    assert 'Availability not confirmed: Barcelona' in sent[0]
     no_matches = next(line for line in sent[0].splitlines() if 'No matches:' in line)
-    assert 'Riyadh' not in no_matches
+    assert 'Barcelona' not in no_matches
 
 
 def test_availability_budget_leaves_unchecked_jobs_pending(database, monkeypatch):

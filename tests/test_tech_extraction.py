@@ -151,7 +151,7 @@ def test_vendor_description_requires_three_mentions_without_core_stack():
     assert job_scoring.vendor_description({"description": "SAP Salesforce Workday"}) == "vendor platform specialization"
     assert job_scoring.vendor_description({"description": "SAP Salesforce"}) is None
     assert job_scoring.vendor_description({"description": "sapphire workdays pegasus"}) is None
-    assert job_scoring.knockout({"title": "Architect", "location": "Dubai", "description": "SAP SAP SAP"},
+    assert job_scoring.knockout({"title": "Architect", "location": "Madrid", "description": "SAP SAP SAP"},
                                 allowed_locations=job_scoring.DEFAULT_MARKETS) == "vendor platform specialization"
 
 

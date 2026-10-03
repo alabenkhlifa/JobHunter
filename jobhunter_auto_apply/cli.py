@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--selector", required=True, help="CSS selector for submit button")
     submit.add_argument("--approved", action="store_true", help="Required to submit")
 
+    verify = sub.add_parser("verify-email", help="Resume a pending email-code step without resubmitting")
+    verify.add_argument("--job-id", required=True)
+    verify.add_argument("--page-url", required=True)
+    verify.add_argument("--approved", action="store_true")
+
     return parser
 
 
@@ -59,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
             inspection = engine.upload_file(args.job_id, args.selector, args.file, approved=args.approved)
         elif args.command == "submit":
             inspection = engine.click_submit(args.job_id, args.selector, approved=args.approved)
+        elif args.command == "verify-email":
+            inspection = engine.verify_email(args.job_id, approved=args.approved)
         else:  # pragma: no cover
             raise AssertionError(args.command)
     except (PermissionError, CDPError, OSError) as exc:

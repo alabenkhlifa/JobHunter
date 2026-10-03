@@ -42,6 +42,31 @@ def test_resume_certification_links_are_clickable_except_unlinked_entries(tmp_pa
     assert output.count(b"/Subtype /Link") == 1
 
 
+@pytest.mark.parametrize("prefix", ["", "VMware "])
+def test_spring_label_omits_edition_year_and_keeps_original_verification_link(prefix):
+    title = f"{prefix}Spring Certified Professional 2024 v2"
+    spring_url = "https://credentials.example/spring"
+    profile = {
+        "name": "Candidate",
+        "certifications": [title, "Other Certificate 2024"],
+        "certification_links": {title: spring_url},
+        "experience": [{
+            "title": "Engineer", "company": "Example", "dates": "2024 - Present",
+        }],
+    }
+    _, output = _pdf(profile)
+    reader = PdfReader(BytesIO(output))
+    text = " ".join(" ".join(page.extract_text() for page in reader.pages).split())
+
+    assert f"{prefix}Spring Certified Professional v2" in text
+    assert "Spring Certified Professional 2024" not in text
+    assert "Other Certificate 2024" in text
+    assert "2024 - Present" in text
+    assert spring_url in _links(reader)
+    assert profile["certifications"][0] == title
+    assert profile["certification_links"] == {title: spring_url}
+
+
 def test_contact_and_credential_links_are_real_annotations():
     profile = {
         "name": "Candidate",
@@ -320,7 +345,7 @@ def _resume_with_sidebar_overflow(bullet_count):
     return {
         "name": "Candidate",
         "summary": "Backend engineering and technical leadership in production services.",
-        "skills": {f"Category {index}": [f"Skill {skill}" for skill in range(6)]
+        "skills": {f"Category {index}": [f"Skill {skill}" for skill in range(9)]
                    for index in range(5)},
         "certifications": [f"Certificate {index}" for index in range(6)],
         "experience": [{
@@ -387,7 +412,11 @@ def test_personal_details_use_compact_columns_when_full_width_stack_does_not_fit
 
 def test_languages_can_finish_sidebar_while_education_fits_below_experience():
     fitz = pytest.importorskip("fitz")
-    _, output = _pdf(_resume_with_sidebar_overflow(47))
+    profile = _resume_with_sidebar_overflow(48)
+    profile["education"][0]["school"] = (
+        "Example University of Applied Engineering and Computer Science"
+    )
+    _, output = _pdf(profile)
     document = fitz.open(stream=output, filetype="pdf")
 
     assert len(document) == 1
@@ -397,10 +426,98 @@ def test_languages_can_finish_sidebar_while_education_fits_below_experience():
     education = next(word for word in words if word[4] == "EDUCATION")
     assert languages[0] >= ResumePDF.SIDE_X - 1
     assert education[0] < ResumePDF.SIDE_X
-    assert education[1] > page.search_for("customer group 46.")[-1].y1 + 6
-    assert "Arabic: Native" in page.get_text()
+    assert education[1] > page.search_for("customer group 47.")[-1].y1 + 6
+    assert all(language in page.get_text() for language in ("Arabic", "English", "French", "Native"))
     assert "Software Engineering Diploma" in page.get_text()
     assert all(y1 <= page.rect.height + 0.5 for _, _, _, y1, *_ in words)
+
+
+@pytest.mark.parametrize("bullets_per_client, expected_pages", [(8, 1), (9, 2)])
+def test_grouped_resume_recovers_spacing_only_when_personal_details_can_fit(
+    bullets_per_client, expected_pages,
+):
+    import copy
+
+    fitz = pytest.importorskip("fitz")
+    profile = _resume_with_sidebar_overflow(0)
+    profile["education"].append({
+        "degree": "Bachelor of Engineering", "school": "Example Institute",
+        "dates": "2014 - 2018",
+    })
+    profile["experience"] = [
+        {
+            "title": "Lead Engineer", "company": "Example Company", "dates": "2020 - Present",
+            "progression": "Progressed from Engineer to Lead Engineer.",
+            "engagements": [
+                {
+                    "name": f"Client {index}",
+                    "bullets": [
+                        f"Delivered reliable production backend services for customer group {bullet}."
+                        for bullet in range(bullets_per_client)
+                    ],
+                    "tech": "Java, AWS",
+                } for index in range(3)
+            ],
+        },
+        {
+            "title": "Chief Technology Officer (CTO)", "company": "Example Platform",
+            "dates": "2025 - Present",
+            "bullets": ["Designed and delivered backend services for enterprise customers."] * 2,
+            "tech": "AWS, Terraform",
+        },
+    ]
+    original = copy.deepcopy(profile)
+    pdf, output = _pdf(profile)
+    document = fitz.open(stream=output, filetype="pdf")
+    text = "\n".join(page.get_text() for page in document)
+
+    assert len(document) == expected_pages
+    assert profile == original
+    assert text.count("Delivered reliable production backend services") == 3 * bullets_per_client
+    assert text.count("Designed and delivered backend services") == 2
+    assert all(value in text for value in (
+        "Arabic", "English", "French", "Native", "Software Engineering Diploma",
+        "Bachelor of Engineering", "Example University", "Example Institute",
+    ))
+    assert all(word[3] <= pdf.BOTTOM for page in document for word in page.get_text("words"))
+    if expected_pages == 1:
+        page = document[0]
+        headings = [page.search_for(f"Client {index}")[0] for index in range(3)]
+        assert all(headings[index].y1 < headings[index + 1].y0 for index in range(2))
+        for heading in headings[1:]:
+            divider = max(
+                drawing["rect"].y0 for drawing in page.get_drawings()
+                if drawing["rect"].x0 < pdf.SIDE_X and drawing["rect"].y0 < heading.y0
+            )
+            assert heading.y0 - divider >= 2.5
+        body_sizes = [span["size"] for block in page.get_text("dict")["blocks"]
+                      for line in block.get("lines", []) for span in line["spans"]
+                      if "Delivered reliable production" in span["text"]]
+        assert all(abs(size - 7.7) < 0.01 for size in body_sizes)
+
+
+def test_compact_sidebar_languages_clear_the_heading_rule():
+    fitz = pytest.importorskip("fitz")
+    profile = _resume_with_sidebar_overflow(48)
+    profile["skills"]["Category 4"] = [f"Skill {index}" for index in range(27)]
+    profile["education"][0]["school"] = (
+        "Example University of Applied Engineering and Computer Science"
+    )
+    _, output = _pdf(profile)
+    document = fitz.open(stream=output, filetype="pdf")
+
+    assert len(document) == 1
+    page = document[0]
+    heading = page.search_for("LANGUAGES")[0]
+    language = page.search_for("Arabic: Native")[0]
+    rule = next(
+        drawing["rect"] for drawing in page.get_drawings()
+        if (drawing["width"] or 0) > 2 and drawing["rect"].x0 >= ResumePDF.SIDE_X - 1
+        and heading.y1 <= drawing["rect"].y0 < language.y0
+    )
+    assert language.x0 >= ResumePDF.SIDE_X - 1
+    assert 5 <= language.y0 - rule.y0 <= 11
+    assert all(value in page.get_text() for value in ("English: C1", "French: C1"))
 
 
 def test_personal_details_keep_second_page_when_main_column_has_no_room():
@@ -423,7 +540,7 @@ def test_roles_that_fit_stay_on_first_page_and_certifications_stay_together():
     profile = {
         "name": "Candidate",
         "summary": "Backend engineer and technical lead with seven years of experience.",
-        "skills": {f"Category {i}": [f"Skill {j}" for j in range(9)] for i in range(6)},
+        "skills": {f"Category {i}": [f"Skill {j}" for j in range(15)] for i in range(6)},
         "certifications": [f"Verified Certificate {i}" for i in range(6)],
         "experience": [
             {"title": title, "company": "Example Company", "dates": dates,
@@ -477,6 +594,84 @@ def test_reviewed_section_spacing_and_compact_skill_rows():
     assert summary[1] - summary_rule.y0 > 3
     assert lines["Backend & Architecture"][1] - skills_rule.y0 > 3
     assert lines["NestJS"][1] - lines["Microservices"][1] <= 21
+
+
+def test_skill_and_certification_headings_have_compact_visible_gaps():
+    fitz = pytest.importorskip("fitz")
+    _, output = _pdf({
+        "name": "Candidate",
+        "summary": "Backend engineering experience.",
+        "skills": {"Backend & Architecture": ["Java", "Kotlin", "Spring Boot"]},
+        "certifications": ["AWS Solutions Architect - Associate (SAA-C03)"],
+    })
+    page = fitz.open(stream=output, filetype="pdf")[0]
+    category = page.search_for("Backend & Architecture")[0]
+    first_skill = page.search_for("Java")[0]
+    heading = page.search_for("CERTIFICATIONS")[0]
+    certificate = page.search_for("AWS Solutions Architect")[0]
+    rule = next(
+        drawing["rect"] for drawing in page.get_drawings()
+        if drawing["width"] > 2 and drawing["rect"].x0 >= ResumePDF.SIDE_X - 1
+        and heading.y1 <= drawing["rect"].y0 < certificate.y0
+    )
+
+    assert 3 <= first_skill.y0 - category.y1 <= 8
+    assert 5 <= certificate.y0 - rule.y0 <= 11
+
+
+def test_language_names_without_levels_are_visible_without_invented_proficiency():
+    fitz = pytest.importorskip("fitz")
+    _, output = _pdf({
+        "name": "Candidate",
+        "summary": "Backend engineering experience.",
+        "additional": {"languages": "Arabic, English, French"},
+    })
+    text = fitz.open(stream=output, filetype="pdf")[0].get_text()
+
+    assert all(language in text for language in ("LANGUAGES", "Arabic", "English", "French"))
+    assert all(level not in text for level in ("Native", "C1", "Fluent"))
+
+
+def test_employer_highlights_render_once_with_client_context_and_source_unchanged():
+    import copy
+
+    fitz = pytest.importorskip("fitz")
+    recent = "Built tools for code review."
+    leadership = "Led a team of four engineers."
+    services = "Built production backend services."
+    profile = {"name": "Candidate", "experience": [{
+        "title": "Lead Engineer", "company": "Example", "dates": "2020 - Present",
+        "engagements": [
+            {"name": "Recent Client - Review Product", "bullets": [recent], "tech": "Python, AWS"},
+            {"name": "Older Client - Backend Product", "bullets": [leadership, services],
+             "tech": "Java, AWS", "aliases": ["PRIVATE MATCHING ALIAS"]},
+        ],
+        "highlights": [{"context": "Older Client - Backend Product", "text": leadership},
+                       {"context": "Older Client - Backend Product", "text": services}],
+    }]}
+    original = copy.deepcopy(profile)
+    pdf, output = _pdf(profile)
+    document = fitz.open(stream=output, filetype="pdf")
+    text = " ".join(" ".join(page.get_text() for page in document).split())
+
+    assert profile == original
+    assert text.index(leadership) < text.index("Recent Client - Review Product")
+    assert f"Older Client: {leadership}" in text
+    assert f"Older Client: {services}" in text
+    assert all(text.count(bullet) == 1 for bullet in (recent, leadership, services))
+    assert "PRIVATE MATCHING ALIAS" not in text
+    assert text.count("Keywords:") == 1
+    assert "Python, AWS, Java" in text
+    assert all(word[3] <= pdf.BOTTOM for page in document for word in page.get_text("words"))
+
+
+def test_employer_highlights_reject_unattributed_or_missing_evidence():
+    profile = {"name": "Candidate", "experience": [{
+        "engagements": [{"name": "Client", "bullets": ["Approved fact."]}],
+        "highlights": [{"context": "Client", "text": "Invented fact."}],
+    }]}
+    with pytest.raises(ValueError, match="must match an included client bullet"):
+        _pdf(profile)
 
 
 def test_grouped_company_uses_one_header_and_only_engagement_bullets():

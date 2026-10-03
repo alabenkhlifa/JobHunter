@@ -65,13 +65,13 @@ def test_load_labels_leaves_out_the_test_fixtures(tmp_path):
 
 def test_report_counts_the_interested_jobs_the_knockouts_removed(tmp_path):
     path = _db(tmp_path, [
-        {"title": "Software Architect", "company": "Acme", "location": "Dubai",
+        {"title": "Software Architect", "company": "Acme", "location": "Madrid",
          "status": "interested", "tech_required": "java, spring boot, aws"},
         {"title": "Software Architect", "company": "Acme", "location": "Berlin",
          "status": "interested", "tech_required": "java, spring boot, aws"},
-        {"title": "Junior Developer", "company": "Acme", "location": "Dubai",
+        {"title": "Junior Developer", "company": "Acme", "location": "Madrid",
          "status": "interested"},
-        {"title": "Office Manager", "company": "Globex", "location": "Dubai",
+        {"title": "Office Manager", "company": "Globex", "location": "Madrid",
          "status": "skipped"},
     ])
     result = eval_scoring.report(path)
@@ -92,7 +92,7 @@ def test_report_also_measures_auc_with_freshness_held_constant(tmp_path):
     # Same job twice: the interested copy is undated (0.7), the skipped copy
     # carries an old date (0.2). Raw AUC rewards "has no date"; the neutral
     # figure must not.
-    job = {"title": "Software Architect", "company": "Acme", "location": "Dubai",
+    job = {"title": "Software Architect", "company": "Acme", "location": "Madrid",
            "tech_required": "java, spring boot, aws"}
     path = _db(tmp_path, [
         {**job, "status": "interested", "date_posted": ""},
@@ -105,9 +105,9 @@ def test_report_also_measures_auc_with_freshness_held_constant(tmp_path):
 
 def test_report_says_it_is_an_in_sample_measurement(tmp_path, capsys):
     path = _db(tmp_path, [
-        {"title": "Software Architect", "company": "Acme", "location": "Dubai",
+        {"title": "Software Architect", "company": "Acme", "location": "Madrid",
          "status": "interested"},
-        {"title": "Office Manager", "company": "Globex", "location": "Dubai",
+        {"title": "Office Manager", "company": "Globex", "location": "Madrid",
          "status": "skipped"},
     ])
     result = eval_scoring.report(path)
@@ -120,13 +120,13 @@ def test_report_says_it_is_an_in_sample_measurement(tmp_path, capsys):
 
 
 def test_report_reads_the_markets_job_scoring_defines(tmp_path):
-    # The measured number must be the shipped number: a Swiss city without
+    # The measured number must be the shipped number: a chosen Spanish city without
     # its country is inside the scraper's markets, so it must be inside the
     # tool's too, rather than knocked out by a second list of its own.
     path = _db(tmp_path, [
-        {"title": "Software Architect", "company": "Acme", "location": "Zug",
+        {"title": "Software Architect", "company": "Acme", "location": "Barcelona",
          "status": "interested", "tech_required": "java, spring boot, aws"},
-        {"title": "Office Manager", "company": "Globex", "location": "Riyadh",
+        {"title": "Office Manager", "company": "Globex", "location": "Valencia",
          "status": "skipped"},
     ])
     result = eval_scoring.report(path)

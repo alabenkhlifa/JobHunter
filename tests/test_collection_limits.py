@@ -106,6 +106,9 @@ def collection(monkeypatch, tmp_path):
     from collections import Counter
     config = deepcopy(scraper.DEFAULT_CONFIG)
     config["db_path"] = str(tmp_path / "jobs.db")
+    config["allowed_locations"] = ["dubai", "jeddah", "jiddah", "riyadh",
+                                   *scraper.job_scoring.MARKET_COUNTRIES["ch"],
+                                   *scraper.job_scoring.MARKET_COUNTRIES["es"]]
     monkeypatch.setattr(scraper, "CONFIG", config)
     conn = scraper.init_db()
     fetch = mock.Mock(return_value="Required: 5 years of experience. Java Spring Boot microservices on AWS.")
@@ -139,24 +142,39 @@ def test_fetched_knockout_is_saved_and_not_fetched_next_run(collection, descript
     assert state["skip_counts"]["already_seen"] == 1
 
 
-def test_default_buckets_are_six_linkedin_and_two_foundit(monkeypatch):
+def test_default_buckets_are_only_the_three_chosen_spanish_cities(monkeypatch):
     monkeypatch.setattr(scraper, "CONFIG", scraper.DEFAULT_CONFIG)
     buckets = scraper.build_collection_buckets(mock.Mock())
-    assert set(scraper.CONFIG["regions"]) == {"Dubai", "Madrid", "Valencia", "Jeddah", "Riyadh", "Switzerland"}
-    assert set(buckets) == {"LinkedIn/" + region for region in scraper.CONFIG["regions"]} | {
-        "Foundit/United Arab Emirates", "Foundit/Saudi Arabia"}
-    assert len(buckets["Foundit/United Arab Emirates"]["generators"]) == len(scraper.CONFIG["keywords"])
+    assert set(scraper.CONFIG["regions"]) == {"Valencia", "Madrid", "Barcelona"}
+    # Every source searches the same three cities and nothing else; the Spain
+    # boards' own bucket shapes are covered in test_source_registry.
+    assert {name.split("/", 1)[1] for name in buckets} == {"Valencia", "Madrid", "Barcelona"}
+    assert {name for name in buckets if name.startswith("LinkedIn/")} == {"LinkedIn/" + region for region in scraper.CONFIG["regions"]}
+    assert all(len(buckets["LinkedIn/" + region]["generators"]) == len(scraper.CONFIG["keywords"])
+               for region in scraper.CONFIG["regions"])
     assert scraper.CONFIG["regions"]["Madrid"] == ["Madrid, Spain"]
     assert scraper.CONFIG["regions"]["Valencia"] == ["Valencia, Spain"]
+    assert scraper.CONFIG["regions"]["Barcelona"] == ["Barcelona, Spain"]
 
 
 @pytest.mark.parametrize("location,allowed", [
     ("Madrid, Spain", True),
     ("Valencia, Spain", True),
     ("València, Comunitat Valenciana", True),
+    ("Barcelona, Spain", True),
+    ("Barcelona, Catalunya", True),
+    ("Barcelona, Catalonia", True),
+    ("Barcelona, Cataluña", True),
+    ("Barcelona, Anzoátegui, Venezuela", False),
     ("Madrid, Missouri, United States", False),
     ("Valencia, California, United States", False),
     ("Abu Dhabi, United Arab Emirates", False),
+    ("Dubai, United Arab Emirates", False),
+    ("Jeddah, Saudi Arabia", False),
+    ("Riyadh, Saudi Arabia", False),
+    ("Zurich, Switzerland", False),
+    ("Seville, Spain", False),
+    ("Spain", False),
 ])
 def test_chosen_locations_exclude_foreign_namesakes_and_abu_dhabi(monkeypatch, location, allowed):
     monkeypatch.setattr(scraper, "CONFIG", scraper.DEFAULT_CONFIG)

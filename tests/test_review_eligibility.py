@@ -12,7 +12,7 @@ NOW = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
 def job(**overrides):
     return dict({
         "id": "example", "title": "Backend Architect", "company": "Example",
-        "location": "Dubai, United Arab Emirates", "score": 80,
+        "location": "Madrid, Spain", "score": 80,
         "notified": 0, "status": "new", "min_experience": -1,
         "description": "5+ years of backend engineering experience.",
         "date_posted": "", "date_scraped": NOW.isoformat(),
@@ -55,6 +55,11 @@ def test_company_history_is_not_a_candidate_experience_requirement():
 
 @pytest.mark.parametrize("changes", [
     {"location": "Bengaluru, India"},
+    {"location": "Dubai, United Arab Emirates"},
+    {"location": "Jeddah, Saudi Arabia"},
+    {"location": "Riyadh, Saudi Arabia"},
+    {"location": "Zurich, Switzerland"},
+    {"location": "Seville, Spain"},
     {"title": "Junior Backend Engineer"},
     {"description": "Company introduction. " * 100 + "Must hold a valid work permit."},
 ])
@@ -85,6 +90,19 @@ def test_candidate_checks_do_not_change_job_records():
     assert [j["id"] for j in scraper.get_review_candidates(conn, now=NOW)] == ["example"]
     assert conn.total_changes == before
     assert conn.execute("SELECT status FROM jobs WHERE id='expired'").fetchone()[0] == "new"
+    conn.close()
+
+
+def test_owner_backlog_keeps_only_the_three_chosen_spanish_cities():
+    locations = ["Valencia, Spain", "Madrid, Spain", "Barcelona, Spain",
+                 "Dubai, United Arab Emirates", "Jeddah, Saudi Arabia",
+                 "Riyadh, Saudi Arabia", "Zurich, Switzerland", "Seville, Spain"]
+    conn = make_conn([job(id=str(index), location=location)
+                      for index, location in enumerate(locations)])
+    before = conn.total_changes
+    assert [candidate["location"] for candidate in scraper.get_review_candidates(conn, now=NOW)] == locations[:3]
+    assert conn.total_changes == before
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == len(locations)
     conn.close()
 
 

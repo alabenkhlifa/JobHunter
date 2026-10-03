@@ -215,8 +215,18 @@ def contains_term(text, term):
     return bool(re.search(r"(?<!\w)" + re.escape(term.lower()) + r"(?!\w)", str(text or "").lower()))
 
 
+def names_location(text, configured):
+    """Whether ``text`` names a configured location: every comma-separated part, in any order.
+
+    Boards disagree on the order: Foundit stores "United Arab Emirates, Dubai"
+    where LinkedIn and a candidate write "Dubai, United Arab Emirates".
+    """
+    parts = [part.strip() for part in str(configured or "").split(",") if part.strip()]
+    return bool(parts) and all(contains_term(text, part) for part in parts)
+
+
 def resolve_market(location, markets):
-    matched = [m for m in markets if any(contains_term(location, loc) for loc in m["locations"])]
+    matched = [m for m in markets if any(names_location(location, loc) for loc in m["locations"])]
     return matched[0] if len(matched) == 1 else None
 
 

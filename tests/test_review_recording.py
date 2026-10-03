@@ -34,7 +34,7 @@ def make_conn(rows):
     for job_id, over in rows:
         base = {
             "id": job_id, "title": "Backend Architect", "company": "Acme",
-            "location": "Dubai, United Arab Emirates", "score": 60,
+            "location": "Madrid, Spain", "score": 60,
             "notified": 0, "status": "new",
             "date_posted": "", "date_scraped": datetime.now(timezone.utc).isoformat(),
             "description": "", "min_experience": -1,
@@ -78,7 +78,7 @@ def test_record_review_writes_a_send_verdict_and_returns_it():
     assert row["ai_rank"] == 2
     assert row["status"] == "new"
     assert len(written) == 1
-    assert written[0]["market"] == "dubai"
+    assert written[0]["market"] == "madrid"
 
 
 def test_record_review_sets_status_rejected_for_a_reject_verdict():
@@ -186,7 +186,7 @@ def test_record_review_works_on_a_connection_without_a_row_factory():
     written = scraper.record_review(conn, [verdict("j1", "send", rank=3)])
 
     assert len(written) == 1
-    assert written[0]["market"] == "dubai"
+    assert written[0]["market"] == "madrid"
     assert written[0]["ai_rank"] == 3
     written_verdict, rank = conn.execute(
         "SELECT ai_verdict, ai_rank FROM jobs WHERE id = 'j1'"
@@ -204,10 +204,10 @@ def test_record_review_persists_a_silent_posting_as_no_info():
 
 
 def test_plan_reviewed_digest_names_the_empty_markets_without_writing_anything():
-    conn = make_conn([("j1", {}), ("j2", {"location": "Zurich, Switzerland"})])
+    conn = make_conn([("j1", {}), ("j2", {"location": "Barcelona, Spain"})])
     scraper.init_feedback_tracking(conn)
     plan = scraper.plan_reviewed_digest(conn, [verdict("j1", "send", sponsorship="no_info")])
-    assert plan["empty_markets"] == ["switzerland"]
-    assert plan["markets"]["switzerland"]["reviewable"] == 1
+    assert plan["empty_markets"] == ["barcelona"]
+    assert plan["markets"]["barcelona"]["reviewable"] == 1
     rows = conn.execute("SELECT ai_verdict FROM jobs").fetchall()
     assert [row["ai_verdict"] for row in rows] == ["", ""]

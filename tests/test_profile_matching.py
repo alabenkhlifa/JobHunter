@@ -95,6 +95,29 @@ def test_unknown_and_ambiguous_locations_do_not_borrow_another_destination_polic
     assert job_scoring.select_sendable([candidate], markets=policies) == []
 
 
+@pytest.mark.parametrize("location,configured,found", [
+    ("United Arab Emirates, Dubai", "Dubai, United Arab Emirates", True),  # Foundit's order
+    ("Dubai, United Arab Emirates", "Dubai, United Arab Emirates", True),  # LinkedIn's order
+    ("United Arab Emirates, Dubai", "Dubai", True),
+    ("United Arab Emirates", "Dubai, United Arab Emirates", False),  # the city is missing
+    ("Dubai Marina, United Arab Emirates", "Dubai, United Arab Emirates", True),  # a district of the city
+    ("Dubailand Park, United Arab Emirates", "Dubai, United Arab Emirates", False),  # whole words only
+    ("Abu Dhabi, United Arab Emirates", "Dubai, United Arab Emirates", False),
+])
+def test_configured_location_parts_match_in_any_order(location, configured, found):
+    policy = dict(market("Gulf"), locations=[configured])
+    assert (matching.resolve_market(location, [policy]) is policy) is found
+    assert matching.names_location(location, configured) is found
+    assert matching.names_location(location, "") is False
+
+
+def test_a_foundit_row_is_allowed_for_an_invited_gulf_profile(monkeypatch):
+    settings = config(markets=[dict(market("Gulf"), locations=["Dubai, United Arab Emirates"])])
+    monkeypatch.setattr(scraper, "CONFIG", dict(scraper.DEFAULT_CONFIG, **settings))
+    assert scraper.is_allowed_location({"location": "United Arab Emirates, Dubai"})
+    assert not scraper.is_allowed_location({"location": "Saudi Arabia, Riyadh"})
+
+
 def test_generic_draft_is_inert_and_no_owner_searches_are_inherited():
     settings = matching.validate_config({"matching": {"preset": "generic"}})
     assert settings["keywords"] == settings["tech_terms"] == settings["exclude_terms"] == []

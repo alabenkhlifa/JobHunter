@@ -8,6 +8,7 @@ approval flag from the caller.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from urllib.parse import urlsplit
 import scraper
 
 from .cdp import CDPClient, CDPError, connect_first_page
+from .email_verification import complete_email_verification
 
 
 DEFAULT_BLOCKLIST_TERMS = (
@@ -406,7 +408,10 @@ class AutoApplyEngine:
                 _record_unverified(self.config, job_id, url=inspection.url)
                 raise CDPError("exact role and actionable application form were not verified; no draft state was recorded")
         evidence_path = None
-        if self.config.evidence_enabled:
+        if self.config.evidence_enabled and not any(
+            str(item.get("id", "")).startswith("security-input-") and item.get("value_present")
+            for item in inspection.inputs
+        ):
             evidence_path = str(_job_output_dir(self.config.output_dir, job_id) / f"{stage}.png")
             try:
                 client.screenshot(evidence_path)
@@ -489,18 +494,25 @@ class AutoApplyEngine:
         if client.evaluate("location.href") != self.config.expected_page_url:
             raise PermissionError("The approved application page changed before submission.")
         self._verify_before_mutation(job_id, client)
+        requested_at = dt.datetime.now(dt.timezone.utc)
         result = client.evaluate(
             f"""
 (() => {{
   if ({json.dumps(self.config.expected_page_url)} !== null && location.href !== {json.dumps(self.config.expected_page_url)}) return {{ok:false, reason:'page changed'}};
   if (!/^https?:$/.test(location.protocol) || !document.body) return {{ok:false, reason:'application page is not loaded'}};
-  const required = [...document.querySelectorAll('input[required],select[required],textarea[required]')];
+  const visible = el => {{const r=el.getBoundingClientRect(), s=getComputedStyle(el);
+    return !el.disabled && r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';}};
+  const required = [...document.querySelectorAll('input[required],select[required],textarea[required]')].filter(visible);
   const missing = required.filter(el => {{
     if (el.type === 'radio') return ![...document.querySelectorAll('input[type=radio]')].some(other => other.name === el.name && other.checked);
-    if (el.type === 'checkbox') return !el.checked;
+    if (el.type === 'checkbox') {{
+      const locationGroup = location.hostname === 'job-boards.eu.greenhouse.io' && el.name.endsWith('[]');
+      const group = locationGroup ? required.filter(other => other.type === 'checkbox' && other.name === el.name && other.form === el.form) : [el];
+      return !group.some(other => other.checked);
+    }}
     return !(el.value || '').trim();
   }});
-  if (missing.length || document.querySelector('[aria-invalid=true]')) return {{ok:false, reason:'required or invalid fields remain'}};
+  if (missing.length || [...document.querySelectorAll('[aria-invalid=true]')].some(visible)) return {{ok:false, reason:'required or invalid fields remain'}};
   const challenge = [...document.querySelectorAll('iframe')].some(frame => {{
     const src = frame.getAttribute('src') || '';
     const rect = frame.getBoundingClientRect();
@@ -520,7 +532,34 @@ class AutoApplyEngine:
             reason = result.get("reason", "submit control unavailable") if isinstance(result, dict) else "submit control unavailable"
             raise PermissionError(f"The application was not submitted: {reason}.")
         time.sleep(2)
-        _record(self.config, job_id, "submission_attempted", notes="Submit control clicked; a matching application receipt still requires review.")
+        _record(self.config, job_id, "submission_attempted", application_url=self.config.expected_page_url,
+                notes=json.dumps({"submit_clicked": True, "exact_role_form_verified": True,
+                                  "email_code_requested_at": requested_at.isoformat(),
+                                  "receipt_review_required": True}))
+        complete_email_verification(client, page_url=self.config.expected_page_url,
+                                    requested_at=requested_at, approved=approved)
+        return self.inspect(job_id, stage="submission_attempted")
+
+    def verify_email(self, job_id: str, *, approved: bool = False) -> PageInspection:
+        """Resume a recorded code step without clicking the initial submit again."""
+        if not approved or self.config.expected_page_url is None:
+            raise PermissionError("Email verification requires approval and the exact application URL.")
+        with sqlite3.connect(self.config.db_path) as conn:
+            row = conn.execute("SELECT stage, application_url, notes FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                               (job_id,)).fetchone()
+        try:
+            notes = json.loads(row[2]) if row else {}
+            requested_at = dt.datetime.fromisoformat(notes["email_code_requested_at"])
+        except (TypeError, ValueError, KeyError):
+            raise PermissionError("No verified pending email-code request is recorded for this application.") from None
+        if (row[0] != "submission_attempted" or row[1] != self.config.expected_page_url
+                or notes.get("exact_role_form_verified") is not True or notes.get("submit_clicked") is not True
+                or requested_at.tzinfo is None
+                or not dt.timedelta(0) <= dt.datetime.now(dt.timezone.utc)-requested_at <= dt.timedelta(minutes=15)):
+            raise PermissionError("No fresh approved pending email-code request matches this application.")
+        if not complete_email_verification(self.connect(), page_url=self.config.expected_page_url,
+                                           requested_at=requested_at, approved=True):
+            raise PermissionError("The recorded email-code step is not visible; review the portal without resubmitting.")
         return self.inspect(job_id, stage="submission_attempted")
 
 

@@ -203,8 +203,8 @@ def test_backfill_uses_today_validated_pool_without_extending_seven_day_window(t
     settings.update(db_path=str(tmp_path / "jobs.db"), max_job_age_days=7, score_threshold=45)
     monkeypatch.setattr(scraper, "CONFIG", settings)
     now = datetime.now(timezone.utc)
-    postings = [approved("within-seven-days", "Jeddah"),
-                approved("eight-days-old", "Jeddah"), approved("low-score", score=44),
+    postings = [approved("within-seven-days", "Barcelona"),
+                approved("eight-days-old", "Barcelona"), approved("low-score", score=44),
                 approved("no-sponsorship", description="No visa sponsorship."),
                 approved("wrong-role", title="Junior Developer"), approved("notified", notified=1),
                 approved("held", ai_verdict="hold"), approved("rejected", status="rejected")]

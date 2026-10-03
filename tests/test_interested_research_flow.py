@@ -1051,6 +1051,34 @@ def test_render_pdf_rejects_invalid_page_metadata(monkeypatch, tmp_path, metadat
         flow._render_pdf("resume", tmp_path / "resume.json", tmp_path / "resume.pdf")
 
 
+@pytest.mark.parametrize("languages", [None, "", " | \u00b7 ;, "])
+def test_package_requires_languages_before_rendering_or_recording_stage(tmp_path, monkeypatch, languages):
+    db = tmp_path / "jobs.db"
+    output_dir = tmp_path / "output"
+    profile_path = tmp_path / "master-profile.json"
+    profile = {"name": "Candidate", "summary": "Backend engineering experience."}
+    if languages is not None:
+        profile["additional"] = {"languages": languages}
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT, company TEXT, description TEXT)")
+        conn.execute("INSERT INTO jobs VALUES (?, ?, ?, ?)",
+                     ("li-1", "Backend Developer", "Example", "Build backend services."))
+
+    def unexpected_render(*args, **kwargs):
+        pytest.fail("A resume without confirmed languages must not reach PDF rendering")
+
+    monkeypatch.setattr(flow, "_render_pdf", unexpected_render)
+    with pytest.raises(flow.TailoringReadinessError, match="Languages are required"):
+        flow.prepare_application_package(
+            "li-1", db_path=db, profile_path=profile_path, output_dir=output_dir,
+        )
+
+    assert not output_dir.exists()
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0] == 0
+
+
 def test_prepare_application_package_defaults_to_resume_and_can_include_requested_cover(tmp_path, monkeypatch):
     db = tmp_path / "jobs.db"
     output_dir = tmp_path / "output"
@@ -1058,7 +1086,7 @@ def test_prepare_application_package_defaults_to_resume_and_can_include_requeste
     profile.write_text(
         '{"name":"Ala Ben Khalifa","email":"jobs@example.com","headline":"Software Architect",'
         '"summary":"7+ years backend/cloud experience.","skills":{"Backend":["Java","Spring Boot","Go"]},'
-        '"experience":[],"education":[]}',
+        '"experience":[],"education":[],"additional":{"languages":"English (C1)"}}',
         encoding="utf-8",
     )
     conn = sqlite3.connect(db)
@@ -1152,6 +1180,7 @@ def test_reviewed_agent_draft_replaces_template_body_in_optional_cover_package(t
     profile_path = tmp_path / "master-profile.json"
     profile = {
         "name": "Candidate", "email": "candidate@example.com",
+        "additional": {"languages": "English (C1)"},
         "experience": [{"title": "Engineer", "company": "Example", "dates": "2021 - Present",
                         "bullets": [
                             "Resolved duplicate alerts caused by event retries through durable processing.",
@@ -1195,6 +1224,7 @@ def test_failed_regeneration_restores_previous_package_atomically(tmp_path, monk
     profile_payload = {
         "name": "Candidate",
         "headline": "Backend Engineer",
+        "additional": {"languages": "English (C1)"},
         "summary": "Original confirmed summary.",
         "experience": [],
         "education": [],
@@ -1271,6 +1301,7 @@ def test_package_generation_rejects_job_id_path_traversal(tmp_path):
             {
                 "name": "Candidate",
                 "headline": "Backend Engineer",
+                "additional": {"languages": "English (C1)"},
                 "experience": [],
                 "education": [],
             }
@@ -1339,7 +1370,10 @@ def test_confirmed_variant_is_preserved_and_drives_cover_letter(tmp_path, monkey
             }
         ],
         "education": [],
-        "additional": {"interests": "Excluded from this one-page variant."},
+        "additional": {
+            "languages": "Arabic (Native) | English (C1) | French (C1)",
+            "interests": "Excluded from this one-page variant.",
+        },
         "resume_variants": [
             {
                 "id": "jvm-backend",
@@ -1410,7 +1444,7 @@ def test_confirmed_variant_is_preserved_and_drives_cover_letter(tmp_path, monkey
     assert resume["headline"] == "Senior Backend Engineer | Java, Kotlin & Spring Boot"
     assert resume["experience"][0]["bullets"] == curated_bullets
     assert len(resume["experience"]) == 1
-    assert "additional" not in resume
+    assert resume["additional"] == {"languages": profile["additional"]["languages"]}
     assert "resume_variants" not in serialized_resume
     assert "Excluded Example" not in serialized_resume
     assert "Excluded Example" not in serialized_cover
@@ -1428,6 +1462,7 @@ def test_resume_page_limit_blocks_package_stage_before_cover_render(tmp_path, mo
                 "name": "Candidate",
                 "experience": [],
                 "education": [],
+                "additional": {"languages": "English (C1)"},
                 "resume_variants": [
                     {
                         "id": "jvm-backend",
@@ -2211,8 +2246,67 @@ def test_resume_bullet_ranking_prefers_distinct_confirmed_work_when_scores_are_c
 
     selected = flow._ranked_distinct_bullets(bullets, job_text, 3, "Senior Backend Engineer")
 
-    assert selected == [deployment, feature, workflow]
+    assert selected == [deployment, workflow, bullets[1]]
     assert repeated not in selected
+
+
+def test_confirmed_variant_reorders_bullets_for_job_without_changing_snapshot():
+    import copy
+
+    bullets = [
+        "Progressed to Senior Engineer while coordinating a team of four engineers.",
+        "Built ten Kotlin backend services serving 15,000 users.",
+        "Eliminated duplicate notifications from webhook retries.",
+        "Migrated three production services without downtime.",
+    ]
+    profile = {
+        "name": "Candidate",
+        "experience": [{"title": "Engineer", "company": "Omitted", "bullets": ["Omitted fact."]}],
+        "resume_variants": [{
+            "id": "jvm", "confirmation": "candidate-confirmed", "match_terms": ["kotlin"],
+            "resume": {"experience": [{"title": "Engineer", "company": "Example", "bullets": bullets}]},
+        }],
+    }
+    original = copy.deepcopy(profile)
+    job = {"title": "Senior Backend Engineer", "description":
+           "Kotlin backend services, production reliability, idempotency and live migrations."}
+
+    resume, variant = flow._resume_for_job(profile, job)
+
+    assert profile == original
+    assert variant["resume"]["experience"][0]["bullets"] == bullets
+    assert set(resume["experience"][0]["bullets"][:3]) == set(bullets[1:])
+    assert sorted(resume["experience"][0]["bullets"]) == sorted(bullets)
+    assert "Omitted fact" not in json.dumps(resume)
+
+
+def test_employer_highlights_rank_across_clients_without_changing_chronology():
+    import copy
+
+    resume = {"experience": [{"company": "Example", "engagements": [
+        {"name": "Newest client", "dates": "2026 - Present", "bullets": ["Built agent tools for PR review."]},
+        {"name": "Older client", "dates": "2020 - 2025", "bullets": [
+            "Led a team of four engineers and operated backend services.",
+            "Solely built a backend serving 4,000 users.",
+            "Eliminated duplicate notifications from webhook retries.",
+        ]},
+    ]}]}
+    original = copy.deepcopy(resume)
+
+    flow._prioritize_resume_bullets(resume, "Lead engineers, own backend services, sync correctness, "
+                                  "reliability and review quality.", "Lead Engineer")
+
+    role = resume["experience"][0]
+    assert [(item["name"], item["dates"]) for item in role["engagements"]] == [
+        (item["name"], item["dates"]) for item in original["experience"][0]["engagements"]]
+    assert role["highlights"][0]["context"] == "Older client"
+    for highlight in role["highlights"]:
+        child = next(item for item in role["engagements"] if item["name"] == highlight["context"])
+        assert highlight["text"] in child["bullets"]
+
+
+def test_zero_bullet_limit_produces_no_bullets():
+    assert flow._ranked_distinct_bullets(["Built services."], "backend", 0) == []
 
 
 def test_cover_uses_approved_website_contact_without_repeated_discussion_paragraph():

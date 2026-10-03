@@ -18,9 +18,9 @@ def verified_listing_for_digest_unit_tests(monkeypatch):
 def job(**over):
     base = {
         "id": "j1", "title": "Backend Lead", "company": "Acme",
-        "score": 80, "market": "dubai", "ai_rank": 1,
+        "score": 80, "market": "valencia", "ai_rank": 1,
         "ai_sponsorship": "implied", "ai_verdict_reason": "solid fit",
-        "tech_required": "Java, Spring", "date_posted": "", "location": "Dubai",
+        "tech_required": "Java, Spring", "date_posted": "", "location": "Valencia",
         "recruiter_company": "", "credibility_notes": "",
     }
     base.update(over)
@@ -29,31 +29,31 @@ def job(**over):
 
 def test_format_digest_message_shows_every_market_when_empty():
     msg = scraper.format_digest_message([], 0, [])
-    assert "No matches: Dubai, Madrid, Valencia, Jeddah, Riyadh, Switzerland" in msg
+    assert "No matches: Valencia, Madrid, Barcelona" in msg
     assert "0 sent" in msg
 
 
 def test_format_digest_message_numbers_by_display_order_not_ai_rank():
-    # A Dubai job with a WORSE (higher) ai_rank than a Switzerland job must
-    # still be numbered 1, because Dubai prints first in DIGEST_MARKET_ORDER.
+    # A Valencia job with a WORSE (higher) ai_rank than a Barcelona job must
+    # still be numbered 1, because Valencia prints first in DIGEST_MARKET_ORDER.
     jobs = [
-        job(id="ch1", market="switzerland", ai_rank=1, title="CH Job"),
-        job(id="dx1", market="dubai", ai_rank=5, title="Dubai Job"),
+        job(id="ch1", market="barcelona", ai_rank=1, title="CH Job"),
+        job(id="dx1", market="valencia", ai_rank=5, title="Valencia Job"),
     ]
     msg = scraper.format_digest_message(jobs, 0, [])
     lines = msg.splitlines()
-    dubai_idx = next(i for i, l in enumerate(lines) if "Dubai Job" in l)
+    valencia_idx = next(i for i, l in enumerate(lines) if "Valencia Job" in l)
     ch_idx = next(i for i, l in enumerate(lines) if "CH Job" in l)
-    assert lines[dubai_idx].startswith("<b>1.")
+    assert lines[valencia_idx].startswith("<b>1.")
     assert lines[ch_idx].startswith("<b>2.")
-    assert dubai_idx < ch_idx
+    assert valencia_idx < ch_idx
 
 
 def test_format_digest_message_sorts_within_a_market_by_score_descending():
     # Display follows score even when the AI ranked the lower-score job first.
     jobs = [
-        job(id="dx2", market="dubai", score=73, ai_rank=1, title="Runner Up"),
-        job(id="dx1", market="dubai", score=84, ai_rank=2, title="Top Pick"),
+        job(id="dx2", market="valencia", score=73, ai_rank=1, title="Runner Up"),
+        job(id="dx1", market="valencia", score=84, ai_rank=2, title="Top Pick"),
     ]
     msg = scraper.format_digest_message(jobs, 0, [])
     lines = msg.splitlines()
@@ -111,7 +111,7 @@ def test_digest_bolds_company_and_unconfirmed_visa_and_empty_markets():
     msg = scraper.format_digest_message([job(company="AT&T")], 0, [])
     assert "<b>AT&amp;T</b>" in msg
     assert "<b>❓ Visa unconfirmed</b>" in msg
-    assert "<b>⚠️ No matches: Madrid, Valencia, Jeddah, Riyadh, Switzerland</b>" in msg
+    assert "<b>⚠️ No matches: Madrid, Barcelona</b>" in msg
 
 
 @pytest.mark.parametrize("score,icon", [(0, "👍"), (69, "👍"), (70, "⭐"), (79, "⭐"), (80, "🔥"), (100, "🔥")])
@@ -223,7 +223,7 @@ def make_conn(rows):
     )
     for job_id, over in rows:
         base = {"id": job_id, "title": "Backend Architect", "company": "Acme",
-                "location": "Dubai, United Arab Emirates", "score": 60,
+                "location": "Valencia, Spain", "score": 60,
                 "notified": 0, "status": "new", "ai_rank": None,
                 "date_scraped": datetime.now(timezone.utc).isoformat()}
         base.update(over)
@@ -328,9 +328,9 @@ def test_list_queued_jobs_respects_limit_and_excludes_notified():
 
 
 def test_list_queued_jobs_includes_market():
-    conn = make_conn([("q1", {"score": 90, "location": "Zurich, Switzerland"})])
+    conn = make_conn([("q1", {"score": 90, "location": "Barcelona, Spain"})])
     result = scraper.list_queued_jobs(conn, limit=10)
-    assert result[0]["market"] == "switzerland"
+    assert result[0]["market"] == "barcelona"
 
 
 def test_list_queued_jobs_empty_queue_returns_empty_list():

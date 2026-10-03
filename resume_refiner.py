@@ -491,7 +491,7 @@ def select_resume_variant(
 
 
 def apply_resume_variant(profile: dict[str, Any], variant: dict[str, Any]) -> dict[str, Any]:
-    """Build an approved snapshot plus current identity, without master-section inheritance."""
+    """Build an approved snapshot plus current identity and mandatory languages."""
     validate_profile(profile)
     _validate_resume_variant(variant, index=0)
     if variant["confirmation"] != "candidate-confirmed":
@@ -509,6 +509,13 @@ def apply_resume_variant(profile: dict[str, Any], variant: dict[str, Any]) -> di
         result.pop(section, None)
         if section == "certifications":
             result.pop("certification_links", None)
+    # Languages are mandatory even when a curated variant omits additional.
+    # Inherit only this public field, never interests or private interview notes.
+    languages = (profile.get("additional") or {}).get("languages")
+    if not languages:
+        languages = (variant["resume"].get("additional") or {}).get("languages")
+    if languages:
+        result.setdefault("additional", {})["languages"] = copy.deepcopy(languages)
     return result
 
 

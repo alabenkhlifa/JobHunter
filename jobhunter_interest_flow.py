@@ -31,6 +31,7 @@ from typing import Any
 
 import job_scoring
 import scraper
+from resume_bullet_ranking import bullet_match, order_bullet_indexes
 from resume_refiner import (
     apply_resume_variant,
     project_public_resume,
@@ -1670,48 +1671,7 @@ def _experience_relevance_score(
 
 
 def _bullet_relevance_score(bullet: str, job_text: str, job_title: str = "") -> int:
-    candidate = _normalized_relevance_text(bullet)
-    job_words = set(re.findall(r"[a-z0-9+#.]+", job_text)) - _KEYWORD_STOPWORDS
-    candidate_words = set(re.findall(r"[a-z0-9+#.]+", candidate)) - _KEYWORD_STOPWORDS
-    exact = sum(len(word) > 2 and word in job_words for word in candidate_words)
-    title = _normalized_relevance_text(job_title)
-    role_terms: tuple[str, ...] = ()
-    if _contains_relevance_term(title, "backend"):
-        role_terms = ("backend", "nestjs", "node", "typescript", "react", "aws", "api", "deployment", "reliability", "outage")
-    elif _contains_relevance_term(title, "manager"):
-        role_terms = ("managing", "team", "mentored", "led", "workflow", "agent", "full-stack", "client", "delivered")
-    role_bonus = sum(
-        5 for term in role_terms
-        if _contains_relevance_term(candidate, term) and _contains_relevance_term(job_text, term)
-    )
-    hard_skill_bonus = sum(
-        20 for term in _HARD_SKILL_TERMS
-        if _contains_relevance_term(candidate, term) and _contains_relevance_term(job_text, term)
-    )
-    cloud_penalty = 15 if (
-        _contains_relevance_term(job_text, "aws")
-        and not _contains_relevance_term(job_text, "azure")
-        and _contains_relevance_term(candidate, "azure")
-        and not _contains_relevance_term(candidate, "aws")
-    ) else 0
-    full_stack_bonus = 30 if (
-        _contains_relevance_term(title, "manager")
-        and (_contains_relevance_term(job_text, "full stack") or _contains_relevance_term(job_text, "full-stack"))
-        and (_contains_relevance_term(candidate, "nestjs") or _contains_relevance_term(candidate, "backend"))
-        and _contains_relevance_term(candidate, "react")
-    ) else 0
-    communications_bonus = 45 if (
-        any(_contains_relevance_term(job_text, term) for term in ("communications", "messaging", "notifications"))
-        and any(_contains_relevance_term(candidate, term) for term in ("notification", "webhook", "retry"))
-    ) else 0
-    reliability_bonus = 15 if (
-        any(_contains_relevance_term(job_text, term) for term in ("reliability", "availability", "resilience"))
-        and any(_contains_relevance_term(candidate, term) for term in ("duplicate", "retry", "outage", "downtime"))
-    ) else 0
-    return (
-        _relevance_score(bullet, job_text) + exact * 5 + role_bonus + hard_skill_bonus
-        + full_stack_bonus + communications_bonus + reliability_bonus - cloud_penalty
-    )
+    return bullet_match(bullet, job_text, job_title).score
 
 
 def _bullet_duplicate_key(bullet: str) -> str:
@@ -1725,41 +1685,16 @@ def _bullet_duplicate_key(bullet: str) -> str:
 
 
 def _ranked_distinct_bullets(bullets: list[str], job_text: str, limit: int, job_title: str = "") -> list[str]:
-    job_skills = {
-        term for term in _HARD_SKILL_TERMS if _contains_relevance_term(job_text, term)
-    }
-    ranked = [
-        (
-            index,
-            bullet,
-            _bullet_relevance_score(bullet, job_text, job_title),
-            {
-                term for term in job_skills
-                if _contains_relevance_term(_normalized_relevance_text(bullet), term)
-            },
-        )
-        for index, bullet in enumerate(bullets)
-    ]
-    selected: list[str] = []
-    seen: set[str] = set()
-    covered_skills: set[str] = set()
-    while ranked and len(selected) < limit:
-        # Favor new job-relevant evidence when similarly scored bullets repeat
-        # a skill that a stronger selected bullet has already established.
-        best_index = max(
-            range(len(ranked)),
-            key=lambda index: (
-                ranked[index][2] - 3 * len(ranked[index][3] & covered_skills),
-                -ranked[index][0],
-            ),
-        )
-        _, bullet, _, bullet_skills = ranked.pop(best_index)
-        key = _bullet_duplicate_key(bullet)
-        if key in seen:
-            continue
-        selected.append(bullet)
-        seen.add(key)
-        covered_skills.update(bullet_skills)
+    if limit <= 0:
+        return []
+    selected, seen = [], set()
+    for index in order_bullet_indexes(bullets, job_text, job_title):
+        key = _bullet_duplicate_key(bullets[index])
+        if key not in seen:
+            selected.append(bullets[index])
+            seen.add(key)
+        if len(selected) >= limit:
+            break
     return selected
 
 
@@ -1841,6 +1776,7 @@ def _resume_for_job(
             tailored_variant["experience"], profile, job_text, job_title,
             preserve_variant=True,
         )
+        _prioritize_resume_bullets(tailored_variant, job_text, job_title)
         return tailored_variant, variant
 
     tailored = project_public_resume(profile)
@@ -1859,7 +1795,27 @@ def _resume_for_job(
     tailored["experience"] = _group_company_experiences(
         tailored["experience"], profile, job_text, job_title,
     )
+    _prioritize_resume_bullets(tailored, job_text, job_title)
     return tailored, None
+
+
+def _prioritize_resume_bullets(resume, job_text, job_title):
+    for role in resume.get("experience") or []:
+        engagements = role.get("engagements") or []
+        for item in engagements or [role]:
+            bullets = item.get("bullets") or []
+            item["bullets"] = [bullets[index] for index in order_bullet_indexes(bullets, job_text, job_title)]
+        if not engagements:
+            continue
+        records = [(item["name"], bullet) for item in engagements for bullet in item.get("bullets") or []]
+        indexes = order_bullet_indexes([bullet for _, bullet in records], job_text, job_title)
+        role["bullets"] = [records[index][1] for index in indexes]
+        names = [item.get("name") for item in engagements]
+        if len(set(names)) > 1 and len(set(names)) == len(names) and all(names):
+            role["highlights"] = [
+                {"context": records[index][0], "text": records[index][1]}
+                for index in indexes[:3]
+            ]
 
 
 def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
@@ -2826,6 +2782,12 @@ def prepare_application_package(
         profile = _load_profile(profile_path)
         resume_payload, selected_variant = _resume_for_job(profile, job)
         _assert_tailoring_ready(profile, job, selected_variant)
+        languages = (resume_payload.get("additional") or {}).get("languages")
+        if not isinstance(languages, str) or not languages.strip(" \t\r\n|\u00b7;,"):
+            raise TailoringReadinessError(
+                "Languages are required in every resume. Confirm the candidate's languages "
+                "before generating an application package; do not infer proficiency levels."
+            )
         safe_job_id = str(job_id)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", safe_job_id):
             raise ValueError("job_id contains unsafe path characters")
@@ -2894,6 +2856,7 @@ def prepare_application_package(
                 "job_id": job_id,
                 "job_title": str(job.get("title") or ""),
                 "tailoring_mode": "confirmed_variant" if selected_variant is not None else "legacy_fallback",
+                "bullet_ordering": "responsibility_evidence_v1",
                 "selected_variant_id": selected_variant.get("id") if selected_variant is not None else None,
                 "profile_sha256": _profile_digest(profile),
                 "resume_pages": resume_page_count,
@@ -2933,7 +2896,9 @@ def prepare_application_package(
             package_path=str(package_dir),
             platform=job.get("source"),
             application_type="linkedin_unknown" if "linkedin" in (job.get("url") or "").lower() else "external_unknown",
-            application_url=job.get("url"),
+            # An aggregator card's own page is a dead end for applying: the
+            # employer's posting recorded at collection time is the form.
+            application_url=scraper.official_apply_url(job) or job.get("url"),
             notes=("Resume and cover letter generated" if include_cover_letter else "Resume generated")
             + "; awaiting explicit Proceed to apply approval.",
             commit=False,

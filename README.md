@@ -101,6 +101,23 @@ python scraper.py --collect-only
 
 LinkedIn uses `linkedin_time_range: "r172800"` (past two days). `min_matching_jobs: 0` disables the per-bucket match limit so collection reads all available pages up to `max_pages`; a positive value restores early stopping. A match-count limit cuts an arbitrary slice from date-filtered postings.
 
+### Sources
+
+Collection runs one bucket per source and configured region (an invited profile's market; Foundit gets one per country, United Arab Emirates or Saudi Arabia), and the sources are chosen per profile from its configured locations (`regions` in `CONFIG`, or an invited profile's `markets`). Every source declares the countries it can search, and it is called only when the profile has at least one location in one of them. Sources run in this order:
+
+| Source | Countries | How it is read | What it adds |
+|---|---|---|---|
+| Spain Dev Jobs | Spain (Valencia, Madrid and Barcelona listings) | city listing, newest first, titles pre-filtered | employer posting link (`apply_url`), board's Spanish/English reading, visa and relocation badges, employer-published salary |
+| SpainJobs.io | Spain (Valencia, Madrid and Barcelona listings) | the site's own JSON listing per city, newest first, titles pre-filtered | employer ATS link, `spanishRequirement`/ad language reading, visa and relocation status, employer-published salary |
+| LinkedIn | anywhere | one search per keyword and city | — |
+| Foundit (Foundit Gulf) | United Arab Emirates, Saudi Arabia | JSON API, one search per keyword and country | — |
+
+Each board module follows the contract in `jobhunter_sources/base.py`: a page generator plus a description fetcher that may enrich the job with `apply_url` (the employer's own posting, shown as "employer posting" on cards and used as the application form URL) and `language_requirement` (what the board says about Spanish: a stated requirement or a Spanish-written ad knocks the posting out in scoring; a "no Spanish required" note is only a claim for the reviewer to check). Boards never contribute estimated salaries: only figures the employer wrote are stored. Duplicates across boards and LinkedIn collapse on normalised title, company and country. Sources run in the order above inside each round of the round-robin, so a posting both sources show at the same page depth is kept as the board's copy; a copy LinkedIn surfaces earlier (or one stored on a previous night) wins. Scoring knocks out postings written only in Spanish or requiring fluent Spanish (`language barrier: Spanish`), like German and Italian, and reads a board's own language note the same way ("board: ad written in Spanish", "board: Turkish required"); "no Spanish required", "Spanish is a plus" and "English or Spanish" are not barriers. A board page that cannot be read on a given night is left unsaved and fetched again the next night instead of being stored with a title-only score.
+
+A source with no configured location in its countries logs one line, such as `Foundit: no configured location in ksa, uae; skipped`, and is not called. Removing Spain from a profile's markets stops the Spain boards; adding Dubai starts Foundit. The Spain boards also need a city listing: a Spanish location without one (for example Seville) logs `<board>: no city listing for 'Seville, Spain'; skipped`. Invited profiles go through the same selection. A candidate with a UAE or Saudi location (Dubai, Abu Dhabi, Riyadh, Jeddah or the country name) gets Foundit and LinkedIn; other Gulf countries get LinkedIn only. A configured location matches a posting when every comma-separated part of it appears, in any order, so "Dubai, United Arab Emirates" also matches Foundit's "United Arab Emirates, Dubai". A candidate with Valencia, Madrid or Barcelona gets the Spain boards and LinkedIn; a Spain-wide or other Spanish destination ("Spain", "Seville, Spain") gets LinkedIn only, each board logging `<board>: no city listing for ...; skipped`. Anyone else gets LinkedIn only. `disabled_sources` in a profile config lists exact source names to skip on top of this: "Spain Dev Jobs", "SpainJobs.io", "LinkedIn", "Foundit".
+
+The pre-delivery availability check recognises each board's job URL (`Board.hosts`, `Board.job_path`, `Board.selectors`), so a board posting is verified on its own page before it is sent.
+
 The owner's Hermes collector reviews up to 40 candidates: promised-visa postings first, then a floor of three per market, then the strongest remaining candidates. `review_preferences` and recent feedback examples guide the review; `review_preferences.languages` includes French, English and Arabic. Sponsored postings enter review from `sponsored_score_threshold` (35), while other postings need 45. Holds older than two days or an earlier `review_rubric` compete again but still require a new approval. Verified visa offers lead delivery, followed by market floors and shared unused places, up to 12 jobs. Invited profiles retain their existing allocation and work-authorization policy.
 
 Before delivery, JobHunter checks the source listing for the same role and current application availability. Confirmed closure marks an unsent job `unavailable`; timeouts, blocked pages and ambiguous results remain pending for retry. Checks also run for individual cards, delivery retries and the owner's “more” list:
@@ -186,6 +203,7 @@ The submit helper records `submission_attempted`. Confirm the exact role's recei
 | Path | Purpose |
 |---|---|
 | `scraper.py` | Job collection, scoring, DB utilities, Telegram helpers |
+| `jobhunter_sources/` | Spain job boards (one module per board; contract in `base.py`) |
 | `callback_handler.py` | Telegram button handler |
 | `render_pdf.py` | Resume and cover-letter PDF renderer |
 | `resume_refiner.py` | Refined-profile validation, confirmed-evidence handling, and safe atomic profile updates |
