@@ -2226,6 +2226,51 @@ def test_unconfirmed_employer_group_is_not_rendered_as_public_history():
     assert flow._group_company_experiences(experiences, profile, "", "Engineer") == experiences
 
 
+def test_fallback_grouping_keeps_current_and_summary_named_engagements():
+    experiences = [{"title": "Lead Engineer", "company": "Example GmbH",
+                    "dates": "October 2020 - Present", "bullets": ["Built Java services."]}]
+    engagements = [
+        {"name": f"Java client {index}", "dates": f"January {2020 + index} - December {2020 + index}",
+         "bullets": [f"Built Java microservices with Spring Boot, release {index}."], "tech": "Java, Spring Boot"}
+        for index in range(4)
+    ]
+    engagements += [
+        {"name": "Current client", "dates": "August 2026 - Present",
+         "bullets": ["Delivered React screens."], "tech": "React"},
+        {"name": "Carmaker - Platform move", "aliases": ["Carmaker"], "dates": "January 2025 - March 2025",
+         "bullets": ["Moved an Azure app."], "tech": "Azure"},
+    ]
+    profile = {"employment_groups": [{
+        "company": "Example GmbH", "confirmation": "candidate-reviewed",
+        "dates": "October 2020 - Present", "engagements": engagements,
+    }]}
+    job_text = flow._normalized_relevance_text("Java Spring Boot microservices engineer")
+
+    grouped = flow._group_company_experiences(
+        experiences, profile, job_text, "Java Engineer",
+        summary="Led a platform move for Carmaker.",
+    )
+
+    names = {item["name"] for item in grouped[0]["engagements"]}
+    assert {"Current client", "Carmaker - Platform move"} <= names
+    assert len(names) == flow._MAX_GROUPED_ENGAGEMENTS
+
+
+@pytest.mark.parametrize(
+    ("job_location", "expected"),
+    [
+        ("Madrid, Community of Madrid, Spain", "Tunis, Tunisia · Relocating to Madrid"),
+        ("Saudi Arabia, Riyadh", "Tunis, Tunisia · Relocating to Riyadh"),
+        ("Remote - Spain", "Tunis, Tunisia · Relocating to Spain"),
+        ("Tunis, Tunisia", "Tunis, Tunisia"),
+        ("Remote", "Tunis, Tunisia · Open to relocation"),
+        ("", "Tunis, Tunisia · Open to relocation"),
+    ],
+)
+def test_resume_location_names_the_job_city(job_location, expected):
+    assert flow._resume_location("Tunis, Tunisia · Open to relocation", job_location) == expected
+
+
 def test_resume_bullet_ranking_prefers_distinct_confirmed_work_when_scores_are_close():
     deployment = "Deployed separate development and production services on AWS with PostgreSQL and Docker."
     feature = "Delivered authorization and history features across NestJS, React, and TypeScript."

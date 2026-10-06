@@ -1748,6 +1748,33 @@ def _tailored_experience(
     return _filter_optional_experiences(tailored_experience, job_text, job_title)
 
 
+_LOCATION_SEPARATOR = "·"
+_LOCATION_PART_PATTERN = re.compile(r"\s*[,;/|()]\s*|\s+-\s+")
+_WORK_MODE_TERMS = ("remote", "hybrid", "on-site", "onsite")
+_COUNTRY_LOCATION_NAMES = frozenset(
+    name for names in job_scoring.COUNTRY_NAMES.values() for name in names
+)
+
+
+def _resume_location(profile_location: str, job_location: Any) -> str:
+    """Name the job's city as the relocation target.
+
+    The profile line stays unchanged when the posting names no place, and the
+    relocation note is dropped when the job is in the candidate's home city.
+    """
+    home = profile_location.split(_LOCATION_SEPARATOR)[0].strip()
+    parts = [
+        part.strip() for part in _LOCATION_PART_PATTERN.split(scraper.normalize_location(job_location))
+        if part.strip() and not any(_contains_relevance_term(part.lower(), term) for term in _WORK_MODE_TERMS)
+    ]
+    places = [part for part in parts if part.lower() not in _COUNTRY_LOCATION_NAMES] or parts
+    if not home or not places:
+        return profile_location
+    if _contains_relevance_term(home.lower(), places[0].lower()):
+        return home
+    return f"{home} {_LOCATION_SEPARATOR} Relocating to {places[0]}"
+
+
 def _resume_for_job(
     profile: dict[str, Any],
     job: dict[str, Any],
@@ -1777,6 +1804,8 @@ def _resume_for_job(
             preserve_variant=True,
         )
         _prioritize_resume_bullets(tailored_variant, job_text, job_title)
+        if profile.get("location"):
+            tailored_variant["location"] = _resume_location(profile["location"], job.get("location"))
         return tailored_variant, variant
 
     tailored = project_public_resume(profile)
@@ -1794,8 +1823,11 @@ def _resume_for_job(
     tailored["experience"] = _tailored_experience(profile, job_text, job_title)
     tailored["experience"] = _group_company_experiences(
         tailored["experience"], profile, job_text, job_title,
+        summary=str(tailored.get("summary") or ""),
     )
     _prioritize_resume_bullets(tailored, job_text, job_title)
+    if profile.get("location"):
+        tailored["location"] = _resume_location(profile["location"], job.get("location"))
     return tailored, None
 
 
@@ -1849,6 +1881,7 @@ _MONTH_YEAR_PATTERN = re.compile(
 )
 _YEAR_PATTERN = re.compile(r"\b((?:19|20)\d{2})\b")
 _CURRENT_DATE_PATTERN = re.compile(r"\b(?:present|current)\b", re.IGNORECASE)
+_MAX_GROUPED_ENGAGEMENTS = 4
 _ARCHITECT_ROLE_PATTERN = re.compile(r"\barchitect(?:ure)?\b", re.IGNORECASE)
 
 
@@ -1948,12 +1981,24 @@ def _group_company_experiences(
     job_title: str,
     *,
     preserve_variant: bool = False,
+    summary: str = "",
 ) -> list[dict[str, Any]]:
     """Present one employer tenure with dated work inside it.
 
     A confirmed variant keeps its selected bullet wording. Fallback tailoring
-    can select from the candidate's reviewed client-engagement snapshot.
+    can select from the candidate's reviewed client-engagement snapshot. It
+    always keeps the current engagement and every client the summary names, so
+    the tenure shows no recent gap and summary claims keep their evidence.
     """
+    summary_text = _normalized_relevance_text(summary)
+
+    def required(engagement: dict[str, Any]) -> bool:
+        names = [engagement.get("name"), *(engagement.get("aliases") or [])]
+        return bool(_CURRENT_DATE_PATTERN.search(str(engagement.get("dates") or ""))) or any(
+            _contains_relevance_term(summary_text, _normalized_relevance_text(name))
+            for name in names if name
+        )
+
     result = list(experiences)
     for group in profile.get("employment_groups") or []:
         if group.get("confirmation") != "candidate-reviewed":
@@ -1983,7 +2028,10 @@ def _group_company_experiences(
                     ),
                     pair[0],
                 ),
-            )[:3]
+            )
+            kept = [pair for pair in ranked if required(pair[1])]
+            optional = [pair for pair in ranked if not required(pair[1])]
+            ranked = kept + optional[:max(0, _MAX_GROUPED_ENGAGEMENTS - len(kept))]
             engagements = []
             for _, item in ranked:
                 bullets = _ranked_distinct_bullets(
