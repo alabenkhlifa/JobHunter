@@ -59,6 +59,37 @@ def viewer_cookie(service, actor=11, *, expires=None, ttl=600, profile_id=None):
     }, ttl=ttl)
 
 
+@pytest.mark.parametrize('declared_length', [False, True])
+def test_browser_proxy_preserves_chunked_javascript(service, declared_length):
+    async def scenario():
+        payload = b'const UI = {' + b' ' * 70000 + b'};'
+        async def asset(request):
+            headers = {'Content-Type': 'application/javascript'}
+            if declared_length:
+                headers['Content-Length'] = str(len(payload))
+            response = web.StreamResponse(headers=headers)
+            await response.prepare(request)
+            await response.write(payload[:32768])
+            await asyncio.sleep(0.05)
+            await response.write(payload[32768:])
+            await response.write_eof()
+            return response
+        upstream = web.Application()
+        upstream.router.add_get('/app/ui.js', asset)
+        async with TestServer(upstream) as server:
+            service.browser_manager.status.side_effect = lambda profile: {
+                'profile_id': profile, 'status': 'running', 'viewer_port': server.port,
+                'expires_at': service.browser_manager.lease_expiry,
+            }
+            async with TestClient(TestServer(create_app(service))) as client:
+                response = await client.get('/browser/app/ui.js', headers={
+                    'Cookie': 'jobhunter_browser=' + viewer_cookie(service),
+                })
+                assert response.status == 200
+                assert await response.read() == payload
+    asyncio.run(scenario())
+
+
 def test_browser_capacity_failure_explains_safe_recovery_without_reusing_link(service):
     from jobhunter_service.browser import BrowserCapacityError
     service.browser_manager.start.side_effect = BrowserCapacityError('Another application browser is in use.')
@@ -230,7 +261,7 @@ def test_browser_link_is_single_use_and_sets_private_cookie(service):
             response = await client.get(link.path + "?" + link.query, allow_redirects=False)
             assert response.status == 302
             cookie = response.cookies["jobhunter_browser"]
-            assert cookie["secure"] and cookie["httponly"] and cookie["samesite"] == "Strict"
+            assert cookie["secure"] and cookie["httponly"] and cookie["samesite"] == "Lax"
             assert cookie["path"] == "/browser"
             assert service.store.read_token(cookie.value, "browser_session", consume=False)[0] == 11
             replay = await client.get(link.path + "?" + link.query, allow_redirects=False)
