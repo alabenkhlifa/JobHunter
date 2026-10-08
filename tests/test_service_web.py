@@ -59,6 +59,33 @@ def viewer_cookie(service, actor=11, *, expires=None, ttl=600, profile_id=None):
     }, ttl=ttl)
 
 
+def test_browser_proxy_preserves_chunked_javascript(service):
+    async def scenario():
+        payload = b'const UI = {' + b' ' * 70000 + b'};'
+        async def asset(request):
+            response = web.StreamResponse(headers={'Content-Type': 'application/javascript'})
+            await response.prepare(request)
+            await response.write(payload[:32768])
+            await asyncio.sleep(0.05)
+            await response.write(payload[32768:])
+            await response.write_eof()
+            return response
+        upstream = web.Application()
+        upstream.router.add_get('/app/ui.js', asset)
+        async with TestServer(upstream) as server:
+            service.browser_manager.status.side_effect = lambda profile: {
+                'profile_id': profile, 'status': 'running', 'viewer_port': server.port,
+                'expires_at': service.browser_manager.lease_expiry,
+            }
+            async with TestClient(TestServer(create_app(service))) as client:
+                response = await client.get('/browser/app/ui.js', headers={
+                    'Cookie': 'jobhunter_browser=' + viewer_cookie(service),
+                })
+                assert response.status == 200
+                assert await response.read() == payload
+    asyncio.run(scenario())
+
+
 def test_browser_capacity_failure_explains_safe_recovery_without_reusing_link(service):
     from jobhunter_service.browser import BrowserCapacityError
     service.browser_manager.start.side_effect = BrowserCapacityError('Another application browser is in use.')

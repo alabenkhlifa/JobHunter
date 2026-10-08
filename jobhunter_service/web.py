@@ -241,9 +241,12 @@ def create_app(service, *, google_client=None, admin_token=None, telegram_ingres
             async with client.get(url, allow_redirects=False) as upstream:
                 if 300 <= upstream.status < 400:
                     raise PermissionError('Viewer upstream redirects are not permitted.')
-                body = await upstream.content.read(8 * 1024 * 1024 + 1)
-                if len(body) > 8 * 1024 * 1024:
-                    raise ValueError
+                body = bytearray()
+                async for chunk in upstream.content.iter_chunked(65536):
+                    body.extend(chunk)
+                    if len(body) > 8 * 1024 * 1024:
+                        raise ValueError
+                body = bytes(body)
                 return web.Response(body=body, status=upstream.status,
                                     headers={'Content-Type': upstream.headers.get('Content-Type', 'application/octet-stream')})
 
