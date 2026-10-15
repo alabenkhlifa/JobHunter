@@ -63,6 +63,21 @@ SALARY_MARKET_ALIASES = {
         "zurich", "z\u00fcrich", "geneva", "gen\u00e8ve", "genf",
         "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
     ),
+    # Spain has no configured target: the ask is derived from researched
+    # market data (jobhunter_research), with no floor.
+    "spain": (
+        "spain", "espa\u00f1a", "espana", "remote spain", "madrid", "barcelona",
+        "valencia", "val\u00e8ncia", "sevilla", "seville", "m\u00e1laga", "malaga",
+        "bilbao", "zaragoza",
+    ),
+}
+
+# Currency and pay period per market, including markets without a target.
+SALARY_MARKET_UNITS = {
+    "uae": ("AED", "month"),
+    "saudi": ("SAR", "month"),
+    "switzerland": ("CHF", "year"),
+    "spain": ("EUR", "year"),
 }
 
 # Fallback bands are expressed as a fraction of the market target so they stay
@@ -152,6 +167,9 @@ class JobResearch:
     company_salary_checks: list[str] = field(default_factory=list)
     employer_name: str = ""
     posting_company: str = ""
+    # jobhunter_research.ResearchResult.to_dict(): salary basis/ranges/ask and
+    # company profile. None for briefs built without live research.
+    research: dict[str, Any] | None = None
 
 
 @dataclass
@@ -187,7 +205,7 @@ def salary_market(job: dict[str, Any] | None = None) -> str | None:
 def salary_target(job: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """The configured ask for a job's market, env override applied."""
     market = salary_market(job)
-    if market is None:
+    if market is None or market not in SALARY_TARGETS:
         return None
     target = dict(SALARY_TARGETS[market])
     env = f"JOBHUNTER_TARGET_SALARY_{target['currency']}_{target['period'].upper()}LY"
@@ -212,6 +230,8 @@ def format_salary(amount: int, currency: str, period: str) -> str:
 def target_salary_label(job: dict[str, Any] | None = None) -> str:
     target = salary_target(job)
     if target is None:
+        if salary_market(job) in SALARY_MARKET_UNITS:
+            return "Market-derived ask; no configured target"
         return "No configured target for this location"
     return format_salary(target["amount"], target["currency"], target["period"])
 
@@ -267,7 +287,21 @@ def firecrawl_api_url() -> str:
     ).rstrip("/")
 
 
-def firecrawl_search_results(query: str, *, timeout: float, poster=requests.post) -> list[dict[str, str]]:
+def firecrawl_headers() -> dict[str, str]:
+    """JSON headers, with the bearer key when FIRECRAWL_API_KEY is configured."""
+    headers = {"Content-Type": "application/json"}
+    key = (
+        os.getenv("FIRECRAWL_API_KEY", "").strip()
+        or _env_value_from_file(Path.home() / ".hermes" / ".env", "FIRECRAWL_API_KEY")
+    )
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def firecrawl_search_results(
+    query: str, *, timeout: float, poster=requests.post, notes: list[str] | None = None
+) -> list[dict[str, str]]:
     base_url = firecrawl_api_url()
     if not base_url:
         return []
@@ -275,14 +309,21 @@ def firecrawl_search_results(query: str, *, timeout: float, poster=requests.post
         response = poster(
             f"{base_url}/v1/search",
             json={"query": query, "limit": 5},
-            headers={"Content-Type": "application/json"},
+            headers=firecrawl_headers(),
             timeout=timeout,
         )
-    except Exception:
+    except Exception as exc:
+        if notes is not None:
+            notes.append(f"Firecrawl search failed: {exc.__class__.__name__}.")
         return []
     if response.status_code >= 400:
+        if notes is not None:
+            notes.append(f"Firecrawl search returned HTTP {response.status_code}.")
         return []
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError:
+        return []
     rows = payload.get("data") if isinstance(payload, dict) else []
     results: list[dict[str, str]] = []
     for row in rows or []:
@@ -300,25 +341,21 @@ def web_search_results(
     query: str,
     *,
     timeout: float | None = None,
-    fetcher=requests.get,
+    fetcher=None,
     poster=requests.post,
+    notes: list[str] | None = None,
 ) -> list[dict[str, str]]:
+    """Firecrawl (when configured), then Brave HTML, then DuckDuckGo lite.
+
+    Every provider failure yields ``[]``; with ``notes`` the reason is kept.
+    """
+    from jobhunter_research import search as research_search
+
     timeout = timeout if timeout is not None else float(os.getenv("JOBHUNTER_WEB_RESEARCH_TIMEOUT", "8"))
-    firecrawl_results = firecrawl_search_results(query, timeout=timeout, poster=poster)
+    firecrawl_results = firecrawl_search_results(query, timeout=timeout, poster=poster, notes=notes)
     if firecrawl_results:
         return firecrawl_results
-    try:
-        response = fetcher(
-            "https://duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": "Mozilla/5.0 JobHunter research bot"},
-            timeout=timeout,
-        )
-    except Exception:
-        return []
-    if response.status_code != 200:
-        return []
-    return parse_duckduckgo_results(response.text)
+    return research_search.fallback_search(query, timeout=timeout, fetcher=fetcher, notes=notes)
 
 
 def salary_search_queries(title: str, location: str) -> list[str]:
@@ -333,12 +370,12 @@ def salary_search_queries(title: str, location: str) -> list[str]:
             f"{place} {normalized_title} salary",
         ]
     if market != "uae":
-        target = SALARY_TARGETS[market]
+        currency = SALARY_MARKET_UNITS[market][0]
         place = city or location
         return [
             f"site:glassdoor.com {place} {normalized_title} salary",
             f"site:indeed.com {place} {normalized_title} salary",
-            f"{place} {normalized_title} salary {target['currency']}",
+            f"{place} {normalized_title} salary {currency}",
         ]
     city = city or "Dubai"
     return [
@@ -459,7 +496,7 @@ def fetch_levels_salary_source(
             response = poster(
                 f"{base_url}/v1/scrape",
                 json={"url": candidate_url, "formats": ["markdown"]},
-                headers={"Content-Type": "application/json"},
+                headers=firecrawl_headers(),
                 timeout=timeout,
             )
             if response.status_code >= 400:
@@ -632,11 +669,20 @@ def resolve_research_employer(job: dict[str, Any]) -> tuple[str, str]:
     return (employer, posting_company) if employer != posting_company else (posting_company, "")
 
 
+# Boards whose structured salary field is the employer's own published pay
+# (scraper.evaluate_job stores it as jobs.salary; it never reaches the body).
+TRUSTED_SALARY_BOARDS = ("Spain Dev Jobs", "SpainJobs.io")
+
+
 def validated_job_salary(job: dict[str, Any]) -> str:
     """Revalidate legacy stored salary text against its labelled location."""
     stored = str(job.get("salary") or "").strip()
     if not stored:
         return ""
+    from jobhunter_research.salary import parse_salary_text
+
+    if str(job.get("source") or "") in TRUSTED_SALARY_BOARDS and parse_salary_text(stored):
+        return stored
     description = str(job.get("description") or "")
     normalized_stored = re.sub(r"[\s,]+", "", stored).lower()
     normalized_description = re.sub(r"[\s,]+", "", description).lower()
@@ -648,9 +694,14 @@ def validated_job_salary(job: dict[str, Any]) -> str:
     matches = list(re.finditer(re.escape(stored), description, flags=re.IGNORECASE))
     for match in matches:
         label = scraper._salary_location_label(description, match.start())
+        # The stored span may carry its own label ("Salary: \u20ac60,000 - ..."),
+        # so pay context inside the match counts too.
         if (
             scraper._salary_matches_job_location(label, str(job.get("location") or ""))
-            and _amount_has_pay_context(description, match.start(), match.end())
+            and (
+                _amount_has_pay_context(description, match.start(), match.end())
+                or scraper._salary_has_pay_context(description, match.start(), match.end())
+            )
         ):
             return stored
     return ""
@@ -818,7 +869,7 @@ def fetch_verified_company_pages(
     if parsed.scheme and parsed.netloc:
         candidates.append(f"{parsed.scheme}://{parsed.netloc}")
     elif company_token:
-        candidates.extend(f"https://{company_token}.{tld}" for tld in ("ae", "com", "io", "ai"))
+        candidates.extend(f"https://{company_token}.{tld}" for tld in ("ae", "es", "com", "io", "ai"))
 
     def fetch(url: str) -> dict[str, str] | None:
         try:
@@ -956,12 +1007,41 @@ def collect_salary_sources(title: str, location: str, *, max_sources: int = 3, t
     return [*trusted, *fallback][:max_sources]
 
 
-def research_job(job: dict[str, Any]) -> JobResearch:
+def _offline_search(query: str, **_kwargs: Any) -> list[dict[str, str]]:
+    return []
+
+
+def _offline_fetch(url: str, **_kwargs: Any) -> None:
+    return None
+
+
+def _legacy_salary_sources(result: dict[str, Any]) -> list[dict[str, str]]:
+    """Company-specific evidence in the JobResearch.company_salary_sources shape."""
+    rows = []
+    for source in result.get("sources") or []:
+        if source.get("kind") != "company":
+            continue
+        name = str(source.get("name") or "")
+        title, _, snippet = str(source.get("snippet") or "").partition(": ")
+        rows.append({
+            "source": name.split(":", 1)[0] or "Company page",
+            "title": title if snippet else "",
+            "url": str(source.get("url") or ""),
+            "snippet": snippet or title,
+        })
+    return rows
+
+
+def research_job(job: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> JobResearch:
     """Build a brief company/recruiter/salary research card with web fallback.
 
-    Web lookup is best-effort and warning-only. If search fails, the returned
-    brief still contains stored metadata and salary guidance.
+    Salary and company evidence come from ``jobhunter_research.research`` (at
+    most four web queries plus Spain salary pages). Web lookup is best-effort
+    and warning-only: with research disabled or failing, the brief still has
+    stored metadata, any published salary and the benchmark estimate.
     """
+    import jobhunter_research
+
     employer, posting_company = resolve_research_employer(job)
     research_job_data = dict(job)
     research_job_data["company"] = employer
@@ -969,116 +1049,64 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     research = build_default_research(research_job_data)
     research.employer_name = employer
     research.posting_company = posting_company
-    if not web_research_enabled():
-        return research
-    company = employer
-    title = job.get("title") or ""
-    location = job.get("location") or "Dubai"
-    job_post_company_summary = _company_summary_from_job_description(
-        str(company), str(job.get("description") or "")
-    )
-    has_job_post_company_summary = _company_summary_has_useful_detail(
-        str(company), job_post_company_summary
-    )
+    online = web_research_enabled()
     try:
-        timeout = float(os.getenv("JOBHUNTER_WEB_RESEARCH_TIMEOUT", "12"))
-        search_timeout = min(timeout, 6)
-        company_salary_sources = collect_company_salary_sources(
-            str(company), str(title), str(location), timeout=search_timeout
+        result = jobhunter_research.research(
+            job,
+            conn=conn if online else None,
+            search=None if online else _offline_search,
+            fetch=None if online else _offline_fetch,
         )
-        official_search_results = [
-            item for item in company_salary_sources
-            if _is_official_company_result(str(company), str(item.get("url", "")))
-        ]
-        verified_pages = (
-            fetch_verified_company_pages(str(company), official_search_results, timeout=min(timeout, 8))
-            if official_search_results or not has_job_post_company_summary
-            else []
-        )
-        if not company_salary_sources:
-            for page in verified_pages:
-                page_text = f"{page.get('title', '')} {page.get('snippet', '')}".lower()
-                if any(term in page_text for term in ("compensation", "bonus", "equity", "profit sharing", "salary", "pay")):
-                    company_salary_sources.append({
-                        "source": "Company careers page",
-                        "title": page.get("title", ""),
-                        "url": page.get("url", ""),
-                        "snippet": _excerpt_around_terms(
-                            page.get("snippet", ""),
-                            ("compensation", "bonus", "equity", "profit sharing", "salary", "pay"),
-                        ),
-                    })
-                    break
-        profile_results: list[dict[str, str]] = []
-        if not verified_pages and not has_job_post_company_summary:
-            profile_queries = company_profile_search_queries(str(company), str(title), str(location))
-            with ThreadPoolExecutor(max_workers=len(profile_queries)) as executor:
-                profile_result_groups = list(
-                    executor.map(lambda query: web_search_results(query, timeout=search_timeout)[:5], profile_queries)
-                )
-            profile_results = [
-                result for group in profile_result_groups for result in group
-                if _result_matches_company(str(company), result)
-            ]
-        combined_company_results: list[dict[str, str]] = []
-        seen_company_urls: set[str] = set()
-        for result in [*verified_pages, *official_search_results, *profile_results]:
-            url = result.get("url", "")
-            if url and url not in seen_company_urls:
-                seen_company_urls.add(url)
-                combined_company_results.append(result)
-        company_results = combined_company_results[:3]
     except Exception as exc:  # noqa: BLE001 - callback must stay reliable
         research.warnings.append(f"Web research unavailable: {exc.__class__.__name__}.")
         return research
-    if company_results:
-        research.company_summary = _compact_company_summary(str(company), str(location), company_results)
+    payload = result.to_dict()
+    research.research = payload
+    if not online:
+        return research
+
+    company = str(employer)
+    profile = payload["company"]
+    if profile.get("summary") and result.summary_origin == "web":
+        research.company_summary = profile["summary"]
         research.confidence = "Medium"
-        research.verified_signals.append(f"Web result found: {company_results[0]['title']}.")
-        official_results = [
-            r for r in company_results
-            if _is_official_company_result(str(company), str(r.get("url", "")))
+    elif profile.get("summary") and not research.company_summary.startswith("Job post:"):
+        research.company_summary = f"Job post: {profile['summary']}"
+    if profile.get("website"):
+        website = profile["website"]
+        research.verified_signals.append(f"Official company/careers page found: {website}.")
+        research.missing_signals = [
+            item for item in research.missing_signals if "Official company website/careers page" not in item
         ]
-        if official_results:
-            official = official_results[0]
-            research.verified_signals.append(f"Official company/careers page found: {official['url']}.")
-            research.missing_signals = [
-                item for item in research.missing_signals
-                if "Official company website/careers page" not in item
-            ]
-            research.warnings = [
-                item for item in research.warnings
-                if "Company website not verified" not in item
-            ]
-        research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in company_results)]))[:5]
-        risky_terms = ("scam", "fraud", "fake", "complaint")
-        if any(term in (r["title"] + " " + r["snippet"]).lower() for r in combined_company_results for term in risky_terms):
-            research.warnings.append("Search results mention scam/fraud/fake/complaint terms; verify carefully.")
-            research.legitimacy = "Warn only: suspicious terms appeared in search results; do not block automatically."
-        else:
-            research.legitimacy = "Warn only: web results found; no obvious scam/fake keyword in top snippets."
-            research.recommendation = "Proceed only if the Details link or official company site confirms the role and application path."
-    else:
+        research.warnings = [item for item in research.warnings if "Company website not verified" not in item]
+    web_urls = [url for url in profile.get("sources") or [] if url.startswith("http")]
+    if web_urls or result.summary_origin == "web":
+        research.verified_signals.append(f"Web result found: {(web_urls or [profile.get('website') or company])[0]}.")
+        research.recommendation = (
+            "Proceed only if the Details link or official company site confirms the role and application path."
+        )
+        research.legitimacy = "Warn only: web results found; no obvious scam/fake keyword in top snippets."
+    elif result.summary_origin != "job_post":
         research.warnings.append("No useful web result found for company/recruiter query.")
         research.missing_signals.append("No public company/recruiter result found from the bounded web lookup.")
-    if company_salary_sources:
-        research.company_salary_sources = company_salary_sources
-        research.company_salary_checks = company_salary_check_labels(str(company))
+    risky_terms = ("scam", "fraud", "fake", "complaint")
+    company_rows = [row for row in result.raw_results if _result_matches_company(company, row)]
+    if jobhunter_research.RISK_NOTE in result.notes or any(
+            term in f"{row.get('title', '')} {row.get('snippet', '')}".lower() for row in company_rows for term in risky_terms):
+        research.warnings.append("Search results mention scam/fraud/fake/complaint terms; verify carefully.")
+        research.legitimacy = "Warn only: suspicious terms appeared in search results; do not block automatically."
+
+    research.company_salary_sources = _legacy_salary_sources(payload)
+    research.company_salary_checks = company_salary_check_labels(company)
+    if research.company_salary_sources:
         research.verified_signals.append("Company-specific compensation evidence found.")
-        numeric_salary = next((
-            item for item in company_salary_sources
-            if item.get("source") != "Company careers page"
-            and _looks_like_salary_amount(str(item.get("snippet") or ""))
-            and _salary_source_matches_job_location(item, str(location))
-        ), None)
-        if numeric_salary:
-            research.salary_range = f"Company-specific: {numeric_salary['snippet'][:180]}"
-        else:
-            research.missing_signals.append("No company-specific salary range found.")
-        research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in company_salary_sources)]))[:8]
     else:
-        research.company_salary_checks = company_salary_check_labels(str(company))
         research.missing_signals.append("No company-specific salary range found.")
+    lines = jobhunter_research.format_salary_lines(payload)
+    if lines:
+        research.salary_range = html.unescape(" · ".join(lines))
+    source_urls = [source.get("url") for source in payload["sources"] if source.get("url")]
+    research.sources = list(dict.fromkeys([*research.sources, *web_urls, *source_urls]))[:8]
     return research
 
 
@@ -1094,11 +1122,32 @@ def format_salary_band(band_name: str, job: dict[str, Any] | None = None) -> str
     return f"{target['currency']} {low // 1000}k–{high // 1000}k/{target['period']}"
 
 
+def legacy_salary_band_name(job: dict[str, Any]) -> str:
+    """senior / backend / broad: which configured-target band fits the role."""
+    title = (job.get("title") or "").lower()
+    tech = (job.get("tech_required") or "").lower()
+    exp = job.get("min_experience") or -1
+    if any(term in title for term in ("lead", "principal", "architect")) or (isinstance(exp, int) and exp >= 6):
+        return "senior"
+    if any(term in tech for term in ("java", "spring", "golang", "microservices", "kubernetes", "aws", "azure")):
+        return "backend"
+    return "broad"
+
+
+_BAND_NOTES = {
+    "senior": "market ask band",
+    "backend": "likely band; higher if backend/cloud ownership is real",
+    "broad": "broad software range",
+}
+
+
 def estimate_salary_range(job: dict[str, Any]) -> str:
     """Return a conservative salary note for the role.
 
     We keep this intentionally brief and transparent. Live research can replace
-    or augment this text, but callbacks need a no-network fallback.
+    or augment this text, but callbacks need a no-network fallback. Markets
+    without a configured target (Spain) use the benchmark table, labelled as
+    an estimate.
     """
     published_salary = validated_job_salary(job)
     target = salary_target(job)
@@ -1106,17 +1155,22 @@ def estimate_salary_range(job: dict[str, Any]) -> str:
         target_note = f" Target ask: {target_salary_label(job)}." if target else ""
         return f"Published salary: {published_salary}.{target_note}"
     if target is None:
+        if salary_market(job) in SALARY_MARKET_UNITS:
+            import jobhunter_research
+            from jobhunter_research import salary as research_salary
+
+            context = jobhunter_research.build_context(job)
+            source = research_salary.estimate_source(context, "")
+            summary = research_salary.summarize_sources(
+                [source] if source else [], kind="benchmark", currency=context.currency, period=context.period or "year"
+            )
+            if summary:
+                band = research_salary.format_range(summary["low"], summary["high"], summary["currency"], context.period)
+                return f"Estimate: {band} ({source['name']}; estimate, not employer data)."
+            return "Salary not published; no benchmark for this role and location."
         return "Salary not published; no configured target for this location."
-    title = (job.get("title") or "").lower()
-    tech = (job.get("tech_required") or "").lower()
-    exp = job.get("min_experience") or -1
-    if any(term in title for term in ("lead", "principal", "architect")) or (isinstance(exp, int) and exp >= 6):
-        band_name, note = "senior", "market ask band"
-    elif any(term in tech for term in ("java", "spring", "golang", "microservices", "kubernetes", "aws", "azure")):
-        band_name, note = "backend", "likely band; higher if backend/cloud ownership is real"
-    else:
-        band_name, note = "broad", "broad software range"
-    return f"{format_salary_band(band_name, job)} {note}. Configured target: {target_salary_label(job)}."
+    band_name = legacy_salary_band_name(job)
+    return f"{format_salary_band(band_name, job)} {_BAND_NOTES[band_name]}. Configured target: {target_salary_label(job)}."
 
 
 def build_default_research(job: dict[str, Any]) -> JobResearch:
@@ -1312,9 +1366,21 @@ def _posting_visa_note(job: dict[str, Any]) -> str:
     return ""
 
 
+def _brief_salary_lines(job: dict[str, Any], research: JobResearch) -> list[str]:
+    """Published/Company/Market/Estimate/Ask lines; offline research when none was attached."""
+    import jobhunter_research
+
+    payload = research.research
+    if payload is None:
+        try:
+            payload = jobhunter_research.research(job, search=_offline_search, fetch=_offline_fetch).to_dict()
+        except Exception:  # noqa: BLE001 - the card must render without research
+            return []
+    return jobhunter_research.format_salary_lines(payload)
+
+
 def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> str:
     company_name = str(research.employer_name or job.get("company") or "company")
-    published_salary = validated_job_salary(job)
     salary_source_priority = {"Levels.fyi": 0, "Glassdoor": 1, "Indeed": 2, "PayScale": 3, "GulfTalent": 4}
     numeric_salary = sorted([
         item for item in research.company_salary_sources
@@ -1327,20 +1393,26 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
         if item.get("source") == "Company careers page"
     ]
 
-    if published_salary:
-        pay_line = f"Published: {_esc(published_salary)}"
-    elif numeric_salary:
-        pay_line = " | ".join(
-            f"{_esc(item.get('source'))}: {_esc(str(item.get('snippet') or '')[:140])}"
-            for item in numeric_salary
+    # Each line names its basis; aggregator or estimate figures are never
+    # presented as the employer's own pay.
+    lines = _brief_salary_lines(job, research)
+    if numeric_salary:
+        company_line = " | ".join(
+            f"{_esc(item.get('source'))}: {_esc(str(item.get('snippet') or '')[:140])}" for item in numeric_salary
         )
-    else:
+        lines = [line for line in lines if not line.startswith("Company:")]
+        insert_at = 1 if lines and lines[0].startswith("Published:") else 0
+        lines.insert(insert_at, f"Company: {company_line}")
+    if not any(line.startswith(("Published:", "Company:")) for line in lines):
         platforms = ", ".join(COMPANY_PAY_PLATFORMS[:-1]) + f" or {COMPANY_PAY_PLATFORMS[-1]}"
-        pay_line = f"No published range; no {_esc(company_name)} pay data on {platforms}."
+        lines.insert(0, f"No published range; no {_esc(company_name)} pay data on {platforms}.")
+    pay_block = "\n".join(lines)
 
     benefits_line = _compact_benefits(compensation_notes) if compensation_notes else None
 
-    company_line = " ".join(str(research.company_summary or "Company details not verified.").split())[:180]
+    company_line = " ".join(str(research.company_summary or "Company details not verified.").split())
+    if len(company_line) > 220:
+        company_line = company_line[:219].rstrip() + "…"
     benefits_block = f"\n<b>Benefits:</b> {_esc(benefits_line)}" if benefits_line else ""
     fit_checks = _posting_fit_checks(job)
     fit_block = f"\n<b>Fit checks:</b> {_esc('; '.join(fit_checks))}." if fit_checks else ""
@@ -1353,8 +1425,8 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
 {_esc(company_name)} — {_esc(job.get('location'))}{f" (via {_esc(research.posting_company)})" if research.posting_company else ""}
 
 <b>Company:</b> {_esc(company_line)}
-<b>Pay:</b> {pay_line}{benefits_block}{fit_block}{visa_block}
-<b>Ask:</b> Base salary, currency, pay period and bonus/equity terms.
+<b>Pay:</b> {pay_block}{benefits_block}{fit_block}{visa_block}
+<b>Questions to Ask:</b> Base salary, currency, pay period and bonus/equity terms.
 
 Choose next step:"""
 
@@ -3100,7 +3172,10 @@ def prepare_application_package(
 
 
 def render_research_dry_run(job_id: str, *, db_path: Path | str = DEFAULT_DB_PATH) -> str:
-    """Run live research without sending Telegram or mutating application state."""
+    """Run live research without sending Telegram or mutating application state.
+
+    The only write is the research cache row (``job_research``).
+    """
     resolved_db = Path(db_path).resolve()
     conn = sqlite3.connect(f"file:{resolved_db.as_posix()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -3111,7 +3186,15 @@ def render_research_dry_run(job_id: str, *, db_path: Path | str = DEFAULT_DB_PAT
     if row is None:
         raise KeyError(f"Job not found: {job_id}")
     job = dict(row)
-    return build_research_brief_message(job, research_job(job))
+    try:
+        cache_conn: sqlite3.Connection | None = sqlite3.connect(resolved_db, timeout=30)
+    except sqlite3.Error:
+        cache_conn = None
+    try:
+        return build_research_brief_message(job, research_job(job, conn=cache_conn))
+    finally:
+        if cache_conn is not None:
+            cache_conn.close()
 
 
 def save_cover_draft_context(

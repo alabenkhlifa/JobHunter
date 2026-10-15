@@ -1,0 +1,539 @@
+{
+ "schema_version": 1,
+ "currency": "EUR",
+ "period": "year",
+ "basis": "gross annual base",
+ "updated": "2026-10",
+ "notes": [
+  "ESTIMATE ONLY: use as a fallback when live research finds no published, company or market salary; label results basis=estimate.",
+  "Figures are annual gross (bruto anual). Spanish offers are often quoted in 14 payments (12 + 2 pagas extra); these numbers are the annual total, not the monthly x12.",
+  "Basis is base salary where the source gives it; Glassdoor city rows are 'total pay' (base + additional pay, base is typically ~90%), so city rows may run slightly above pure base.",
+  "Spain-wide (*) rows combine PayScale base medians (p50) with Manfred 2026 experience bands (p25/p75 = band min/max, not true quartiles); where p50 is a band midpoint the source note says 'derived'.",
+  "Glassdoor pages block automated fetches (Cloudflare); Glassdoor values were taken from the pages as indexed by web search on the retrieval date, and different Glassdoor domains show different snapshots.",
+  "Levels.fyi figures are total compensation (base + stock + bonus) and skew to large international tech employers; they are listed only as upper-bound corroboration and never used for the numbers.",
+  "Spain tech pay is strongly trimodal (traditional firms/consultancies ~40K, startups/scaleups ~60K, big tech ~90K+ base for senior); a single p50 hides this spread.",
+  "Rejected sources: Talent.com city/title pages (job-ad derived, implausible values such as Engineering Manager Spain 24K, Software Architect Madrid 27K) except as backend mid corroboration; Hays 2026 salary calculator (server error, PDF gated); Michael Page and Robert Walters 2026 tech tables (gated PDFs, no figures retrievable); sueldos.dev (2023 data).",
+  "Hays Guía del Mercado Laboral 2026 projects ~6% IT salary growth for 2026; Michael Page projects 8-10% for specialised tech profiles; older snapshots may understate current pay.",
+  "Small samples: PayScale Software Architect (n=33, data Jan 2025), PayScale EM (n=26), Glassdoor Lead SWE Madrid (n=67)."
+ ],
+ "entries": [
+  {
+   "country": "es",
+   "city": "*",
+   "role_family": "senior_software_engineer",
+   "level": "senior",
+   "p25": 41000,
+   "p50": 55000,
+   "p75": 60000,
+   "sources": [
+    {
+     "name": "PayScale",
+     "url": "https://www.payscale.com/research/ES/Job=Senior_Software_Engineer/Salary",
+     "retrieved": "2026-10-15",
+     "note": "Senior Software Engineer Spain base: P10 38k, median 55,128 (avg), P90 83k; n=189, updated 2026-07-09; used for p50"
+    },
+    {
+     "name": "Manfred Guía Salarial 2026 (Prosfy data)",
+     "url": "https://www.getmanfred.com/en/blog/guia-salarial-2026-salarios-en-tecnologia-espana-manfred",
+     "retrieved": "2026-10-15",
+     "note": "Full-Stack Engineer 5-10y EUR 41-50K, >10y EUR 51-60K; p25/p75 = envelope of these bands (band min/max, not true quartiles)"
+    },
+    {
+     "name": "Levels.fyi",
+     "url": "https://www.levels.fyi/t/software-engineer/levels/senior/locations/spain",
+     "retrieved": "2026-10-15",
+     "note": "TOTAL COMPENSATION (base+stock+bonus), corroboration only, not used for the numbers. Senior SWE Spain p25 58.5K / p50 72,877 / p75 91.7K, n=836"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "*",
+   "role_family": "lead_software_engineer",
+   "level": "lead",
+   "p25": 51000,
+   "p50": 60000,
+   "p75": 65000,
+   "sources": [
+    {
+     "name": "PayScale",
+     "url": "https://www.payscale.com/research/ES/Job=Lead_Software_Engineer/Salary",
+     "retrieved": "2026-10-15",
+     "note": "Lead Software Engineer Spain base: P10 46k, median 60k (avg 60,103), P90 90k; n=44, updated 2026-05-17; used for p50"
+    },
+    {
+     "name": "Manfred Guía Salarial 2026 (Prosfy data)",
+     "url": "https://www.getmanfred.com/en/blog/guia-salarial-2026-salarios-en-tecnologia-espana-manfred",
+     "retrieved": "2026-10-15",
+     "note": "Tech Lead 5-10y EUR 51-65K (>10y EUR 65-80K); p25/p75 = 5-10y band min/max"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "*",
+   "role_family": "software_architect",
+   "level": "senior",
+   "p25": 51000,
+   "p50": 58000,
+   "p75": 75000,
+   "sources": [
+    {
+     "name": "PayScale",
+     "url": "https://www.payscale.com/research/ES/Job=Software_Architect/Salary",
+     "retrieved": "2026-10-15",
+     "note": "Software Architect Spain base: P10 34k, median 58k (avg 57,549), P90 78k; n=33, data last updated 2025-01-15; used for p50"
+    },
+    {
+     "name": "Manfred Guía Salarial 2026 (Prosfy data)",
+     "url": "https://www.getmanfred.com/en/blog/guia-salarial-2026-salarios-en-tecnologia-espana-manfred",
+     "retrieved": "2026-10-15",
+     "note": "Software Architect 5-10y EUR 51-75K; p25/p75 = band min/max"
+    },
+    {
+     "name": "Levels.fyi",
+     "url": "https://www.levels.fyi/t/solution-architect/locations/spain",
+     "retrieved": "2026-10-15",
+     "note": "TOTAL COMPENSATION (base+stock+bonus), corroboration only, not used for the numbers. Solution Architect Spain p25 40,971 / p50 67,052 / p75 88,443, n=44"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "*",
+   "role_family": "software_architect",
+   "level": "lead",
+   "p25": 75000,
+   "p50": 87500,
+   "p75": 100000,
+   "sources": [
+    {
+     "name": "Manfred Guía Salarial 2026 (Prosfy data)",
+     "url": "https://www.getmanfred.com/en/blog/guia-salarial-2026-salarios-en-tecnologia-espana-manfred",
+     "retrieved": "2026-10-15",
+     "note": "Software Architect >10y EUR 75-100K; p25/p75 = band min/max, p50 = band midpoint (derived)"
+    },
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/barcelona-spain-senior-software-architect-salary-SRCH_IL.0,15_IM1015_KO16,41.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Senior Software Architect Barcelona 2026: 25th 57,750, median 69K, range to 93K (corroboration; suggests band is top-heavy)"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "*",
+   "role_family": "backend_engineer",
+   "level": "mid",
+   "p25": 31000,
+   "p50": 35000,
+   "p75": 40000,
+   "sources": [
+    {
+     "name": "Manfred Guía Salarial 2026 (Prosfy data)",
+     "url": "https://www.getmanfred.com/en/blog/guia-salarial-2026-salarios-en-tecnologia-espana-manfred",
+     "retrieved": "2026-10-15",
+     "note": "Backend Engineer 2-5y EUR 31-40K; p25/p75 = band min/max"
+    },
+    {
+     "name": "Talent.com",
+     "url": "https://es.talent.com/salary?job=backend+developer",
+     "retrieved": "2026-10-15",
+     "note": "Backend developer Spain: median 35,000, low 24,000, high 35,200 (job-ad derived, 2026); used for p50"
+    },
+    {
+     "name": "Indeed España",
+     "url": "https://es.indeed.com/career/ingeniero-de-software/salaries",
+     "retrieved": "2026-10-15",
+     "note": "Ingeniero/a de software (all levels) base avg: Spain 41,194 (range 28,891-58,736, n=247), Madrid 39,069 (n=74), Barcelona 46,080 (n=65); updated 2026-10-05"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "*",
+   "role_family": "backend_engineer",
+   "level": "senior",
+   "p25": 41000,
+   "p50": 48000,
+   "p75": 55000,
+   "sources": [
+    {
+     "name": "Manfred Guía Salarial 2026 (Prosfy data)",
+     "url": "https://www.getmanfred.com/en/blog/guia-salarial-2026-salarios-en-tecnologia-espana-manfred",
+     "retrieved": "2026-10-15",
+     "note": "Backend Engineer 5-10y EUR 41-50K, >10y EUR 51-55K; p25/p75 = envelope min/max, p50 = envelope midpoint (derived)"
+    },
+    {
+     "name": "Manfred (trimodal tech salaries)",
+     "url": "https://www.getmanfred.com/en/blog/the-trimodal-nature-of-tech-salaries-in-spain",
+     "retrieved": "2026-10-15",
+     "note": "Senior profile gross annual: traditional firms median 40K/P75 50K; startups-scaleups median 60K/P75 75K; big tech base median 90K/P75 110K (2025-10)"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "*",
+   "role_family": "engineering_manager",
+   "level": "lead",
+   "p25": 60000,
+   "p50": 70000,
+   "p75": 85000,
+   "sources": [
+    {
+     "name": "PayScale",
+     "url": "https://www.payscale.com/research/ES/Job=Software_Engineering_Manager/Salary",
+     "retrieved": "2026-10-15",
+     "note": "Software Engineering Manager Spain base: P10 45k, median 70k (avg 69,706), P90 93k; n=26, updated 2026-02-26; used for p50"
+    },
+    {
+     "name": "Manfred Guía Salarial 2026 (Prosfy data)",
+     "url": "https://www.getmanfred.com/en/blog/guia-salarial-2026-salarios-en-tecnologia-espana-manfred",
+     "retrieved": "2026-10-15",
+     "note": "Engineering Manager 5-10y EUR 60-85K (>10y EUR 86-110K); p25/p75 = 5-10y band min/max"
+    },
+    {
+     "name": "Levels.fyi",
+     "url": "https://www.levels.fyi/t/software-engineering-manager/locations/spain",
+     "retrieved": "2026-10-15",
+     "note": "TOTAL COMPENSATION (base+stock+bonus), corroboration only, not used for the numbers. EM Spain p25 83,557 / p50 112,021 / p75 138,076, n=65"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "madrid",
+   "role_family": "senior_software_engineer",
+   "level": "senior",
+   "p25": 48125,
+   "p50": 57000,
+   "p75": 67500,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/madrid-spain-senior-software-engineer-salary-SRCH_IL.0,12_IM1030_KO13,37.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Senior Software Engineer Madrid: 25th 48,125, median 57K, 75th 67,500, 90th 89,600; base range 45-61K; n=2252, Sep 2026"
+    },
+    {
+     "name": "Levels.fyi",
+     "url": "https://www.levels.fyi/t/software-engineer/levels/senior/locations/madrid-esp",
+     "retrieved": "2026-10-15",
+     "note": "TOTAL COMPENSATION (base+stock+bonus), corroboration only, not used for the numbers. Senior SWE Madrid p25 58,258 / p50 73,366 / p75 95,789, n=300"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "barcelona",
+   "role_family": "senior_software_engineer",
+   "level": "senior",
+   "p25": 47000,
+   "p50": 59570,
+   "p75": 73000,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/barcelona-spain-senior-software-engineer-salary-SRCH_IL.0,15_IM1015_KO16,40.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Senior Software Engineer Barcelona: 25th 47,000, average 59,570 (used as p50), 75th 73,000; n=2651, Sep 2026"
+    },
+    {
+     "name": "Levels.fyi",
+     "url": "https://www.levels.fyi/t/software-engineer/levels/senior/locations/barcelona-esp",
+     "retrieved": "2026-10-15",
+     "note": "TOTAL COMPENSATION (base+stock+bonus), corroboration only, not used for the numbers. Senior SWE Barcelona p25 64.6K / p50 78,332 / p75 96.6K, n=369"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "valencia",
+   "role_family": "senior_software_engineer",
+   "level": "senior",
+   "p25": 43000,
+   "p50": 52500,
+   "p75": 66000,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/valencia-senior-software-engineer-salary-SRCH_IL.0,8_IC2639089_KO9,33.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Senior Software Engineer Valencia (Valencian Community page): total pay range 43K-66K, average 52,500 (used as p50); other Glassdoor Valencia pages show USD/GBP glitches, ignored"
+    },
+    {
+     "name": "Levels.fyi",
+     "url": "https://www.levels.fyi/t/software-engineer/levels/senior/locations/valencia-esp",
+     "retrieved": "2026-10-15",
+     "note": "TOTAL COMPENSATION (base+stock+bonus), corroboration only, not used for the numbers. Senior SWE Valencia p25 48,266 / p50 66,739 / p75 90,666, n=58"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "madrid",
+   "role_family": "lead_software_engineer",
+   "level": "lead",
+   "p25": 48900,
+   "p50": 64000,
+   "p75": 76750,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.co.uk/Salaries/madrid-lead-software-engineer-salary-SRCH_IL.0,6_IM1030_KO7,29.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Lead Software Engineer Madrid 2026: 25th 48,900, average 64,000 (used as p50), 75th 76,750; base 46-67K avg 59K; n=67 (small)"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "madrid",
+   "role_family": "software_architect",
+   "level": "senior",
+   "p25": 49000,
+   "p50": 56000,
+   "p75": 74888,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.co.uk/Salaries/madrid-software-architect-salary-SRCH_IL.0,6_IM1030_KO7,25.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Software Architect Madrid 2026: typical range 49,000-74,888, base 45-65K avg 51K + ~5K additional; n=134"
+    },
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/madrid-spain-software-architect-salary-SRCH_IL.0,12_IM1030_KO13,31.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Software Architect Madrid 2025 snapshot: median total pay 56K (used as p50)"
+    },
+    {
+     "name": "Levels.fyi",
+     "url": "https://www.levels.fyi/t/solution-architect/locations/spain",
+     "retrieved": "2026-10-15",
+     "note": "TOTAL COMPENSATION (base+stock+bonus), corroboration only, not used for the numbers. Solution Architect Madrid median 70,277"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "barcelona",
+   "role_family": "software_architect",
+   "level": "senior",
+   "p25": 46500,
+   "p50": 58000,
+   "p75": 72200,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/barcelona-software-architect-salary-SRCH_IL.0,9_IM1015_KO10,28.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Software Architect Barcelona: 25th 46,500, median 58K, 75th 72,200; n=107, Aug 2026"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "barcelona",
+   "role_family": "software_architect",
+   "level": "lead",
+   "p25": 57750,
+   "p50": 69000,
+   "p75": 93000,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/barcelona-spain-senior-software-architect-salary-SRCH_IL.0,15_IM1015_KO16,41.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Senior Software Architect Barcelona 2026: 25th 57,750, median 69K, total pay range 58K-93K (75th ~93K)"
+    },
+    {
+     "name": "Manfred Guía Salarial 2026 (Prosfy data)",
+     "url": "https://www.getmanfred.com/en/blog/guia-salarial-2026-salarios-en-tecnologia-espana-manfred",
+     "retrieved": "2026-10-15",
+     "note": "Software Architect >10y EUR 75-100K (Spain-wide, corroboration)"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "madrid",
+   "role_family": "backend_engineer",
+   "level": "mid",
+   "p25": 36000,
+   "p50": 43000,
+   "p75": 54000,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/madrid-spain-backend-engineer-salary-SRCH_IL.0,12_IM1030_KO13,29.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Backend Engineer Madrid: ~25th 36K, median ~43K, ~75th 54K; n=134, Jan 2026"
+    },
+    {
+     "name": "Indeed España",
+     "url": "https://es.indeed.com/career/ingeniero-de-software/salaries",
+     "retrieved": "2026-10-15",
+     "note": "Ingeniero/a de software (all levels) base avg: Spain 41,194 (range 28,891-58,736, n=247), Madrid 39,069 (n=74), Barcelona 46,080 (n=65); updated 2026-10-05"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "barcelona",
+   "role_family": "backend_engineer",
+   "level": "mid",
+   "p25": 39525,
+   "p50": 54000,
+   "p75": 68125,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/barcelona-spain-backend-engineer-salary-SRCH_IL.0,15_IM1015_KO16,32.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Backend Engineer Barcelona: 25th 39,525, median ~54K, 75th 68,125; n=256, 2026"
+    },
+    {
+     "name": "Indeed España",
+     "url": "https://es.indeed.com/career/ingeniero-de-software/salaries",
+     "retrieved": "2026-10-15",
+     "note": "Ingeniero/a de software (all levels) base avg: Spain 41,194 (range 28,891-58,736, n=247), Madrid 39,069 (n=74), Barcelona 46,080 (n=65); updated 2026-10-05"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "madrid",
+   "role_family": "backend_engineer",
+   "level": "senior",
+   "p25": 46700,
+   "p50": 57000,
+   "p75": 67900,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/madrid-spain-senior-backend-engineer-salary-SRCH_IL.0,12_IM1030_KO13,36.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Senior Backend Engineer Madrid: 25th 46,700, median ~57K, 75th 67,900; n=117 (one snapshot ~50), Sep 2026"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "madrid",
+   "role_family": "engineering_manager",
+   "level": "lead",
+   "p25": 66000,
+   "p50": 81000,
+   "p75": 96520,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/madrid-spain-engineering-manager-salary-SRCH_IL.0,12_IM1030_KO13,32.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Engineering Manager Madrid: 25th 66,000, median 81K (another page 84K), 75th 96,520, 90th 112,700; n=217, Sep 2026"
+    },
+    {
+     "name": "Levels.fyi",
+     "url": "https://www.levels.fyi/t/software-engineering-manager/locations/spain",
+     "retrieved": "2026-10-15",
+     "note": "TOTAL COMPENSATION (base+stock+bonus), corroboration only, not used for the numbers. EM Madrid median 119,098"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "barcelona",
+   "role_family": "engineering_manager",
+   "level": "lead",
+   "p25": 69000,
+   "p50": 89000,
+   "p75": 103625,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/barcelona-engineering-manager-salary-SRCH_IL.0,9_IM1015_KO10,29.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Engineering Manager Barcelona: 25th 69,000, median 89K, 75th 103,625; n=413, Feb 2026"
+    },
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/barcelona-spain-software-engineering-manager-salary-SRCH_IL.0,15_IM1015_KO16,44.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Software Engineering Manager Barcelona: 25th 70,000, 75th 99,600; n=73"
+    },
+    {
+     "name": "Levels.fyi",
+     "url": "https://www.levels.fyi/t/software-engineering-manager/locations/spain",
+     "retrieved": "2026-10-15",
+     "note": "TOTAL COMPENSATION (base+stock+bonus), corroboration only, not used for the numbers. EM Barcelona median 104,508"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "barcelona",
+   "role_family": "lead_software_engineer",
+   "level": "lead",
+   "p25": 58000,
+   "p50": 69000,
+   "p75": 90500,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/barcelona-spain-lead-software-engineer-salary-SRCH_IL.0,15_IM1015_KO16,38.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Lead Software Engineer Barcelona 2026: 25th 58,000, median 69K, 75th 90,500; n=80 (another 2026 snapshot: median 68K, range 58-89K)"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "barcelona",
+   "role_family": "backend_engineer",
+   "level": "senior",
+   "p25": 53150,
+   "p50": 62000,
+   "p75": 78000,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/barcelona-spain-senior-backend-engineer-salary-SRCH_IL.0,15_IM1015_KO16,39.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Senior Backend Engineer Barcelona: 25th 53,150, median 62K, 75th 78,000, 90th 88,000; base 50-70K; ~199 salaries, Aug 2026"
+    },
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/barcelona-spain-senior-backend-developer-salary-SRCH_IL.0,15_IM1015_KO16,40.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. Senior Backend Developer Barcelona: 25th 43,500, median 51K, 75th 64,438; n=79 (lower-paying title variant)"
+    }
+   ]
+  },
+  {
+   "country": "es",
+   "city": "valencia",
+   "role_family": "backend_engineer",
+   "level": "mid",
+   "p25": 23000,
+   "p50": 31000,
+   "p75": 41000,
+   "sources": [
+    {
+     "name": "Glassdoor",
+     "url": "https://www.glassdoor.com/Salaries/val%C3%A8ncia-software-developer-salary-SRCH_IL.0,8_IC2639089_KO9,27.htm",
+     "retrieved": "2026-10-15",
+     "note": "Glassdoor page values as surfaced by web search on retrieval date (direct fetch blocked by Cloudflare); Glassdoor 'total pay' 25th/median/75th, base is most of it. PROXY: generic 'Software Developer' Valencian Community, all levels: 25th 23,000, median 31K, 75th 41,000; n=233, Apr 2026. No backend-specific Valencia data found."
+    },
+    {
+     "name": "Talent.com",
+     "url": "https://es.talent.com/salary?job=backend+developer&location=valencia",
+     "retrieved": "2026-10-15",
+     "note": "Backend developer Valencia: median 35,000, low 30,000, high 37,300 (job-ad derived, 2026)"
+    }
+   ]
+  }
+ ]
+}

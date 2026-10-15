@@ -59,13 +59,26 @@ def test_salary_market_requires_a_location_on_an_actual_job():
     assert flow.salary_market(None) == "uae"
 
 
-def test_madrid_does_not_inherit_uae_salary_guidance():
-    job = sample_job(location="Madrid, Spain", title="Backend Software Engineer")
+def test_madrid_does_not_inherit_uae_salary_guidance(tmp_path, monkeypatch):
+    from jobhunter_research import salary as research_salary
 
-    assert flow.salary_market(job) is None
+    benchmarks = tmp_path / "salary_benchmarks.json"
+    benchmarks.write_text(json.dumps({"entries": [{
+        "country": "es", "city": "*", "role_family": "backend_engineer", "level": "mid",
+        "p25": 38000, "p50": 45000, "p75": 52000, "sources": [{"name": "PayScale", "url": "https://p.example"}],
+    }]}), encoding="utf-8")
+    monkeypatch.setattr(research_salary, "BENCHMARKS_PATH", benchmarks)
+    job = sample_job(location="Madrid, Spain", title="Backend Software Engineer", min_experience=3)
+
+    assert flow.salary_market(job) == "spain"
     assert flow.salary_target(job) is None
-    assert flow.estimate_salary_range(job) == "Salary not published; no configured target for this location."
+    assert flow.target_salary_label(job) == "Market-derived ask; no configured target"
+    assert flow.estimate_salary_range(job) == (
+        "Estimate: €38k–€52k/year (Benchmark (PayScale); estimate, not employer data)."
+    )
     assert all("AED" not in query and "Dubai" not in query for query in flow.salary_search_queries(job["title"], job["location"]))
+    monkeypatch.setattr(research_salary, "BENCHMARKS_PATH", tmp_path / "missing.json")
+    assert flow.estimate_salary_range(job) == "Salary not published; no benchmark for this role and location."
 
 
 def test_target_salary_label_uses_the_market_currency_and_period():
@@ -181,27 +194,41 @@ def test_web_search_falls_back_to_duckduckgo_when_firecrawl_empty(monkeypatch):
     assert results[0]["url"] == "https://agapi.ae/"
 
 
-def test_research_job_does_not_add_general_salary_results(monkeypatch):
+def test_research_job_adds_labelled_market_salary_evidence(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "true")
     calls = []
 
     def fake_search(query, **kwargs):
         calls.append(query)
         if "salary" in query.lower():
-            return [{"title": "Dubai Full Stack Developer salary", "url": "https://salary.example", "snippet": "Monthly salary AED 18k to AED 25k."}]
+            return [
+                {"title": "Dubai Full Stack Developer salary", "url": "https://salary.example",
+                 "snippet": "Monthly salary AED 18k to AED 25k."},
+                {"title": "Software Engineer Salaries in Dubai | Glassdoor",
+                 "url": "https://www.glassdoor.com/Salaries/dubai-software-engineer-salary.htm",
+                 "snippet": "The average Software Engineer salary in Dubai is AED 21,000 per month."},
+            ]
         return [{"title": "AGAPI complaint check", "url": "https://company.example", "snippet": "No scam report found, but verify contract."}]
+
+    import jobhunter_research
 
     monkeypatch.setattr(flow, "web_search_results", fake_search)
     monkeypatch.setattr(flow, "fetch_verified_company_pages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(jobhunter_research, "default_fetch", lambda url, **kwargs: None)
 
     research = flow.research_job(sample_job())
 
-    assert calls
+    assert len(calls) <= 4
     assert research.company_summary == "AGAPI is a technology company."
     assert not research.company_salary_sources
-    assert not research.salary_sources
+    assert research.research["salary"]["basis"] == "market"
+    assert [source["name"] for source in research.research["sources"]] == ["Glassdoor Dubai"]  # salary.example is not a salary site
     assert "No company-specific salary range found." in research.missing_signals
     assert any("scam/fraud/fake/complaint" in warning for warning in research.warnings)
+    message = flow.build_research_brief_message(sample_job(), research)
+    assert "No published range; no AGAPI pay data" in message
+    assert "Market: AED 21k/month (Glassdoor Dubai)" in message
+    assert "Ask: AED 30,000/month (configured target)" in message
 
 
 def test_collect_salary_sources_dedupes_multiple_salary_sites(monkeypatch):
@@ -554,16 +581,16 @@ def test_research_resolves_aggregator_employer_and_keeps_posting_company(monkeyp
 
 def test_research_skips_redundant_company_lookup_when_job_about_section_is_useful(monkeypatch):
     monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "true")
-    monkeypatch.setattr(flow, "collect_company_salary_sources", lambda *args, **kwargs: [])
+    queries = []
 
     def unexpected_lookup(*args, **kwargs):
-        raise AssertionError("company lookup should use the available job-post fallback")
+        raise AssertionError("company pages should not be fetched when the job post describes the employer")
 
     monkeypatch.setattr(flow, "fetch_verified_company_pages", unexpected_lookup)
-    monkeypatch.setattr(flow, "web_search_results", unexpected_lookup)
+    monkeypatch.setattr(flow, "web_search_results", lambda query, **kwargs: queries.append(query) or [])
     job = sample_job(
         company="TALENTMATE",
-        company_website="",
+        company_website="https://www.revolut.com/",
         description=(
             "About Revolut Our products include spending, saving, investing, and exchanging "
             "for 75+ million customers. We have 13,000+ people working around the world. "
@@ -575,6 +602,8 @@ def test_research_skips_redundant_company_lookup_when_job_about_section_is_usefu
     research = flow.research_job(job)
 
     assert research.company_summary.startswith("Job post: Revolut is a global financial technology company")
+    assert not any("official site" in query for query in queries)
+    assert len(queries) <= 2
 
 
 def test_research_verifies_company_when_job_context_summary_is_generic(monkeypatch):
@@ -590,7 +619,11 @@ def test_research_verifies_company_when_job_context_summary_is_generic(monkeypat
             "snippet": "ByteDance is a global technology company operating content and business platforms.",
         }]
 
+    import jobhunter_research
+
     monkeypatch.setattr(flow, "fetch_verified_company_pages", fake_pages)
+    monkeypatch.setattr(flow, "web_search_results", lambda query, **kwargs: [])
+    monkeypatch.setattr(jobhunter_research, "default_fetch", lambda url, **kwargs: None)
     job = sample_job(
         company="ByteDance",
         company_website="",
@@ -600,7 +633,10 @@ def test_research_verifies_company_when_job_context_summary_is_generic(monkeypat
     research = flow.research_job(job)
 
     assert calls == ["ByteDance"]
-    assert research.company_summary == "ByteDance is a global technology company."
+    assert research.company_summary == (
+        "ByteDance is a global technology company operating content and business platforms."
+    )
+    assert research.research["company"]["website"] == "https://www.bytedance.com"
 
 
 def test_legacy_salary_for_another_country_is_not_displayed():
@@ -727,6 +763,7 @@ def test_fetch_verified_company_pages_does_not_expand_unverified_domains():
     assert pages == []
     assert set(calls) == {
         "https://revolut.ae/",
+        "https://revolut.es/",
         "https://revolut.com/",
         "https://revolut.io/",
         "https://revolut.ai/",
@@ -754,10 +791,12 @@ def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
     assert "Pay:" in message
     assert "No published range; no AGAPI pay data" in message
     assert "Glassdoor, Indeed, PayScale, GulfTalent or Levels.fyi" in message
-    assert "market" not in message.lower()
-    assert "AED 25k" not in message
+    # Without live research the card still shows the labelled estimate and ask.
+    assert "Estimate: AED 15k–22k/month (Configured target band; estimate, not employer data)" in message
+    assert "Ask: AED 30,000/month (configured target)" in message
+    assert "AED 25k" not in message  # general results stay out of the employer line
     assert "Base salary, currency, pay period and bonus/equity terms" in message
-    assert len(message) < 600
+    assert len(message) < 900
 
 
 def test_research_brief_surfaces_ode_role_bar_ai_check_and_posting_visa_evidence():
@@ -2741,7 +2780,7 @@ def test_research_dry_run_reads_job_without_creating_state_tables(tmp_path, monk
     monkeypatch.setattr(
         flow,
         "research_job",
-        lambda job: flow.JobResearch(company_summary="", legitimacy=""),
+        lambda job, **kwargs: flow.JobResearch(company_summary="", legitimacy=""),
     )
 
     message = flow.render_research_dry_run("li-1", db_path=db)
@@ -2751,3 +2790,89 @@ def test_research_dry_run_reads_job_without_creating_state_tables(tmp_path, monk
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
     assert tables == {"jobs"}
+
+
+def test_board_published_salary_is_trusted_without_description_evidence():
+    job = sample_job(source="Spain Dev Jobs", location="Madrid, Spain", salary="€70k–90k / year",
+                     description="Build backend services.")
+
+    assert flow.validated_job_salary(job) == "€70k–90k / year"
+    assert flow.validated_job_salary(dict(job, salary="Competitive")) == ""
+
+
+def test_labelled_salary_from_the_description_is_published():
+    description = "Build Java services.\n\nSalary: €60,000 - €70,000 a year (as stated in the ad)"
+    job = sample_job(location="Valencia, Spain", salary="Salary: €60,000 - €70,000", description=description)
+
+    assert flow.validated_job_salary(job) == "Salary: €60,000 - €70,000"
+
+
+def test_spain_research_card_labels_published_market_and_ask(monkeypatch):
+    from jobhunter_research import salary as research_salary
+
+    monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "true")
+    monkeypatch.setattr(research_salary, "BENCHMARKS_PATH", Path("/nonexistent/benchmarks.json"))
+    monkeypatch.setattr(flow, "fetch_verified_company_pages", lambda *args, **kwargs: [])
+
+    def fake_search(query, **kwargs):
+        if "salary" not in query:
+            return []
+        return [{
+            "title": "Salary: Senior Software Engineer in Valencia, Spain 2026 | Glassdoor",
+            "url": "https://www.glassdoor.com/Salaries/valencia-senior-software-engineer-salary.htm",
+            "snippet": "The average salary for a Senior Software Engineer in Valencia, Spain is €52,000 per year.",
+        }, {
+            "title": "Senior Software Engineer Salary in Valencia | talent.com",
+            "url": "https://es.talent.com/salary?job=senior+software+engineer&location=valencia",
+            "snippet": "Senior Software Engineer en Valencia: Bajo € 40.000 · Alto € 58.000 al año",
+        }]
+
+    import jobhunter_research
+
+    monkeypatch.setattr(flow, "web_search_results", fake_search)
+    monkeypatch.setattr(jobhunter_research, "default_fetch", lambda url, **kwargs: None)
+    job = sample_job(
+        title="Senior Software Engineer",
+        company="Acme Tech",
+        location="València, Spain",
+        source="SpainJobs.io",
+        salary="€60,000 - €70,000 a year",
+        company_website="https://acme.es/",
+        description="Build Java services.",
+    )
+
+    research = flow.research_job(job)
+    message = flow.build_research_brief_message(job, research)
+
+    assert research.research["salary"]["basis"] == "published"
+    assert research.research["salary"]["ask_amount"] == 68000
+    assert "Published: €60,000 - €70,000 a year (SpainJobs.io)" in message
+    assert "Market: €46k–€55k/year (Glassdoor Valencia, talent.com Valencia)" in message
+    assert "Ask: €68,000/year (75th pct of published range)" in message
+    assert "No published range" not in message
+    assert len(message) < 900
+
+
+def test_research_dry_run_caches_live_research(tmp_path, monkeypatch):
+    import jobhunter_research
+
+    monkeypatch.setenv("JOBHUNTER_INTERESTED_WEB_RESEARCH", "true")
+    monkeypatch.setattr(flow, "web_search_results", lambda query, **kwargs: [])
+    monkeypatch.setattr(flow, "fetch_verified_company_pages", lambda *args, **kwargs: [])
+    monkeypatch.setattr(jobhunter_research, "default_fetch", lambda url, **kwargs: None)
+    db = tmp_path / "jobs.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, title TEXT, company TEXT, location TEXT, salary TEXT, "
+                 "url TEXT, source TEXT, description TEXT)")
+    conn.execute("INSERT INTO jobs VALUES ('sdj-1', 'Senior Software Engineer', 'Acme', 'Madrid, Spain', "
+                 "'€70k–90k / year', 'https://example.com/job', 'Spain Dev Jobs', 'Build services.')")
+    conn.commit()
+    conn.close()
+
+    message = flow.render_research_dry_run("sdj-1", db_path=db)
+
+    assert "Published: €70k–90k / year (Spain Dev Jobs)" in message
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT basis, ask_amount FROM job_research WHERE job_id = 'sdj-1'").fetchone()
+    conn.close()
+    assert row == ("published", 85000)

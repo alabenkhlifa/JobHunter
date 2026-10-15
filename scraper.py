@@ -2201,7 +2201,8 @@ def extract_min_experience(text):
 
 SALARY_LOCATION_GROUPS = {
     "uae": ("united arab emirates", "uae", "dubai", "abu dhabi", "sharjah"),
-    "spain": ("spain", "madrid", "barcelona"),
+    "spain": ("spain", "espa\u00f1a", "espana", "madrid", "barcelona", "valencia", "val\u00e8ncia",
+              "sevilla", "seville", "m\u00e1laga", "malaga", "bilbao", "zaragoza"),
     "netherlands": ("netherlands", "amsterdam", "rotterdam"),
     "saudi_arabia": ("saudi arabia", "ksa", "riyadh", "jeddah"),
     "uk": ("united kingdom", "uk", "london"),
@@ -2229,7 +2230,8 @@ def _salary_location_label(text, match_start):
     if not match:
         return ""
     label = match.group(1).strip()
-    if label.lower() in {"salary", "pay", "base pay", "compensation", "package", "benefits"}:
+    if label.lower() in {"salary", "pay", "base pay", "compensation", "package", "benefits", "salary range",
+                         "salario", "sueldo", "banda salarial", "rango salarial", "beneficios"}:
         return ""
     return label
 
@@ -2247,7 +2249,10 @@ def _salary_matches_job_location(label, job_location):
 _SALARY_PAY_CONTEXT = re.compile(
     r"\b(?:salar(?:y|ies)|base pay|base compensation|total compensation|"
     r"compensation|remuneration|wages?|pay|per month|monthly|per year|"
-    r"per annum|annual pay)\b|/(?:month|mo|year|yr)\b",
+    r"per annum|annual pay|gross|"
+    r"salario|sueldo|retribuci[o\u00f3]n|remuneraci[o\u00f3]n|banda salarial|rango salarial|"
+    r"brut[oa]s?|anual(?:es)?|mensual(?:es)?|al a\u00f1o|al mes|por a\u00f1o|por mes|pagas)\b"
+    r"|/(?:month|mo|year|yr|a\u00f1o|mes)\b",
     re.IGNORECASE,
 )
 _SALARY_BENEFIT_CONTEXT = re.compile(
@@ -2275,15 +2280,36 @@ def _salary_has_pay_context(text, start, end):
     return pay_distance is not None and (benefit_distance is None or pay_distance < benefit_distance)
 
 
+# Regex fragments shared by the salary patterns. Amounts may use English
+# (45,000) or European (45.000 / 45.000,00) grouping, or a k suffix; the
+# currency may sit on either side of the amount and Spanish period words
+# (brutos anuales, al mes, /mes) count as the pay period.
+_SALARY_CURRENCY = r"(?:(?:aed|usd|sar|chf|gbp|eur(?:os?)?)(?![a-z])|us\$|\$|\u00a3|\u20ac)"
+_SALARY_NUMBER = r"(?:\d{1,3}(?:[.,]\d{3})+(?:,\d{2})?(?!\d)|\d{4,}|\d+(?:[.,]\d+)?[kK](?![a-z]))"
+_SALARY_RANGE_SEP = r"\s*(?:-|\u2013|\u2014|to|a|hasta)\s*"
+_SALARY_PERIOD = (
+    r"(?:\s*(?:per\s+(?:month|year|annum)|p\.?[am]\.?(?![a-z])|monthly|annually"
+    r"|(?:gross\s*)?/\s*(?:month|year|mo|yr|a\u00f1o|mes)\b"
+    r"|gross(?:\s+(?:per\s+)?(?:year|annual(?:ly)?|month))?"
+    r"|brut[oa]s?(?:\s+(?:anuales?|mensuales?|al\s+(?:a\u00f1o|mes)))?"
+    r"|anuales?|mensuales?|(?:al|por)\s+(?:a\u00f1o|mes)))?"
+)
+_SALARY_LABEL = (
+    r"(?:salary|compensation|pay|package|salario|sueldo|retribuci[o\u00f3]n|"
+    r"remuneraci[o\u00f3]n|banda\s+salarial|rango\s+salarial)"
+)
+
+
 def extract_salary(text, job_location=""):
     """Extract pay for the job's location, excluding nearby benefit allowances."""
+    cur, num, sep, period = _SALARY_CURRENCY, _SALARY_NUMBER, _SALARY_RANGE_SEP, _SALARY_PERIOD
     patterns = [
-        # Currency then amount: "AED 25,000 - 40,000" or "$90k - $120k" (min 4 digits or k suffix)
-        r'(?:aed|usd|sar|us\$|\$|£|€)\s*(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:aed|usd|sar|us\$|\$|£|€)?\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK]))?\s*(?:per\s+(?:month|year|annum)|p\.?[am]\.?|monthly|annually|\/\s*(?:month|year|mo|yr))?',
-        # Amount then currency: "25,000 - 40,000 AED"
-        r'(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*)?(?:aed|usd|sar|us\$|\$|£|€)\s*(?:per\s+(?:month|year|annum)|monthly|annually)?',
-        # "salary: AED 25,000" or "compensation: 25,000 - 40,000"
-        r'(?:salary|compensation|pay|package)\s*(?:range)?[\s:]+(?:aed|usd|sar|us\$|\$|£|€)?\s*(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:aed|usd|sar|us\$|\$|£|€)?\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK]))?\s*(?:per\s+(?:month|year|annum)|p\.?[am]\.?|monthly|annually|\/\s*(?:month|year|mo|yr))?',
+        # Currency then amount: "AED 25,000 - 40,000", "$90k - $120k", "EUR 50,000 - 60,000 per year"
+        rf"{cur}\s*{num}(?:{sep}{cur}?\s*{num})?{period}",
+        # Amount then currency: "25,000 - 40,000 AED", "45.000 - 55.000 \u20ac brutos anuales", "3.500 \u20ac/mes"
+        rf"{num}\s*{cur}?(?:{sep}{num}\s*)?{cur}{period}",
+        # "salary: AED 25,000", "Salario: 50.000\u20ac - 60.000\u20ac", "compensation: 25,000 - 40,000"
+        rf"{_SALARY_LABEL}\s*(?:range)?[\s:]+{cur}?\s*{num}\s*{cur}?(?:{sep}{cur}?\s*{num}\s*{cur}?)?{period}",
     ]
     matches = []
     for pattern in patterns:
