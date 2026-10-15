@@ -397,6 +397,34 @@ Security notes:
 - Do not share browser profiles, cookies, or remote-debugging ports outside the machine.
 - The agent may continue after the user finishes the CAPTCHA, but it should never solve the CAPTCHA itself.
 
+### Auto-apply (autopilot)
+
+The autopilot (`jobhunter_autopilot/`) lets the engine submit without a per-application approval, but only for jobs its policy selects and only through `--policy-run` actions, which `jobhunter_autopilot.gate` authorizes (refusal exits 4). It is disabled by default.
+
+1. Check the policy and fill missing application facts (visa, notice period, …) that forms ask for:
+
+   ```bash
+   python -m jobhunter_autopilot.cli config show
+   python -m jobhunter_autopilot.cli config defaults set notice_period="1 month" requires_visa_sponsorship=no
+   python -m jobhunter_autopilot.cli plan --dry-run   # read-only; lists preflight.missing_application_defaults
+   ```
+
+   The policy lives in `~/.jobhunter/state/auto_apply.json` (0600). Change it only with `config set K=V` (`min_score`, `max_per_day`, `roles`, `locations.cities`, `companies.allow`, `companies.deny`, `preferred_stack`), `enable`, `disable`, `pause [--until DATE]`, `resume`, `live`, `rehearsal`, `reset`.
+2. Install the Hermes skill `auto-apply` and the wrapper scripts `jobhunter_autopilot.py`, `jobhunter_autopilot_review_batch.py`, `jobhunter_autopilot_plan.py` under `~/.hermes/`, then start a new Hermes session so the skill is visible. In Telegram, plain phrases such as "auto apply settings", "set auto apply min score 80", "enable auto apply" or "auto apply go live" run the matching `config` command.
+3. Create the two cron jobs (full commands in the `auto-apply` skill, "Operator setup"):
+
+   ```bash
+   hermes cron create "0 20 * * *" "<review prompt>" --name jobhunter-autopilot-review --deliver telegram \
+     --skill job-hunter --skill auto-apply --script jobhunter_autopilot_review_batch.py \
+     --workdir /path/to/JobHunter --model <model> --provider <provider>
+   hermes cron create "40 20 * * *" "<apply prompt>" --name jobhunter-autopilot-apply --deliver telegram \
+     --skill job-hunter --skill auto-apply --script jobhunter_autopilot_plan.py \
+     --workdir /path/to/JobHunter --model <model> --provider <provider>
+   ```
+
+   The plan pre-run does selection, availability checks, salary/company research, packages and answers before the agent starts, so the agent's terminal timeout does not cut them off.
+4. Rehearsal → live: `config enable` turns it on in `rehearsal` mode (every form filled, final submit refused, screenshot saved, summary sent). After checking a few rehearsals, `config set max_per_day=1` and `config live`. A submit counts as `submitted` only after `verify-receipt` confirms the portal receipt; raise the cap once a few live runs look right.
+
 ## 9. Privacy Notice / Terms & Conditions gates
 
 When an ATS asks for a Privacy Notice, Terms & Conditions, certification, or similar legal acknowledgement:

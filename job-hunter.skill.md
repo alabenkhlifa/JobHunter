@@ -565,6 +565,26 @@ For each candidate job, the scraper fetches the full description and extracts:
    an unlabeled field. If a custom widget fails, pause and report the blocker;
    do not manipulate site-specific React internals to bypass it.
 
+### Autopilot exception
+
+The explicit-approval rules above have one exception: the autopilot (skill
+`auto-apply`, Hermes crons `jobhunter-autopilot-review` and
+`jobhunter-autopilot-apply`). When the owner has enabled it, the policy in
+`~/.jobhunter/state/auto_apply.json` is his standing approval for jobs that pass
+its gate (effective score ≥ `min_score`, reviewer verdict `send`, role,
+location and company filters, daily cap). The exception covers only jobs listed
+in that night's autopilot plan, only values from the plan's `answers`, and only
+the engine's `--policy-run` commands, which the policy gate can refuse (exit 4).
+`mode: rehearsal` fills forms but never submits; only `live` submits.
+Everything else in this skill still applies: no fabricated or guessed answers,
+no CAPTCHA/phone/identity bypass, no answers where the employer forbids AI, no
+LinkedIn Easy Apply, a verified receipt before `submitted`, and no retry after
+`submission_attempted`. Any hard stop records `blocked_auto_apply` and hands the
+job to the manual flow above through its research card. Outside the autopilot
+crons, Interested, Apply, Proceed and final-submit approval stay separate,
+explicit decisions; never use `--policy-run` or the autopilot policy to skip
+them.
+
 ### Package content checks after Apply
 
 The automated Apply route owns package generation. Review its output against

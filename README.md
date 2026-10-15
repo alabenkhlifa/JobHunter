@@ -311,6 +311,16 @@ Auto-sync failures are logged but do not block application progress; SQLite rema
 
 When enabled, the mail monitor retries tracker sync after every scheduled check, including checks with no new replies. An unsuccessful retry is reported through the cron job's failure delivery. Back up the tracker token and `tracker_drive_files.json`, `tracker_sync_state.json`, and `tracker_before_sync.json` from the private state directory in encrypted recovery.
 
+## Auto-apply (autopilot)
+
+Optional unattended applying for jobs that match a policy. Off by default.
+
+- **What it does**: a nightly review run records `send`/`hold`/`reject` verdicts for policy candidates (same rules as the digest review); an apply run then picks jobs with effective score ≥ `min_score` and verdict `send`, within role/location/company filters and a daily cap, checks they are still open, researches salary and company, builds the package and form answers, and has the agent fill and submit the external ATS form. Each submit is recorded as `submitted` only after a verified receipt, synced to the Sheet, and reported on Telegram with the expected salary and company summary. Hard stops (CAPTCHA, phone/identity checks, "no AI" questions, unanswerable required fields, LinkedIn Easy Apply, unverified receipt, …) record `blocked_auto_apply` and send the normal research card for a manual finish.
+- **Policy file**: `~/.jobhunter/state/auto_apply.json` (0600, outside the repo). Defaults: disabled, `mode: rehearsal`, `min_score` 75, `max_per_day` 3, roles `senior_software_engineer`, `lead_software_engineer`, Spain. Manage it only through `python -m jobhunter_autopilot.cli config show|set K=V|enable|disable|pause|resume|live|rehearsal|reset|defaults set K=V`.
+- **Telegram**: with the Hermes `auto-apply` skill installed, plain phrases work: "auto apply settings", "set auto apply min score 80", "auto apply max 5 per day", "auto apply only Madrid and Valencia", "never auto apply to Acme", "enable auto apply", "pause auto apply", "auto apply go live", "my notice period is 1 month".
+- **Cron**: two Hermes cron jobs, `jobhunter-autopilot-review` (20:00) and `jobhunter-autopilot-apply` (20:40), with pre-run scripts `jobhunter_autopilot_review_batch.py` and `jobhunter_autopilot_plan.py`. See [setup.md](setup.md#auto-apply-autopilot).
+- **Rehearsal → live**: `enable` starts in rehearsal (forms filled, final submit refused by the policy gate, screenshot kept). Check a few rehearsals, then `live` with `max_per_day=1`, and raise the cap later.
+
 ## Safety model
 
 JobHunter should never:

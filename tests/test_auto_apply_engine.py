@@ -453,3 +453,43 @@ def test_container_upload_still_requires_explicit_confirmation(tmp_path):
     with pytest.raises(PermissionError, match="explicit approval"):
         engine.upload_file("job-1", '[id="resume"]', str(document), approved=False)
     client.upload_file.assert_not_called()
+
+
+@pytest.mark.parametrize("heading,title,company,location,expected", [
+    ("Senior Backend Engineer – Madrid", "Senior Backend Engineer", "Acme", None, True),
+    ("Senior Backend Engineer - Valencia (Hybrid)", "Senior Backend Engineer", "Acme", None, True),
+    ("Senior Backend Engineer (Remote)", "Senior Backend Engineer", None, None, True),
+    ("Senior Backend Engineer (m/f/d)", "Senior Backend Engineer", "Acme", None, True),
+    ("Senior Backend Engineer (h/m) – Híbrido", "Senior Backend Engineer", "Acme", None, True),
+    # A seniority tag names another posting: never verify a form for it.
+    ("Backend Engineer – Senior", "Backend Engineer", "Acme", None, False),
+    ("Backend Engineer – Junior", "Backend Engineer", "Acme", None, False),
+    ("Senior Backend Engineer at Acme – Barcelona", "Senior Backend Engineer", "Acme", None, True),
+    ("Senior Backend Engineer – Alcobendas", "Senior Backend Engineer", "Acme", "Alcobendas, Spain", True),
+    ("Solicitud para Senior Backend Engineer", "Senior Backend Engineer", "Acme", None, True),
+    ("Candidatura para Senior Backend Engineer – Madrid", "Senior Backend Engineer", "Acme", None, True),
+    ("Senior Backend Engineer", "Senior Backend Engineer - Madrid", "Acme", None, True),
+    ("Senior Backend Engineer – Payments Platform", "Senior Backend Engineer", "Acme", None, False),
+    ("Senior Backend Engineer – Alcobendas", "Senior Backend Engineer", "Acme", None, False),
+    ("Backend Engineer", "Senior Backend Engineer", "Acme", None, False),
+    ("Senior Backend Engineer at Other Co", "Senior Backend Engineer", "Acme", None, False),
+])
+def test_heading_suffix_tolerance(heading, title, company, location, expected):
+    from jobhunter_auto_apply.engine import _heading_matches_job
+    assert _heading_matches_job(heading, title, company, location) is expected
+
+
+@pytest.mark.parametrize("label,expected", [
+    ("Enviar", True), ("Enviar solicitud", True), ("Enviar candidatura", True), ("Aplicar", True),
+    ("Aplicar ahora", True), ("Postularme", True), ("Inscribirme", True), ("Siguiente", True),
+    ("Submit application", True), ("Apply now", True), ("Guardar borrador", False), ("Cancelar", False),
+])
+def test_spanish_submit_labels_make_form_actionable(label, expected):
+    page = inspect_page(FakeClient({**_rendered_form(), "buttons": [{"text": label, "type": "button"}]}))
+    assert page.actionable_application_form is expected
+
+
+def test_spanish_legal_suffix_still_identifies_employer():
+    from jobhunter_auto_apply.engine import _page_identifies_company
+    assert _page_identifies_company("https://x.test/apply", "Empleo | Acme Labs", [], "Acme Labs S.L.")
+    assert _page_identifies_company("https://jobs.ashbyhq.com/acmelabs/1", "", [], "Acme Labs, S.A.")
