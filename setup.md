@@ -490,6 +490,8 @@ Recommended setup:
 
 The scheduled mail monitor also retries enabled tracker sync after every check, even without new replies, and reports retry failures through cron delivery. Include the separate tracker token and private state files `tracker_drive_files.json`, `tracker_sync_state.json`, and `tracker_before_sync.json` in encrypted recovery. The last file is the sheet snapshot saved before the most recent write; a no-change sync preserves it.
 
+For tracked-offer closure monitoring, first run `python -m jobhunter_integrations.listing_monitor --dry-run` with the existing tracker and Telegram configuration. Then schedule the same module without `--dry-run`; the Pi uses its project-Python wrapper at 17:00 daily Africa/Tunis. It checks all Sheet statuses except `closed` and `rejected`, preserves submitted applications, and displays confirmed closures as slate-gray `closed` rows (`#B7C2CC`). Closure records and pending Telegram alerts live in `tracker_listing_closures` inside the existing jobs database; include that database in the normal backup. Use `--use-recorded-closures` once to import existing audited closure records. Never infer closure from a timeout, login wall or unsupported page. Sheet synchronization and exact read-back precede Telegram delivery; failed deliveries retry on the next run. The monitor reports sanitized failures to Telegram and its private cron log.
+
 Useful formatting for the tracker:
 
 Keep the 14 columns above in that order. The reference palette is header `#E2ECFD`, submitted `#D7EED3`, interested `#E6DBF7`, preparation/progression `#D5E4FC`, blocked `#F7E1C3`, and rejected `#F3D4CD`. Status colors cover A:N.

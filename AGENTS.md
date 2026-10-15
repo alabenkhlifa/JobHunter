@@ -58,6 +58,9 @@ Routine email-code verification for an already-approved application must use the
 
 ## Development rules
 
+- Deliver Pi changes through Git: commit and push the task-owned changes in this repository and the RaspberryPi configuration repository before deployment. Uncommitted SSH copies are not a completed deployment.
+- Inspect local and Pi status and compare the pushed commit's exact deployment files or hunks with the Pi. Preserve concurrent edits, private state and unpublished Pi commits. For a dirty or diverged Pi checkout, use an isolated checkout of the pushed commit and apply only reviewed, task-owned changes after checking their current contents; never force-pull, reset, discard, stash or replace the dirty checkout.
+- Verify the applied runtime behavior and report the pushed commit IDs separately from Pi deployment verification.
 - Prefer small, testable changes.
 - Add/update tests for new behavior.
 - Run `python -m pytest -q tests` before claiming success.

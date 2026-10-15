@@ -49,6 +49,7 @@ STATUS_PALETTE = {
     "amber": {"red": 1.0, "green": 0.93, "blue": 0.72},
     "purple": {"red": 230 / 255, "green": 219 / 255, "blue": 247 / 255},  # #E6DBF7
     "grey": {"red": 0.92, "green": 0.92, "blue": 0.92},
+    "closed": {"red": 183 / 255, "green": 194 / 255, "blue": 204 / 255},
     "neutral": {"red": 0.95, "green": 0.96, "blue": 0.98},
 }
 
@@ -117,6 +118,8 @@ def first_match(folder: Path | None, patterns: list[str]) -> str:
 
 def next_action(stage: str, error: str | None) -> str:
     stage = stage or ""
+    if stage == "closed":
+        return "Listing closed; retain application history"
     if stage == "submitted":
         return "Monitor Gmail / ATS replies"
     if stage == "rejected":
@@ -142,6 +145,8 @@ def next_action(stage: str, error: str | None) -> str:
 
 def status_color(status: str) -> dict[str, float]:
     s = (status or "").strip().lower()
+    if s == "closed":
+        return STATUS_PALETTE["closed"]
     if s in {"submitted", "submission_result"}:
         return STATUS_PALETTE["green"]
     if s == "offer_received":

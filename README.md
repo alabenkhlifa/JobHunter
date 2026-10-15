@@ -238,7 +238,9 @@ Recommended permissions:
 
 Recommended formatting includes wrapped text, taller rows, frozen headers, `dd/mm/yyyy hh:mm`-style dates, and a non-white color for every application row: green for `submitted`/`offer_received`, red for `rejected`/failures, orange for blockers, blue for application progression/interviews/package states, amber for assessments/actions, purple for `interested`, grey for closed/skipped states, and light blue-grey for new or unknown statuses.
 
-The tracker preserves its 14 columns in the order shown above. The reference palette is header `#E2ECFD`, submitted `#D7EED3`, interested `#E6DBF7`, preparation/progression `#D5E4FC`, blocked `#F7E1C3`, and rejected `#F3D4CD`. Status colors cover the full row from A through N.
+The tracker preserves its 14 columns in the order shown above. The reference palette is header `#E2ECFD`, submitted `#D7EED3`, interested `#E6DBF7`, preparation/progression `#D5E4FC`, blocked `#F7E1C3`, rejected `#F3D4CD`, and closed `#B7C2CC`. Status colors cover the full row from A through N.
+
+`python -m jobhunter_integrations.listing_monitor` checks every offer present in the configured tracker except rows already `closed` or `rejected`. Confirmed closures appear as `closed` in slate gray, retain the previous application status in Notes, and send a Telegram alert only after verified Sheet synchronization. Submissions, timestamps, documents and recruiter outcomes remain in the database. Timeouts, login walls and unsupported sources remain unverified and are retried; they never prove closure. A locked SQLite ledger retries failed syncs and alerts without resending acknowledged notifications. `--dry-run` checks without changing the database, Sheet or Telegram; `--use-recorded-closures` imports previously audited database closures during initial setup. The Pi schedules the monitor at 17:00 daily Africa/Tunis.
 
 Authorize the tracker using the existing Desktop client and configured jobs account:
 
