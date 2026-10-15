@@ -674,6 +674,30 @@ def test_employer_highlights_reject_unattributed_or_missing_evidence():
         _pdf(profile)
 
 
+@pytest.mark.parametrize("company", ["MaibornWolff GmbH", "Talan Tunisie", "VERSE"])
+def test_resume_omits_all_employer_and_school_images_and_reclaims_their_gutters(company):
+    fitz = pytest.importorskip("fitz")
+    profile = {"name": "Candidate", "experience": [{
+        "title": "Software Engineer", "company": company,
+        "company_url": "https://company.example", "dates": "2020 - Present",
+        "bullets": ["Built backend services."]}],
+        "education": [
+            {"degree": "Engineering Diploma", "school": "ESPRIT", "dates": "2016 - 2019"},
+            {"degree": "Bachelor's Degree", "school": "ISIMM", "dates": "2012 - 2016"},
+        ]}
+    pdf = ResumePDF(profile);pdf.render()
+    output = bytes(pdf.output())
+    with fitz.open(stream=output, filetype="pdf") as document:
+        assert all(not page.get_images(full=True) for page in document)
+        text = " ".join(page.get_text() for page in document)
+        assert company in text and "ESPRIT" in text and "ISIMM" in text
+        role = document[0].search_for("Software Engineer")[0]
+        assert abs(role.x0 - pdf.MAIN_X) < 1
+        school_boxes = [box for page in document for box in page.search_for("ESPRIT")]
+        assert school_boxes and abs(school_boxes[0].x0 - pdf.SIDE_X) < 1
+    assert "https://company.example" in _links(PdfReader(BytesIO(output)))
+
+
 def test_grouped_company_uses_one_header_and_only_engagement_bullets():
     fitz = pytest.importorskip("fitz")
     class RecordingResumePDF(ResumePDF):
@@ -709,7 +733,7 @@ def test_grouped_company_uses_one_header_and_only_engagement_bullets():
     document = fitz.open(stream=bytes(pdf.output()), filetype="pdf")
     text = "\n".join(page.get_text() for page in document)
 
-    assert pdf.company_logos == ["maibornwolff.png"]
+    assert pdf.company_logos == []
     assert text.count("MaibornWolff GmbH") == 1
     assert "Parent bullet must not render" not in text
     assert all(part in text for part in (
@@ -723,7 +747,7 @@ def test_grouped_company_uses_one_header_and_only_engagement_bullets():
     assert text.index("MSR-Electronic") < text.index("GIZ - African")
 
 
-def test_grouped_engagements_paginate_without_clipping_or_repeating_logo():
+def test_grouped_engagements_paginate_without_clipping_or_logos():
     fitz = pytest.importorskip("fitz")
     class RecordingResumePDF(ResumePDF):
         def __init__(self, profile):
@@ -756,7 +780,7 @@ def test_grouped_engagements_paginate_without_clipping_or_repeating_logo():
     text = "\n".join(page.get_text() for page in document)
 
     assert len(document) >= 2
-    assert pdf.company_logos == 1
+    assert pdf.company_logos == 0
     assert "MaibornWolff GmbH (continued)" in text
     for index in range(6):
         assert f"Client Engagement {index}" in text

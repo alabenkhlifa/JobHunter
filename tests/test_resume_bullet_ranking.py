@@ -69,3 +69,27 @@ def test_ties_empty_inputs_and_irrelevant_bullets_keep_source_order():
 def test_architecture_title_alone_does_not_create_a_team_leadership_requirement():
     assert responsibility_weights("Design cloud services", "Software Architect")["leadership"] == 0
     assert responsibility_weights("Lead a team of engineers", "Software Architect")["leadership"] > 0
+
+
+def test_testing_is_not_ownership_or_delivered_integration_work():
+    match = bullet_match("Developed services using TDD with integration and end-to-end tests.",
+                         "Own Java backend services, integrations and automated testing.",
+                         "Backend Engineer", quality=True)
+    assert "quality" in match.facets
+    assert "ownership" not in match.facets
+    assert "integrations" not in match.facets
+
+
+def test_api_management_and_reverse_engineering_are_not_people_leadership():
+    match = bullet_match("Reverse-engineered Azure into Terraform for load tests across API Management.",
+                         "Lead engineers and deliver Azure backend infrastructure with tests.",
+                         "Lead Engineer", quality=True)
+    assert "leadership" not in match.facets
+    assert "leadership" in bullet_match("Led a team of four engineers building backend services.",
+                                       "Lead engineers delivering backend services.", "Lead Engineer", quality=True).facets
+
+
+def test_overall_service_scope_outranks_ownership_of_one_integration():
+    from resume_bullet_ranking import project_scope_priority
+    assert project_scope_priority("Owned and maintained five Java microservices on AWS.") > project_scope_priority(
+        "Owned the backend integration with a CRM through MQTT events.")

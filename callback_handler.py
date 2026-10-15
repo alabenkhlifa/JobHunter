@@ -375,7 +375,7 @@ def handle_interested(job_id, callback_query_id=None):
     return sent
 
 
-def handle_apply(job_id, callback_query_id=None, *, include_cover_letter=False, cover_letter_draft=None):
+def handle_apply(job_id, callback_query_id=None, *, include_cover_letter=False, cover_letter_draft=None, resume_summary_draft=None):
     job = get_job(job_id)
     if not job:
         report_action_failure(callback_query_id, "Job not found", "⚠️ This job is no longer in JobHunter. Request its details again.")
@@ -418,6 +418,8 @@ def handle_apply(job_id, callback_query_id=None, *, include_cover_letter=False, 
         }
         if cover_letter_draft is not None:
             package_options["cover_letter_draft"] = cover_letter_draft
+        if resume_summary_draft is not None:
+            package_options["resume_summary_draft"] = resume_summary_draft
         package = interest_flow.prepare_application_package(job_id, **package_options)
     except interest_flow.TailoringReadinessError as exc:
         sent = send_message(
@@ -666,6 +668,7 @@ def main(argv=None):
     parser.add_argument("--callback-query-id", metavar="ID", help="Optional callback query ID if it has not been answered")
     parser.add_argument("--cover-letter", action="store_true", help="With --apply, also generate a cover letter when needed")
     parser.add_argument("--cover-draft", metavar="PATH", help="Private reviewed JSON draft for --apply --cover-letter")
+    parser.add_argument("--resume-summary-draft", metavar="PATH", help="Private reviewed summary JSON for --apply")
     args = parser.parse_args(argv)
 
     if args.cover_letter and not args.apply:
@@ -674,6 +677,8 @@ def main(argv=None):
         parser.error("--cover-letter requires a reviewed JSON draft: --cover-draft data/cover-drafts/JOB_ID.json")
     if args.cover_draft and not (args.apply and args.cover_letter):
         parser.error("--cover-draft requires --apply and --cover-letter")
+    if args.resume_summary_draft and not args.apply:
+        parser.error("--resume-summary-draft requires --apply")
     if args.callback_data is not None:
         return dispatch_callback_data(args.callback_data, args.callback_query_id)
     if args.callback_query_id:
@@ -694,6 +699,15 @@ def main(argv=None):
             except (OSError, ValueError):
                 parser.error("--cover-draft is not readable JSON")
         options = {"include_cover_letter": args.cover_letter}
+        if args.resume_summary_draft:
+            summary_path = Path(args.resume_summary_draft).resolve()
+            summary_root = (OUTPUT_DIR.parent / "resume-drafts").resolve()
+            if not summary_path.is_relative_to(summary_root) or summary_path.suffix != ".json" or not summary_path.is_file() or summary_path.stat().st_size > 20000:
+                parser.error("--resume-summary-draft requires a private JSON file under data/resume-drafts and 20 KB")
+            try:
+                options["resume_summary_draft"] = json.loads(summary_path.read_text())
+            except (OSError, ValueError):
+                parser.error("--resume-summary-draft is not readable JSON")
         if draft is not None:
             options["cover_letter_draft"] = draft
         return 0 if handle_apply(args.apply, **options) else 1

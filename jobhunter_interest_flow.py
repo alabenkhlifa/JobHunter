@@ -32,6 +32,8 @@ from typing import Any
 import job_scoring
 import scraper
 from resume_bullet_ranking import bullet_match, order_bullet_indexes
+from resume_inline import normalized_text
+import resume_quality
 from resume_refiner import (
     apply_resume_variant,
     project_public_resume,
@@ -1684,11 +1686,17 @@ def _bullet_duplicate_key(bullet: str) -> str:
     return value
 
 
-def _ranked_distinct_bullets(bullets: list[str], job_text: str, limit: int, job_title: str = "") -> list[str]:
+def _ranked_distinct_bullets(bullets: list[str], job_text: str, limit: int, job_title: str = "", *, quality=False, profile=None) -> list[str]:
     if limit <= 0:
         return []
+    if quality and profile is not None:
+        bullets = resume_quality.distinct_wording(bullets, profile)
+        relevant = [b for b in bullets if bullet_match(b, job_text, job_title, quality=True).facets or any(
+            _contains_relevance_term(job_text, term) and _contains_relevance_term(_normalized_relevance_text(b), term)
+            for term in _HARD_SKILL_TERMS)]
+        bullets = relevant or bullets[:1]
     selected, seen = [], set()
-    for index in order_bullet_indexes(bullets, job_text, job_title):
+    for index in order_bullet_indexes(bullets, job_text, job_title, quality=quality):
         key = _bullet_duplicate_key(bullets[index])
         if key not in seen:
             selected.append(bullets[index])
@@ -1717,6 +1725,7 @@ def _tailored_experience(
     profile: dict[str, Any],
     job_text: str,
     job_title: str = "",
+    *, quality=False,
 ) -> list[dict[str, Any]]:
     projected = project_public_resume(profile).get("experience") or []
     resume_evidence: dict[str, list[str]] = {}
@@ -1738,8 +1747,9 @@ def _tailored_experience(
     tailored_experience: list[dict[str, Any]] = []
     for ranked_index, (source_index, source) in enumerate(ranked_sources):
         experience = json.loads(json.dumps(projected[source_index]))
-        limit = 4 if ranked_index < 3 else 2
-        experience["bullets"] = _ranked_distinct_bullets(candidates[source_index], job_text, limit, job_title)
+        limit = len(candidates[source_index]) if quality else 4 if ranked_index < 3 else 2
+        experience["bullets"] = _ranked_distinct_bullets(candidates[source_index], job_text, limit, job_title,
+                                                       quality=quality, profile=profile)
         if experience.get("tech"):
             experience["tech"] = _focused_tech_keywords(
                 experience["tech"], experience["bullets"], job_text,
@@ -1775,6 +1785,23 @@ def _resume_location(profile_location: str, job_location: Any) -> str:
     return f"{home} {_LOCATION_SEPARATOR} Relocating to {places[0]}"
 
 
+def _prepare_variant_resume(payload, profile, job, *, quality=False):
+    """Use the same presentation rules for previews and selected variants."""
+    job_text = _job_relevance_text(job)
+    job_title = str(job.get("title") or "")
+    payload["experience"] = _filter_optional_experiences(
+        sorted(payload.get("experience") or [], key=lambda item: _experience_chronology_key(item, 0)),
+        job_text, job_title,
+    )
+    payload["experience"] = _group_company_experiences(
+        payload["experience"], profile, job_text, job_title, preserve_variant=True, quality=quality,
+    )
+    _prioritize_resume_bullets(payload, job_text, job_title, quality=quality, profile=profile)
+    if profile.get("location"):
+        payload["location"] = _resume_location(profile["location"], job.get("location"))
+    return resume_quality.presentation(payload, profile, job) if quality else payload
+
+
 def _resume_for_job(
     profile: dict[str, Any],
     job: dict[str, Any],
@@ -1786,62 +1813,61 @@ def _resume_for_job(
     generated, or built for a specific job/company in the resume content.
     """
     validate_profile(profile)
+    quality = resume_quality.enabled(profile)
     job_text = _job_relevance_text(job)
     job_title = str(job.get("title") or "")
     variant = select_resume_variant(profile, job_text, job_title=job_title)
     if variant is not None:
         tailored_variant = apply_resume_variant(profile, variant)
-        tailored_variant["experience"] = _filter_optional_experiences(
-            sorted(
-                tailored_variant.get("experience") or [],
-                key=lambda item: _experience_chronology_key(item, 0),
-            ),
-            job_text,
-            job_title,
-        )
-        tailored_variant["experience"] = _group_company_experiences(
-            tailored_variant["experience"], profile, job_text, job_title,
-            preserve_variant=True,
-        )
-        _prioritize_resume_bullets(tailored_variant, job_text, job_title)
-        if profile.get("location"):
-            tailored_variant["location"] = _resume_location(profile["location"], job.get("location"))
-        return tailored_variant, variant
+        return _prepare_variant_resume(tailored_variant, profile, job, quality=quality), variant
 
     tailored = project_public_resume(profile)
-    if profile.get("summary"):
+    if profile.get("summary") and not quality:
         tailored["summary"] = _focused_summary(str(profile["summary"]), job_text, job_title, limit=3)
     skills = profile.get("skills") or {}
     tailored["skills"] = {
-        category: _ranked_skills(list(values), job_text)[:_skill_limit(category)]
+        category: _ranked_skills(list(values), job_text)[:None if quality else _skill_limit(category)]
         if isinstance(values, list) else values
         for _, (category, values) in sorted(
             enumerate(skills.items()),
             key=lambda item: (-_skill_category_score(item[1][0], item[1][1], job_text, job_title), item[0]),
         )
     }
-    tailored["experience"] = _tailored_experience(profile, job_text, job_title)
+    tailored["experience"] = _tailored_experience(profile, job_text, job_title, quality=quality)
     tailored["experience"] = _group_company_experiences(
         tailored["experience"], profile, job_text, job_title,
         summary=str(tailored.get("summary") or ""),
+        quality=quality,
     )
-    _prioritize_resume_bullets(tailored, job_text, job_title)
+    _prioritize_resume_bullets(tailored, job_text, job_title, quality=quality, profile=profile)
     if profile.get("location"):
         tailored["location"] = _resume_location(profile["location"], job.get("location"))
-    return tailored, None
+    return (resume_quality.presentation(tailored, profile, job) if quality else tailored), None
 
 
-def _prioritize_resume_bullets(resume, job_text, job_title):
+def _prioritize_resume_bullets(resume, job_text, job_title, *, quality=False, profile=None):
     for role in resume.get("experience") or []:
         engagements = role.get("engagements") or []
         for item in engagements or [role]:
             bullets = item.get("bullets") or []
-            item["bullets"] = [bullets[index] for index in order_bullet_indexes(bullets, job_text, job_title)]
+            if quality and profile is not None:
+                bullets = resume_quality.distinct_wording(bullets, profile)
+            opening = (resume_quality.project_opening_bullets(profile, role.get("company"), item.get("name"), bullets)
+                       if quality and profile is not None and engagements else [])
+            item["bullets"] = [bullets[index] for index in order_bullet_indexes(bullets, job_text, job_title, quality=quality)]
+            if quality and profile is not None and engagements:
+                present = {normalized_text(b): b for b in item["bullets"]}
+                first = [present[normalized_text(b)] for b in opening if normalized_text(b) in present]
+                item["bullets"] = first + [b for b in item["bullets"] if b not in first]
         if not engagements:
             continue
+        _order_client_engagements(role, job_text, job_title, quality=quality)
         records = [(item["name"], bullet) for item in engagements for bullet in item.get("bullets") or []]
-        indexes = order_bullet_indexes([bullet for _, bullet in records], job_text, job_title)
+        indexes = order_bullet_indexes([bullet for _, bullet in records], job_text, job_title, quality=quality)
         role["bullets"] = [records[index][1] for index in indexes]
+        if quality and (profile or {}).get("resume_quality", {}).get("group_bullets_by_client"):
+            role.pop("highlights", None)
+            continue
         names = [item.get("name") for item in engagements]
         if len(set(names)) > 1 and len(set(names)) == len(names) and all(names):
             role["highlights"] = [
@@ -1887,6 +1913,9 @@ _ARCHITECT_ROLE_PATTERN = re.compile(r"\barchitect(?:ure)?\b", re.IGNORECASE)
 
 def _start_month(value: Any) -> tuple[int, int] | None:
     text = str(value or "")
+    numeric = re.search(r"\b(0?[1-9]|1[0-2])/(\d{4})\b", text)
+    if numeric:
+        return int(numeric.group(2)), int(numeric.group(1))
     month_match = _MONTH_YEAR_PATTERN.search(text)
     if month_match:
         return int(month_match.group(2)), _MONTH_NUMBERS[month_match.group(1).lower()]
@@ -1900,6 +1929,9 @@ def _end_month(value: Any) -> tuple[int, int] | None:
     text = str(value or "")
     if _CURRENT_DATE_PATTERN.search(text):
         return 9999, 12
+    numeric = list(re.finditer(r"\b(0?[1-9]|1[0-2])/(\d{4})\b", text))
+    if numeric:
+        return int(numeric[-1].group(2)), int(numeric[-1].group(1))
     month_matches = list(_MONTH_YEAR_PATTERN.finditer(text))
     if month_matches:
         last = month_matches[-1]
@@ -1914,6 +1946,42 @@ def _experience_chronology_key(experience: dict[str, Any], source_index: int) ->
     end = _end_month(experience.get("dates")) or (0, 0)
     start = _start_month(experience.get("dates")) or (0, 0)
     return -end[0], -end[1], -start[0], -start[1], source_index
+
+
+def _order_client_engagements(role, job_text, job_title, *, quality=False):
+    """Order MaibornWolff's selected public projects by fit; dates break ties."""
+    if _normalized_relevance_text(role.get("company")) != "maibornwolff gmbh":
+        return
+    engagements = role.get("engagements") or []
+    if len(engagements) < 2:
+        role.pop("project_order", None)
+        return
+    job_text = _normalized_relevance_text(f"{job_title} {job_text}")
+
+    def score(item):
+        public_stack = " ".join(str(item.get(k) or "") for k in ("name", "tech"))
+        stack = _normalized_relevance_text(" ".join([public_stack, *(str(b) for b in item.get("bullets") or [])]))
+        matching_skills = {term for term in _HARD_SKILL_TERMS
+            if _contains_relevance_term(job_text, term) and _contains_relevance_term(stack, term)}
+        # Count a framework once rather than separately matching its short name.
+        matching_skills = {term for term in matching_skills if not any(
+            term != other and _contains_relevance_term(other, term) for other in matching_skills)}
+        node_aliases = ("nodejs", "node js", "node.js", "nestjs")
+        if any(_contains_relevance_term(job_text, term) for term in node_aliases) and any(
+            _contains_relevance_term(stack, term) for term in node_aliases):
+            matching_skills.difference_update(node_aliases)
+            matching_skills.add("node_backend")
+        evidence_scores = sorted(
+            (bullet_match(str(b), job_text, job_title, quality=quality).score
+             for b in item.get("bullets") or []), reverse=True,
+        )
+        return len(matching_skills), _relevance_score(public_stack, job_text) + sum(evidence_scores[:2])
+
+    engagements[:] = [item for _, item in sorted(
+        enumerate(engagements),
+        key=lambda pair: (*(-value for value in score(pair[1])), *_experience_chronology_key(pair[1], pair[0])),
+    )]
+    role["project_order"] = "relevance"
 
 
 def _filter_optional_experiences(
@@ -1982,6 +2050,7 @@ def _group_company_experiences(
     *,
     preserve_variant: bool = False,
     summary: str = "",
+    quality=False,
 ) -> list[dict[str, Any]]:
     """Present one employer tenure with dated work inside it.
 
@@ -1990,6 +2059,7 @@ def _group_company_experiences(
     always keeps the current engagement and every client the summary names, so
     the tenure shows no recent gap and summary claims keep their evidence.
     """
+    job_text = _normalized_relevance_text(f"{job_title} {job_text}")
     summary_text = _normalized_relevance_text(summary)
 
     def required(engagement: dict[str, Any]) -> bool:
@@ -2031,12 +2101,13 @@ def _group_company_experiences(
             )
             kept = [pair for pair in ranked if required(pair[1])]
             optional = [pair for pair in ranked if not required(pair[1])]
-            ranked = kept + optional[:max(0, _MAX_GROUPED_ENGAGEMENTS - len(kept))]
+            ranked = kept + optional[:None if quality else max(0, _MAX_GROUPED_ENGAGEMENTS - len(kept))]
             engagements = []
             for _, item in ranked:
                 bullets = _ranked_distinct_bullets(
                     [str(bullet) for bullet in item.get("bullets") or []],
-                    job_text, 3, job_title,
+                    job_text, len(item.get("bullets") or []) if quality else 3, job_title,
+                    quality=quality, profile=profile,
                 )
                 engagements.append({
                     "name": str(item.get("name") or ""),
@@ -2057,6 +2128,8 @@ def _group_company_experiences(
             # renderer shows the client sections without their dates.
             "bullets": [bullet for item in engagements for bullet in item["bullets"]],
         }
+        _order_client_engagements(grouped, job_text, job_title, quality=quality)
+        grouped["bullets"] = [bullet for item in engagements for bullet in item["bullets"]]
         result = [item for item in result if _normalized_relevance_text(item.get("company")) != company]
         result.append(grouped)
     ordered = sorted(result, key=lambda item: _experience_chronology_key(item, 0))
@@ -2211,6 +2284,7 @@ def _assert_tailoring_ready(
     profile: dict[str, Any],
     job: dict[str, Any],
     selected_variant: dict[str, Any] | None,
+    *, check_evidence: bool = True,
 ) -> None:
     if _profile_timeline_issues(profile):
         raise TailoringReadinessError(
@@ -2222,6 +2296,15 @@ def _assert_tailoring_ready(
             "No candidate-confirmed resume variant matches this architecture role. "
             "Complete the Software Architect resume variant before generating the package."
         )
+    if check_evidence and selected_variant is not None and resume_quality.enabled(profile):
+        from resume_content_rules import variant_evidence_gaps
+        gaps = variant_evidence_gaps(profile, selected_variant["resume"], job)
+        if gaps:
+            ids = ", ".join(gap["evidence_id"] for gap in gaps)
+            raise TailoringReadinessError(
+                "Resume variant omits relevant confirmed evidence: " + ids +
+                ". Generate an evidence-update preview and review the revised selection before activation."
+            )
 
 
 def _ranked_evidence(
@@ -2802,6 +2885,8 @@ def prepare_application_package(
     render_pdfs: bool = True,
     include_cover_letter: bool = False,
     cover_letter_draft: dict[str, Any] | None = None,
+    resume_summary_draft: dict[str, Any] | None = None,
+    summary_planner=None,
 ) -> ApplicationPackage:
     if type(include_cover_letter) is not bool:
         raise TypeError("include_cover_letter must be a boolean")
@@ -2830,6 +2915,19 @@ def prepare_application_package(
         profile = _load_profile(profile_path)
         resume_payload, selected_variant = _resume_for_job(profile, job)
         _assert_tailoring_ready(profile, job, selected_variant)
+        quality = resume_quality.enabled(profile)
+        quality_report, pdf_checks, summary_review = {}, {}, None
+        if quality:
+            try:
+                context = resume_quality.summary_context(profile, job, resume_payload)
+                summary_review = (resume_quality.validate_summary(resume_summary_draft, context)
+                    if resume_summary_draft is not None else resume_quality.draft_summary(
+                        context, summary_planner or resume_quality.owner_planner()))
+                resume_payload["summary"] = summary_review["text"]
+            except resume_quality.ResumeQualityError as exc:
+                raise TailoringReadinessError(str(exc)) from None
+        elif resume_summary_draft is not None:
+            raise ValueError("Summary drafts require the enabled owner quality flow")
         languages = (resume_payload.get("additional") or {}).get("languages")
         if not isinstance(languages, str) or not languages.strip(" \t\r\n|\u00b7;,"):
             raise TailoringReadinessError(
@@ -2846,7 +2944,7 @@ def prepare_application_package(
         _assert_direct_output_child(package_dir, output_root)
         cover_source = resume_payload if selected_variant is not None else profile
         variant_max_pages = selected_variant.get("max_pages") if selected_variant is not None else None
-        if not render_pdfs and variant_max_pages is not None:
+        if not render_pdfs and (variant_max_pages is not None or quality):
             raise RuntimeError("A page-limited confirmed resume variant requires PDF rendering")
 
         output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -2883,7 +2981,29 @@ def prepare_application_package(
             )
         resume_page_count: int | None = None
         if render_pdfs:
-            resume_page_count = _render_pdf("resume", staged_resume_json, staged_resume_pdf)
+            if quality:
+                def render_quality_payload(payload):
+                    _write_private_json(staged_resume_json, payload)
+                    _render_pdf("resume", staged_resume_json, staged_resume_pdf)
+                    from resume_pdf_audit import resume_layout_metrics
+                    return resume_layout_metrics(staged_resume_pdf)
+                try:
+                    resume_payload, quality_report = resume_quality.fit_resume(
+                        resume_payload, profile, job, render_quality_payload, variant_max_pages)
+                    resume_page_count = quality_report["pages"]
+                    from resume_pdf_audit import audit_resume_pdf, render_review_pages
+                    pdf_checks = audit_resume_pdf(staged_resume_pdf, resume_payload,
+                                                 max_pages=quality_report["max_pages"])
+                    render_review_pages(staged_resume_pdf, staging_dir / "review-pages")
+                    quality_report.update(resume_quality.selection_report(resume_payload, profile, job))
+                    from resume_content_rules import audit_resume_content
+                    quality_report["content_checks"] = audit_resume_content(resume_payload, profile, job)
+                except (resume_quality.ResumeQualityError, ValueError) as exc:
+                    raise TailoringReadinessError(str(exc)) from None
+                except ImportError:
+                    raise TailoringReadinessError("Mandatory PDF verification dependencies are unavailable") from None
+            else:
+                resume_page_count = _render_pdf("resume", staged_resume_json, staged_resume_pdf)
             _enforce_resume_page_limit(
                 resume_page_count,
                 variant_max_pages,
@@ -2900,16 +3020,19 @@ def prepare_application_package(
         _write_private_json(
             staged_manifest_json,
             {
-                "manifest_version": 1,
+                "manifest_version": 2 if quality else 1,
                 "job_id": job_id,
                 "job_title": str(job.get("title") or ""),
                 "tailoring_mode": "confirmed_variant" if selected_variant is not None else "legacy_fallback",
-                "bullet_ordering": "responsibility_evidence_v1",
+                "bullet_ordering": "responsibility_evidence_v2" if quality else "responsibility_evidence_v1",
                 "selected_variant_id": selected_variant.get("id") if selected_variant is not None else None,
                 "profile_sha256": _profile_digest(profile),
                 "resume_pages": resume_page_count,
                 "cover_letter_included": include_cover_letter,
+                **({"resume_quality": quality_report, "summary_review": {**summary_review,
+                    "review_source": "provided_reviewed_draft" if resume_summary_draft is not None else "independent_model"}} if quality else {}),
                 "quality_checks": {
+                    **pdf_checks,
                     "timeline_consistent": True,
                     "role_variant_required": _requires_confirmed_role_variant(job),
                     "role_variant_requirement_satisfied": _role_variant_requirement_satisfied(

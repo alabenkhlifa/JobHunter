@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlsplit
+import resume_quality
 
 
 CONFIRMATION_VALUES = frozenset({"candidate-confirmed", "draft", "unconfirmed"})
@@ -41,9 +42,10 @@ _RESUME_FIELDS = (
     "experience",
     "education",
     "additional",
+    "volunteering",
 )
 _EXPERIENCE_FIELDS = ("title", "company", "company_url", "subtitle", "location", "dates", "bullets", "tech")
-_EDUCATION_FIELDS = ("degree", "school", "location", "dates")
+_EDUCATION_FIELDS = ("degree", "school", "location", "dates", "display_degree", "display_school")
 _ADDITIONAL_FIELDS = ("teaching", "languages", "interests")
 _PUBLIC_ADDITIONAL_FIELDS = ("languages",)
 _V2_REQUIRED_EXPERIENCE_FIELDS = ("title", "company", "dates", "bullets")
@@ -56,6 +58,7 @@ _VARIANT_RESUME_FIELDS = (
     "experience",
     "education",
     "additional",
+    "volunteering",
 )
 _VARIANT_IDENTITY_FIELDS = ("name", "email", "phone", "website", "linkedin", "location")
 _OMITTABLE_SECTIONS = frozenset(
@@ -145,6 +148,18 @@ def _validate_variant_resume(resume: Any, *, index: int) -> None:
         raise ProfileValidationError(f"{path} must be an object")
     if set(resume) - set(_VARIANT_RESUME_FIELDS):
         raise ProfileValidationError(f"{path} contains unsupported, identity, or private fields")
+    if "volunteering" in resume:
+        records = resume["volunteering"]
+        if not isinstance(records, list) or any(
+            not isinstance(item, dict)
+            or not set(resume_quality.VOLUNTEERING_FIELDS) <= set(item)
+            or set(item) - set((*resume_quality.VOLUNTEERING_FIELDS, *resume_quality.VOLUNTEERING_OPTIONAL_FIELDS))
+            or any(not isinstance(value, str) for value in item.values())
+            or any(not item.get(k, "").strip() for k in ("title", "dates"))
+            or ("url" in item and not _is_https_url(item["url"]))
+            for item in records
+        ):
+            raise ProfileValidationError(f"{path}.volunteering contains invalid or private fields")
 
     for field in ("headline", "summary"):
         if field in resume and not isinstance(resume[field], str):
@@ -318,6 +333,7 @@ def validate_profile(profile: Any) -> None:
             raise ProfileValidationError(f"experience[{index}].company_url must be an HTTPS URL")
 
     _validate_resume_variants(profile)
+    resume_quality.validate_fields(profile, ProfileValidationError)
 
     if "evidence_bank" not in profile:
         return
@@ -411,6 +427,9 @@ def project_public_resume(profile: dict[str, Any]) -> dict[str, Any]:
         ]
     if isinstance(projection.get("additional"), dict):
         projection["additional"] = _copy_selected(profile["additional"], _PUBLIC_ADDITIONAL_FIELDS)
+    projection.pop("volunteering", None)
+    if resume_quality.enabled(profile):
+        projection["volunteering"] = resume_quality.public_volunteering(profile)
     return projection
 
 
@@ -639,7 +658,7 @@ def atomic_update_profile(
 
     current = json.loads(path.read_text(encoding="utf-8"))
     validate_profile(current)
-    if not candidate_confirmed and any(field in updates for field in _RESUME_FIELDS):
+    if not candidate_confirmed and any(field in updates for field in (*_RESUME_FIELDS, "resume_quality")):
         raise ProfileValidationError("Public resume fields require explicit candidate confirmation")
     for index, item in enumerate(updates.get("evidence_bank") or []):
         if (
@@ -669,6 +688,8 @@ def atomic_update_profile(
                 item["id"],
                 item["experience_id"],
                 item["public_text"],
+                item.get("achievement_id"),
+                item.get("wording"),
                 tuple(_visibility_values(item["visibility"], index=index)),
             )
             for visibility in ("resume", "cover-letter")
@@ -679,6 +700,8 @@ def atomic_update_profile(
                 item["id"],
                 item["experience_id"],
                 item["public_text"],
+                item.get("achievement_id"),
+                item.get("wording"),
                 tuple(_visibility_values(item["visibility"], index=index)),
             )
             for visibility in ("resume", "cover-letter")
