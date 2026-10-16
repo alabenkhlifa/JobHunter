@@ -10,6 +10,8 @@ the 7-day window and drop.
 
 from __future__ import annotations
 
+import inspect
+
 from datetime import datetime, timezone
 
 import job_scoring
@@ -98,10 +100,12 @@ def record_review(conn, verdicts, eligible_candidates, report=None, *, now=None,
     scraper.ensure_review_columns(conn)
     stamp = (now or datetime.now(timezone.utc)).isoformat()
     counts = {"send": 0, "hold": 0, "reject": 0}
-    accepted = scraper.validated_verdicts(
-        verdicts, eligible, report=report, descriptions=descriptions, verified_evidence=verified_evidence,
-        preserve_doubtful=any(m.get("accept_unconfirmed_sponsorship") for m in scraper.CONFIG.get("markets", [])),
-    )
+    options = {"report": report, "descriptions": descriptions, "verified_evidence": verified_evidence}
+    if "preserve_doubtful" in inspect.signature(scraper.validated_verdicts).parameters:
+        # Newer scrapers keep an opted-in "doubtful" read apart from silence.
+        options["preserve_doubtful"] = any(
+            m.get("accept_unconfirmed_sponsorship") for m in scraper.CONFIG.get("markets", []))
+    accepted = scraper.validated_verdicts(verdicts, eligible, **options)
     for entry in accepted:
         status_update = ", status = 'rejected'" if entry["ai_verdict"] == "reject" else ""
         conn.execute(

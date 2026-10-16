@@ -87,3 +87,19 @@ def test_todays_logged_jobs_leave_the_pool(conn):
     store.ensure_schema(conn)
     store.upsert_log(conn, RUN_ID, job["id"], "blocked")
     assert review.review_batch(conn, enabled_policy(), NOW)["count"] == 0
+
+
+def test_record_review_works_with_a_scraper_that_lacks_preserve_doubtful(conn, monkeypatch):
+    """The deployed scraper may predate the preserve_doubtful keyword."""
+    original = scraper.validated_verdicts
+
+    def older(verdicts, eligible, *, report=None, descriptions=None, verified_evidence=None):
+        return original(verdicts, eligible, report=report, descriptions=descriptions,
+                        verified_evidence=verified_evidence)
+
+    monkeypatch.setattr(scraper, "validated_verdicts", older)
+    job = add_job(conn, status="archived", date_scraped="2026-06-01T20:00:00+00:00", ai_verdict="")
+    pool, _ = review.review_pool(conn, enabled_policy(), now=NOW)
+    verdicts = [{"job_id": job["id"], "verdict": "send", "reason": "fits", "sponsorship": "no_info", "rank": 1}]
+    result = review.record_review(conn, verdicts, pool, now=NOW)
+    assert result["recorded"] == 1 and result["send"] == 1
