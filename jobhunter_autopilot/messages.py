@@ -132,7 +132,18 @@ def company_line(research, job):
     return "Company: " + (" · ".join(parts) if parts else "no verified details")
 
 
-def per_offer(job, *, mode, criteria, research=None, tracker_synced=None, evidence_attached=False):
+def evidence_proposal_line(proposal):
+    """``Resume: +ev-a, +ev-b · −ev-c (per-job evidence proposal)``, or "" when none was used."""
+    if not isinstance(proposal, dict):
+        return ""
+    added = ", ".join("+" + esc(item, 80) for item in (proposal.get("added") or [])[:LIST_LIMIT])
+    removed = ", ".join("−" + esc(item, 80) for item in (proposal.get("removed") or [])[:LIST_LIMIT])
+    changes = " · ".join(part for part in (added, removed) if part)
+    return f"Resume: {changes} (per-job evidence proposal)" if changes else ""
+
+
+def per_offer(job, *, mode, criteria, research=None, tracker_synced=None, evidence_attached=False,
+              evidence_proposal=None):
     """The report for one offer: live submission or rehearsal."""
     if mode == "rehearsal":
         head = "🧪 Rehearsed (not submitted)"
@@ -150,11 +161,13 @@ def per_offer(job, *, mode, criteria, research=None, tracker_synced=None, eviden
         salary += " · Asked: " + esc(money(ask, currency, short=False), 40)
     evidence = "Evidence: screenshot attached" if evidence_attached else "Evidence: none attached"
     footer = " · ".join(p for p in (tracker, evidence, link(job.get("url"), "View offer")) if p)
+    resume = evidence_proposal_line(evidence_proposal)
     return fit([
         title,
         "Why: " + " · ".join(esc(item, 120) for item in (criteria or [])),
         salary,
         company_line(research, job),
+        *([resume] if resume else []),
         footer,
     ])
 
@@ -193,6 +206,9 @@ def summary(stats):
     deferred = stats.get("deferred") or []
     if deferred:
         lines.append(f"Deferred to the next run: {len(deferred)}")
+    proposals = stats.get("evidence_proposals") or 0
+    if proposals:
+        lines.append(f"Resumes with a per-job evidence proposal: {proposals}")
     lines.append(f"Cap left today: {stats.get('cap_left', 0)}/{stats.get('max_per_day', 0)}")
     return fit(lines)
 

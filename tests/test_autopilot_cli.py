@@ -175,7 +175,9 @@ def test_package_requires_todays_plan_and_reuses_summary(env, capsys, monkeypatc
     directory.mkdir()
     (directory / "tailoring_manifest.json").write_text(json.dumps({"summary_review": {
         "text": "S.", "evidence_ids": ["e1"], "context_sha256": "abc", "review_flags": [],
-        "review_source": "independent_model"}}))
+        "review_source": "independent_model"}, "evidence_proposal_applied": True,
+        "proposed_evidence_updates": [{"evidence_id": "ev-added"}], "proposed_evidence_omissions": [],
+        "content_review_revision_rounds": 1}))
     scraper.record_application_stage(conn, job["id"], "package_generated", package_path=str(directory), sync=False)
     draft = tmp / "cover.json"
     draft.write_text(json.dumps({"paragraphs": ["Hello"]}))
@@ -192,6 +194,8 @@ def test_package_requires_todays_plan_and_reuses_summary(env, capsys, monkeypatc
     assert calls[0]["include_cover_letter"] is True and calls[0]["cover_letter_draft"] == {"paragraphs": ["Hello"]}
     assert calls[0]["resume_summary_draft"] == {"text": "S.", "evidence_ids": ["e1"], "context_sha256": "abc",
                                                 "review_flags": []}
+    assert calls[0]["accept_evidence_proposals"] is True and calls[0]["prior_evidence_ids"] == ["ev-added"]
+    assert out["package"]["evidence_proposal"] == {"added": ["ev-added"], "removed": [], "rounds": 1}
 
     def failing(job_id, **kwargs):
         raise interest_flow.TailoringReadinessError("Cover letter draft is stale")
@@ -259,6 +263,25 @@ def test_record_submitted_rejects_bad_receipts(env, capsys, kwargs, problem):
     assert code == 3 and problem in out["error"] and post.call_count == 0
     assert log_status(conn, job["id"]) == "unverified"
     assert conn.execute("SELECT COUNT(*) FROM applications WHERE job_id=?", (job["id"],)).fetchone()[0] == 0
+
+
+def test_record_submitted_message_lists_the_packages_evidence_proposal(env, capsys):
+    conn, base, tmp = env[0], env[4], env[5]
+    job = add_job(conn, status="interested")
+    directory = tmp / "pkg"
+    directory.mkdir()
+    (directory / "tailoring_manifest.json").write_text(json.dumps({
+        "job_id": job["id"], "evidence_proposal_applied": True,
+        "proposed_evidence_updates": [{"evidence_id": "ev-a"}, {"evidence_id": "ev-b"}],
+        "proposed_evidence_omissions": ["ev-c"], "content_review_revision_rounds": 0}))
+    scraper.record_application_stage(conn, job["id"], "package_generated", package_path=str(directory), sync=False)
+    store.upsert_log(conn, RUN_ID, job["id"], "applying")
+    with mock.patch.object(scraper.requests, "post", return_value=telegram_ok()) as post:
+        code, _ = run(capsys, base + ["record-submitted", job["id"], "--receipt", str(receipt(tmp, job["id"]))])
+        assert code == 0
+        text = sent(post)[0].kwargs["json"]["text"]
+    assert "Resume: +ev-a, +ev-b · −ev-c (per-job evidence proposal)" in text
+    assert cli.run_stats(conn, enabled_policy(mode="live"), RUN_ID)["evidence_proposals"] == 1
 
 
 def test_record_submitted_rejects_another_jobs_receipt_and_unplanned_jobs(env, capsys):

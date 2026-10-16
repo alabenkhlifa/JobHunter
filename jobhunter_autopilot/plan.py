@@ -158,9 +158,38 @@ def cached_research(conn, job_id):
     return payload if isinstance(payload, dict) else None
 
 
+def evidence_proposal(manifest):
+    """``{"added", "removed", "rounds"}`` when the package used a per-job evidence proposal, else None."""
+    if not isinstance(manifest, dict) or manifest.get("evidence_proposal_applied") is not True:
+        return None
+    added = [str(item.get("evidence_id")) for item in manifest.get("proposed_evidence_updates") or []
+             if isinstance(item, dict) and item.get("evidence_id")]
+    removed = [str(item) for item in manifest.get("proposed_evidence_omissions") or [] if item]
+    rounds = manifest.get("content_review_revision_rounds")
+    return {"added": added, "removed": removed, "rounds": rounds if isinstance(rounds, int) else 0}
+
+
+def read_manifest(directory):
+    try:
+        manifest = json.loads((Path(directory) / "tailoring_manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
+
+
+def package_evidence_proposal(conn, job_id):
+    """The evidence proposal recorded in the job's latest package (``applications.package_path``)."""
+    if not store.table_exists(conn, "applications"):
+        return None
+    row = conn.execute("SELECT package_path FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                       (job_id,)).fetchone()
+    return evidence_proposal(read_manifest(row[0])) if row and row[0] else None
+
+
 def _package_dict(package):
     return {"dir": str(package.package_dir), "resume_pdf": str(package.resume_pdf),
-            "cover_pdf": str(package.cover_pdf) if package.cover_pdf else None}
+            "cover_pdf": str(package.cover_pdf) if package.cover_pdf else None,
+            "evidence_proposal": evidence_proposal(read_manifest(package.package_dir))}
 
 
 def existing_package(conn, job_id, profile):
@@ -173,20 +202,24 @@ def existing_package(conn, job_id, profile):
         return None
     directory = Path(row[0])
     resume = directory / "Resume.pdf"
-    try:
-        manifest = json.loads((directory / "tailoring_manifest.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not resume.is_file() or manifest.get("job_id") != job_id:
+    manifest = read_manifest(directory)
+    if manifest is None or not resume.is_file() or manifest.get("job_id") != job_id:
         return None
     if profile is None or manifest.get("profile_sha256") != interest_flow._profile_digest(profile):
         return None
     cover = directory / "CoverLetter.pdf"
-    return {"dir": str(directory), "resume_pdf": str(resume), "cover_pdf": str(cover) if cover.is_file() else None}
+    return {"dir": str(directory), "resume_pdf": str(resume), "cover_pdf": str(cover) if cover.is_file() else None,
+            "evidence_proposal": evidence_proposal(manifest)}
 
 
 def make_package(job_id, *, db_path, profile_path, output_dir, **options):
-    """Quiet package generation: records package_generated, sends nothing."""
+    """Quiet package generation: records package_generated, sends nothing.
+
+    Unattended packages may use a per-job evidence proposal (confirmed public
+    wording only; the confirmed variant is never changed). The manual Apply
+    flow does not pass this flag.
+    """
+    options.setdefault("accept_evidence_proposals", True)
     package = interest_flow.prepare_application_package(
         job_id, db_path=db_path, profile_path=profile_path, output_dir=output_dir, **options)
     return _package_dict(package)

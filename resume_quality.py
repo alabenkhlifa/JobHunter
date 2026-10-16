@@ -719,15 +719,62 @@ def fit_resume(resume, profile, job, render, hard_limit=None):
                      "two_page_fallback": pages > preferred, "omissions": omissions, "one_page_fill": fill_report}
 
 
+def evidence_proposal(profile, job, selection, gaps):
+    """A per-job selection with confirmed public evidence for ``gaps``; ``selection`` is untouched."""
+    from resume_content_rules import propose_evidence_updates
+    from jobhunter_interest_flow import _prioritize_resume_bullets, _job_relevance_text
+    payload = propose_evidence_updates(selection, gaps, profile=profile, job=job)
+    _prioritize_resume_bullets(payload, _job_relevance_text(job), str(job.get("title") or ""),
+                              quality=True, profile=profile)
+    return payload
+
+
+def reviewed_summary(profile, job, selection, *, resume_summary_draft=None, planner=None, gaps=None):
+    """Draft and independently review the summary for ``selection``.
+
+    With ``gaps`` (a list, extended in place) the selection becomes an evidence
+    proposal, and each failed review whose issues name exact confirmed evidence
+    in the selected projects adds that evidence and retries, up to
+    MAX_CONTENT_REVIEW_ROUNDS. Returns (payload, draft, context, revision_rounds).
+    """
+    from resume_content_rules import evidence_updates_for_issues
+    propose = gaps is not None
+    payload = evidence_proposal(profile, job, selection, gaps) if propose else selection
+    rounds = 0
+    model = None if resume_summary_draft is not None else planner or owner_planner()
+    for attempt in range(MAX_CONTENT_REVIEW_ROUNDS):
+        context = summary_context(profile, job, payload)
+        try:
+            draft = (validate_summary(resume_summary_draft, context) if resume_summary_draft is not None
+                     else draft_summary(context, model))
+            break
+        except ResumeQualityError as exc:
+            if not propose or resume_summary_draft is not None or attempt + 1 == MAX_CONTENT_REVIEW_ROUNDS:
+                raise
+            updates = evidence_updates_for_issues(profile, payload, getattr(exc, "review_issues", []))
+            if not updates:
+                raise
+            gaps.extend(updates)
+            payload = evidence_proposal(profile, job, selection, gaps)
+            rounds += 1
+    return payload, draft, context, rounds
+
+
+def evidence_omissions(profile, selection, payload):
+    """Evidence IDs (or snapshot digests) in ``selection`` that ``payload`` no longer shows."""
+    retained = {normalized_text(b) for b in _unique_bullets(payload)}
+    records = {normalized_text(e["public_text"]): e["id"] for e in _usable(profile)}
+    return [records.get(normalized_text(b), "snapshot:" + hashlib.sha256(normalized_text(b).encode()).hexdigest()[:16])
+            for b in _unique_bullets(selection) if normalized_text(b) not in retained]
+
+
 def preview_variant(profile, variant, job, destination, *, resume_summary_draft=None, planner=None,
                     propose_updates=False):
     """Render an unselectable review snapshot without touching any application state."""
     from resume_refiner import validate_profile, _validate_resume_variant, _sanitized_variant_resume, _VARIANT_IDENTITY_FIELDS
-    from jobhunter_interest_flow import (_prepare_variant_resume, _assert_tailoring_ready, TailoringReadinessError,
-                                         _prioritize_resume_bullets, _job_relevance_text)
+    from jobhunter_interest_flow import _prepare_variant_resume, _assert_tailoring_ready, TailoringReadinessError
     from resume_refiner import _matched_role_term_count, _matched_term_count, _normalized_match_text
-    from resume_content_rules import (variant_evidence_gaps, propose_evidence_updates, audit_resume_content,
-                                      evidence_updates_for_issues)
+    from resume_content_rules import variant_evidence_gaps, audit_resume_content
     from styled_resume_pdf import StyledResumePDF
     from resume_pdf_audit import audit_resume_pdf, render_review_pages, resume_layout_metrics
     validate_profile(profile)
@@ -768,29 +815,9 @@ def preview_variant(profile, variant, job, destination, *, resume_summary_draft=
         _assert_tailoring_ready(profile, job, variant, check_evidence=not propose_updates)
     except TailoringReadinessError as exc:
         raise ResumeQualityError(str(exc)) from None
-    if propose_updates:
-        payload = propose_evidence_updates(original_selection, gaps, profile=profile, job=job)
-        _prioritize_resume_bullets(payload, _job_relevance_text(job), str(job.get("title") or ""),
-                                  quality=True, profile=profile)
-    review_rounds = 0
-    model = None if resume_summary_draft is not None else planner or owner_planner()
-    for attempt in range(MAX_CONTENT_REVIEW_ROUNDS):
-        context = summary_context(profile, job, payload)
-        try:
-            draft = (validate_summary(resume_summary_draft, context) if resume_summary_draft is not None
-                     else draft_summary(context, model))
-            break
-        except ResumeQualityError as exc:
-            if not propose_updates or resume_summary_draft is not None or attempt + 1 == MAX_CONTENT_REVIEW_ROUNDS:
-                raise
-            updates = evidence_updates_for_issues(profile, payload, getattr(exc, "review_issues", []))
-            if not updates:
-                raise
-            gaps.extend(updates)
-            payload = propose_evidence_updates(original_selection, gaps, profile=profile, job=job)
-            _prioritize_resume_bullets(payload, _job_relevance_text(job), str(job.get("title") or ""),
-                                      quality=True, profile=profile)
-            review_rounds += 1
+    payload, draft, context, review_rounds = reviewed_summary(
+        profile, job, original_selection, resume_summary_draft=resume_summary_draft, planner=planner,
+        gaps=gaps if propose_updates else None)
     payload["summary"] = draft["text"]
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -803,10 +830,8 @@ def preview_variant(profile, variant, job, destination, *, resume_summary_draft=
     payload, report = fit_resume(payload, profile, job, render, variant.get("max_pages"))
     report["content_checks"] = audit_resume_content(payload, profile, job)
     report["proposed_evidence_updates"] = gaps if propose_updates else []
-    retained = {normalized_text(b) for b in _unique_bullets(payload)}
-    records = {normalized_text(e["public_text"]): e["id"] for e in _usable(profile)}
-    report["proposed_evidence_omissions"] = [records.get(normalized_text(b), "snapshot:" + hashlib.sha256(normalized_text(b).encode()).hexdigest()[:16])
-        for b in _unique_bullets(original_selection) if normalized_text(b) not in retained] if propose_updates else []
+    report["proposed_evidence_omissions"] = (evidence_omissions(profile, original_selection, payload)
+                                             if propose_updates else [])
     report["candidate_review_required"] = bool(gaps)
     report["content_review_revision_rounds"] = review_rounds
     report.update(selection_report(payload, profile, job))

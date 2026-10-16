@@ -235,6 +235,7 @@ def cmd_plan(args):
 
 
 def _reuse_summary(conn, job_id):
+    """The last package's reviewed summary, plus its evidence additions so the selection matches it."""
     row = conn.execute("SELECT package_path FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1",
                        (job_id,)).fetchone() if store.table_exists(conn, "applications") else None
     try:
@@ -243,7 +244,8 @@ def _reuse_summary(conn, job_id):
     except (TypeError, OSError, ValueError, KeyError):
         raise CliError(INVALID, "no reviewed summary to reuse; package the job first") from None
     review_record.pop("review_source", None)
-    return review_record
+    proposal = plan.evidence_proposal(manifest)
+    return review_record, (proposal or {}).get("added", [])
 
 
 def cmd_package(args):
@@ -269,7 +271,7 @@ def cmd_package(args):
                 raise CliError(INVALID, "cover draft is not readable JSON") from None
             options["include_cover_letter"] = True
         if args.reuse_summary:
-            options["resume_summary_draft"] = _reuse_summary(conn, args.job_id)
+            options["resume_summary_draft"], options["prior_evidence_ids"] = _reuse_summary(conn, args.job_id)
     finally:
         conn.close()
     try:
@@ -344,7 +346,8 @@ def _notify_offer(conn, args, *, run_id, job, row, mode, tracker_synced, evidenc
         return TELEGRAM, "not_configured"
     text = messages.per_offer(job, mode=mode, criteria=row.get("criteria"),
                               research=plan.cached_research(conn, job["id"]),
-                              tracker_synced=tracker_synced, evidence_attached=evidence is not None)
+                              tracker_synced=tracker_synced, evidence_attached=evidence is not None,
+                              evidence_proposal=plan.package_evidence_proposal(conn, job["id"]))
     if not sender.send(text):
         return TELEGRAM, "failed"
     store.mark_notified(conn, run_id, job["id"], now=now)
@@ -453,6 +456,7 @@ def run_stats(conn, current, run_id):
                 for row in rows if row["status"] in statuses]
 
     attempted = ("packaged", "applying", "submitted", "unverified", "rehearsed", "blocked", "handed_off")
+    packaged = ("packaged", "applying", "submitted", "unverified", "rehearsed")
     rehearsal = current["mode"] == "rehearsal"
     used = store.cap_used_today(conn, run_id, include_rehearsed=rehearsal)
     return {
@@ -463,6 +467,8 @@ def run_stats(conn, current, run_id):
         "not_attempted": items("packaged", "applying"), "handed_off": items("handed_off", "blocked"),
         "closed": items("closed"), "deferred": items("deferred"),
         "cap_left": max(0, current["max_per_day"] - used), "max_per_day": current["max_per_day"],
+        "evidence_proposals": sum(1 for row in rows if row["status"] in packaged
+                                  and plan.package_evidence_proposal(conn, row["job_id"])),
     }
 
 

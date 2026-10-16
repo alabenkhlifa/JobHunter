@@ -46,7 +46,7 @@ def world(tmp_path, monkeypatch):
     profile.write_text(json.dumps({"name": "Ala", "application_defaults": {"notice_period": "1 month"}}))
     monkeypatch.setenv("JOBHUNTER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("JOBHUNTER_GMAIL_ACCOUNT", "jobs@example.com")
-    packaged, researched, answered = [], [], []
+    packaged, researched, answered, manifest_extra = [], [], [], {}
 
     def fake_package(job_id, *, db_path, profile_path, output_dir, **options):
         packaged.append({"job_id": job_id, "db_path": str(db_path), "output_dir": str(output_dir), **options})
@@ -54,7 +54,8 @@ def world(tmp_path, monkeypatch):
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "Resume.pdf").write_text("pdf")
         digest = interest_flow._profile_digest(json.loads(Path(profile_path).read_text()))
-        (directory / "tailoring_manifest.json").write_text(json.dumps({"job_id": job_id, "profile_sha256": digest}))
+        (directory / "tailoring_manifest.json").write_text(json.dumps(
+            {"job_id": job_id, "profile_sha256": digest, **manifest_extra}))
         with closing(sqlite3.connect(db_path)) as other:
             scraper.record_application_stage(other, job_id, "package_generated", package_path=str(directory),
                                              sync=False)
@@ -85,7 +86,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "jobhunter_research", research_module)
     monkeypatch.setitem(sys.modules, "jobhunter_auto_apply.answers", answers_module)
     world = types.SimpleNamespace(conn=conn, db=db, profile=profile, tmp=tmp_path, packaged=packaged,
-                                  researched=researched, answered=answered)
+                                  researched=researched, answered=answered, manifest_extra=manifest_extra)
     yield world
     conn.close()
 
@@ -283,6 +284,49 @@ def test_existing_package_from_the_current_profile_is_reused(world):
                                      sync=False)
     result, _ = build(world)
     assert result["applications"][0]["package"]["dir"] == str(directory)
+    assert world.packaged == []
+
+
+PROPOSAL_MANIFEST = {
+    "evidence_proposal_applied": True,
+    "proposed_evidence_updates": [{"evidence_id": "ev-husky-database-bottleneck", "public_text": "x"}],
+    "proposed_evidence_omissions": ["ev-husky-amaris-approved-2-20261015"],
+    "content_review_revision_rounds": 1,
+}
+
+
+def test_packages_accept_per_job_evidence_proposals_and_report_them(world):
+    first, second = add_job(world.conn, score=90), add_job(world.conn, score=85)
+    world.manifest_extra.update(PROPOSAL_MANIFEST)
+    result, _ = build(world, enabled_policy(max_per_day=1))
+    assert world.packaged[0]["accept_evidence_proposals"] is True
+    assert result["applications"][0]["package"]["evidence_proposal"] == {
+        "added": ["ev-husky-database-bottleneck"], "removed": ["ev-husky-amaris-approved-2-20261015"], "rounds": 1}
+    assert plan.package_evidence_proposal(world.conn, first["id"])["rounds"] == 1
+    assert plan.package_evidence_proposal(world.conn, second["id"]) is None
+
+
+def test_evidence_proposal_is_null_without_an_applied_proposal(world):
+    assert plan.evidence_proposal({"job_id": "x"}) is None
+    assert plan.evidence_proposal(dict(PROPOSAL_MANIFEST, evidence_proposal_applied=False)) is None
+    assert plan.evidence_proposal(None) is None
+    add_job(world.conn)
+    result, _ = build(world)
+    assert result["applications"][0]["package"]["evidence_proposal"] is None
+
+
+def test_reused_package_carries_its_evidence_proposal(world):
+    job = add_job(world.conn)
+    directory = world.tmp / "output" / "pkg"
+    directory.mkdir(parents=True)
+    (directory / "Resume.pdf").write_text("pdf")
+    profile = json.loads(world.profile.read_text())
+    (directory / "tailoring_manifest.json").write_text(json.dumps(
+        {"job_id": job["id"], "profile_sha256": interest_flow._profile_digest(profile), **PROPOSAL_MANIFEST}))
+    scraper.record_application_stage(world.conn, job["id"], "package_generated", package_path=str(directory),
+                                     sync=False)
+    result, _ = build(world)
+    assert result["applications"][0]["package"]["evidence_proposal"]["added"] == ["ev-husky-database-bottleneck"]
     assert world.packaged == []
 
 

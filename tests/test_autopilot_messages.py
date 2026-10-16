@@ -30,6 +30,20 @@ def test_live_message_follows_the_template(no_research_module):
                         '<a href="https://www.linkedin.com/jobs/view/1">View offer</a>')
 
 
+def test_evidence_proposal_line_sits_above_the_footer(no_research_module):
+    proposal = {"added": ["ev-a", "ev-b"], "removed": ["ev-c"], "rounds": 1}
+    lines = messages.per_offer(JOB, mode="live", criteria=CRITERIA, research=None, tracker_synced=True,
+                               evidence_proposal=proposal).splitlines()
+    assert lines[4] == "Resume: +ev-a, +ev-b · −ev-c (per-job evidence proposal)"
+    assert lines[5].startswith("Tracker:")
+    only_added = messages.per_offer(JOB, mode="rehearsal", criteria=CRITERIA,
+                                    evidence_proposal={"added": ["<ev>"], "removed": [], "rounds": 0})
+    assert "Resume: +&lt;ev&gt; (per-job evidence proposal)" in only_added
+    for empty in (None, {"added": [], "removed": [], "rounds": 0}):
+        text = messages.per_offer(JOB, mode="live", criteria=CRITERIA, evidence_proposal=empty)
+        assert "Resume:" not in text and len(text.splitlines()) == 5
+
+
 def test_rehearsal_variant_and_missing_research(no_research_module):
     text = messages.per_offer(JOB, mode="rehearsal", criteria=CRITERIA, research=None)
     assert text.startswith("🧪 Rehearsed (not submitted)")
@@ -83,6 +97,8 @@ def test_summary_message():
     assert "Cap left today: 2/3" in text
     rehearsal = messages.summary(dict(stats, mode="rehearsal", rehearsed=[{"title": "R", "company": "C"}]))
     assert "Applied" not in rehearsal and "Rehearsed: 1" in rehearsal
+    assert "evidence proposal" not in text
+    assert "Resumes with a per-job evidence proposal: 2" in messages.summary(dict(stats, evidence_proposals=2))
 
 
 def test_handoff_text():

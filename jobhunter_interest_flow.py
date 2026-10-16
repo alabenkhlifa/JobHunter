@@ -27,7 +27,7 @@ import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import job_scoring
 import scraper
@@ -2948,6 +2948,42 @@ def _restore_previous_package(
         os.replace(backup_dir, package_dir)
 
 
+def _evidence_proposal_gaps(
+    profile: dict[str, Any],
+    job: dict[str, Any],
+    selection: dict[str, Any],
+    prior_evidence_ids: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    """Confirmed evidence a per-job proposal adds: the variant's topic gaps, then prior reviewer additions."""
+    from resume_content_rules import evidence_updates_for_issues, variant_evidence_gaps
+    gaps = variant_evidence_gaps(profile, selection, job)
+    for evidence_id in prior_evidence_ids:
+        if not isinstance(evidence_id, str) or any(g["evidence_id"] == evidence_id for g in gaps):
+            continue
+        proposal = resume_quality.evidence_proposal(profile, job, selection, gaps)
+        gaps.extend(evidence_updates_for_issues(profile, proposal, [evidence_id]))
+    return gaps
+
+
+def _evidence_proposal_record(
+    profile: dict[str, Any],
+    selection: dict[str, Any],
+    proposal: dict[str, Any],
+    gaps: list[dict[str, Any]],
+    review_rounds: int,
+) -> dict[str, Any]:
+    """Manifest fields for a per-job evidence proposal; only evidence actually shown counts as added."""
+    shown = {normalized_text(b) for b in resume_quality._unique_bullets(proposal)}
+    added = [gap for gap in gaps if normalized_text(gap["public_text"]) in shown]
+    removed = resume_quality.evidence_omissions(profile, selection, proposal)
+    return {
+        "evidence_proposal_applied": bool(added or removed),
+        "proposed_evidence_updates": added,
+        "proposed_evidence_omissions": removed,
+        "content_review_revision_rounds": review_rounds,
+    }
+
+
 def prepare_application_package(
     job_id: str,
     *,
@@ -2959,7 +2995,19 @@ def prepare_application_package(
     cover_letter_draft: dict[str, Any] | None = None,
     resume_summary_draft: dict[str, Any] | None = None,
     summary_planner=None,
+    accept_evidence_proposals: bool = False,
+    prior_evidence_ids: Sequence[str] = (),
 ) -> ApplicationPackage:
+    """Build, verify and record the application package for one job.
+
+    ``accept_evidence_proposals`` (unattended packaging only) lets this one
+    package use the per-job evidence proposal the owner preview would show:
+    confirmed public evidence the selected variant omits, plus evidence the
+    independent reviewer names, for up to MAX_CONTENT_REVIEW_ROUNDS. The
+    confirmed variant in the profile is never changed. ``prior_evidence_ids``
+    re-applies the reviewer additions of an earlier package of this job so a
+    reused summary still matches its selection.
+    """
     if type(include_cover_letter) is not bool:
         raise TypeError("include_cover_letter must be a boolean")
     if cover_letter_draft is not None and not include_cover_letter:
@@ -2986,16 +3034,20 @@ def prepare_application_package(
             )
         profile = _load_profile(profile_path)
         resume_payload, selected_variant = _resume_for_job(profile, job)
-        _assert_tailoring_ready(profile, job, selected_variant)
         quality = resume_quality.enabled(profile)
-        quality_report, pdf_checks, summary_review = {}, {}, None
+        propose = bool(accept_evidence_proposals) and quality and selected_variant is not None
+        _assert_tailoring_ready(profile, job, selected_variant, check_evidence=not propose)
+        quality_report, pdf_checks, summary_review, proposal = {}, {}, None, None
         if quality:
             try:
-                context = resume_quality.summary_context(profile, job, resume_payload)
-                summary_review = (resume_quality.validate_summary(resume_summary_draft, context)
-                    if resume_summary_draft is not None else resume_quality.draft_summary(
-                        context, summary_planner or resume_quality.owner_planner()))
+                selection = resume_payload
+                gaps = _evidence_proposal_gaps(profile, job, selection, prior_evidence_ids) if propose else None
+                resume_payload, summary_review, _, review_rounds = resume_quality.reviewed_summary(
+                    profile, job, selection, resume_summary_draft=resume_summary_draft,
+                    planner=summary_planner, gaps=gaps)
                 resume_payload["summary"] = summary_review["text"]
+                if propose:
+                    proposal = _evidence_proposal_record(profile, selection, resume_payload, gaps, review_rounds)
             except resume_quality.ResumeQualityError as exc:
                 raise TailoringReadinessError(str(exc)) from None
         elif resume_summary_draft is not None:
@@ -3103,6 +3155,7 @@ def prepare_application_package(
                 "cover_letter_included": include_cover_letter,
                 **({"resume_quality": quality_report, "summary_review": {**summary_review,
                     "review_source": "provided_reviewed_draft" if resume_summary_draft is not None else "independent_model"}} if quality else {}),
+                **(proposal or {}),
                 "quality_checks": {
                     **pdf_checks,
                     "timeline_consistent": True,
