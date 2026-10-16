@@ -128,51 +128,42 @@ Each refined experience has a stable `id`. Each `evidence_bank` item references 
 
 Do not change confirmation or visibility flags to make a fact eligible. Ask the user instead.
 
-### Resume layout
+### Resume generation
 
-Use the candidate-approved compact sidebar across role families when `resume_quality.reviewed_sidebar` is enabled. Render confirmed teaching/training as **Teaching & Training**, using the certification rows' title, secondary-line and divider spacing. Titles are bold black and left-aligned; an optional candidate-provided HTTPS `url` makes the title clickable. Organization and description may be empty when the confirmed title already supplies the context. Keep relevance-based selection and optional-role rules; an example Java resume is not proof of quality for other offers.
+When the profile holds candidate-confirmed `resume_blueprints`, the code builds
+every resume (`resume_pipeline.py`): it picks the blueprint for the posting's
+role family (backend, lead, architect, platform; the `default` blueprint
+otherwise), selects confirmed public evidence by its `facets` (project, kind,
+stack, domains) against the posting's needs, orders employers and projects, fits
+the blueprint's page target (tighter spacing, policy-listed irrelevant
+certifications, the weakest non-opening bullets, whole weak projects; skill
+tags the posting does not name when only the sidebar spills), renders the
+reviewed sidebar (display degree wording, Teaching & Training, mandatory
+languages) and audits the PDF. The summary model is advisory: its draft is
+validated and reviewed, and the blueprint's confirmed summary is the fallback.
+A rubric scorer records `resume_score` (0-100), `score_flags` and
+`resume_needs_review` in the private `tailoring_manifest.json` instead of
+refusing. Nothing in this path composes wording: every bullet, headline,
+summary and skill tag is confirmed text from the profile.
 
-Preserve full source education facts. Optional candidate-approved `display_degree` and `display_school` are public labels; retain the city. Put school/city and dates on the same baseline when they fit at the existing font sizes, otherwise stack them. Format displayed month/year dates as `MM/yyyy` (including role and education dates) without changing stored chronology. Preserve original fonts and Keywords lines; do not enlarge or shrink text to force a page count. Test tailored content against different real offers separately from layout parity.
+Your part is review and confirmation. Read the manifest. When
+`resume_needs_review` is true, or the score is below the owner's
+`min_resume_score` (default 60), open the review page images, say which flags
+apply and ask the owner before the package is used; the autopilot hands such
+jobs off with reason `resume_needs_review`. Improve a weak resume by confirming
+new wording, facets or blueprint choices with the owner through
+`tools/migrate_profile_blueprints.py` (private updates file, dry run by
+default) followed by `python resume_refiner.py validate`, never by editing
+generated JSON. Do not change confirmation flags, facets or blueprints to make
+a fact eligible; ask the owner.
 
-Use text-only employer and education headings. Never render employer or school logos in resumes, including previews, confirmed variants and fallback tailoring. Reclaim the logo space for the text and verify the final PDF contains no embedded logo images.
-
-### Confirmed resume variant contract
-
-Before reusing an owner-approved PDF for an exact job, inspect the matching candidate-confirmed entry in `resume_refinement_history`. Its `approved_pdf`, `approved_payload` and `approval_record` identify the artifact. Verify the PDF hash against `reference_pdf_sha256` and the approval record's current profile and variant digests. Preserve that PDF when the owner requests the approved version; later tailored packages and model summary drafts need their own review.
-
-A confirmed role-family variant is a complete candidate-approved presentation, not newly inferred evidence. It may deliberately consolidate or omit master-profile experiences and sections. Identity, contact fields, and confirmed languages always come from the master profile; every other intended public section must be present in the renderer-compatible variant snapshot because unspecified master sections are not inherited. A legacy variant requires at least one matching `match_terms` phrase. A variant with `role_terms` is eligible only when the job title matches that role family; supporting `match_terms` then rank eligible variants. Architecture-titled jobs require a matching role-scoped confirmed variant and must not use generic fallback tailoring. `max_pages` must pass before `package_generated` is recorded. Preserve selected variant wording and included facts; rank its bullets against the specific job; show MaibornWolff before the CTO role, keep other employers in reverse chronology, and apply conditional side-role rules. Never expose matching or confirmation metadata in generated documents.
-
-Rank the first three bullets by the posting's responsibilities and demonstrated outcomes, then cover distinct relevant duties rather than repeating the same skill. Apply this to confirmed variants and fallback tailoring without changing approved wording or importing omitted facts into a variant. For grouped client work, show three attributed employer highlights before the remaining client details; render each fact once and keep other employers' client sections chronological. Use only confirmed public evidence. Python validators are not evidence of running production Python services, and AI coding tools are not evidence of shipping an AI product.
-
-Languages are mandatory in every resume, including confirmed variants and one-page resumes. Copy the complete candidate-confirmed language list and proficiency levels from the master profile unchanged; omitting `additional` must never omit languages. If the master profile has no languages, use the confirmed variant language list or pause for candidate confirmation. Never invent a language or proficiency level. Verify the Languages section remains present after tailoring and pagination.
-
-### MaibornWolff project ordering
-
-Order selected MaibornWolff client projects by their relevance to the target posting's responsibilities, main stack and demonstrated outcomes, with the strongest match first. Rank only the selected public project facts; use newest-to-oldest client dates to break equal scores or when the posting supplies no relevance signal. Apply this to confirmed variants, fallback tailoring, draft previews and one-page expansion. Do not hardcode a particular project first.
-
-Keep each project's name, actual dates and approved bullets together, preserve the master profile's factual chronology, and keep the existing employer-order rules. Show only employer tenure as already required; omit project-order captions and never imply an ended client project is current.
-
-### Opt-in owner quality workflow
-
-Both direct previews and application packages enforce the shared content rules. Keep a project ownership/delivery opening before narrower details even when no explicit opening IDs exist; rank the remaining approved bullets for the offer. Testing is not delivery ownership, and API Management is not people management. The independent reviewer compares selected achievements with permitted unselected public evidence, in addition to reviewing the summary.
-
-When generation reports relevant confirmed evidence missing from a fixed variant, prepare a private review proposal with `python resume_quality.py --profile data/master-profile.json --variant <matching_variant_id> --job-json <private_job_json> --output <new_private_pdf> --propose-evidence-updates`. This may select exact confirmed public facts from already selected projects in that preview only. Replace weaker supplementary details rather than merely appending achievements; preserve project scope and the original selection size when possible. The bounded independent-review loop can request additional permitted evidence by ID. Show the proposal and its recorded inclusions and omissions for candidate review before replacing the confirmed variant. Preserve the approved Amaris PDF and master profile. Never force a backend variant into an architecture role or treat a review proposal as an activated variant.
-
-Use the owner's `resume_quality` policy only when explicitly enabled. Keep a replacement variant in `draft` and the policy disabled until the candidate confirms its complete public wording, included sections, omissions and matching terms. Existing approved variants remain available. `resume_quality.py` can render that draft for review without touching application or Telegram state; never temporarily confirm a draft for testing.
-
-Experience text comes from confirmed public wording. Link approved full and separately approved short versions by `achievement_id` and mark `wording` as `full` or `short`; do not rewrite bullets to squeeze them onto one page. Rank the first three by demonstrated outcomes and distinct job responsibilities. Preserve technical ownership, scope and counts for each achievement. Keep factual employment and client dates in the source, while applying separately approved display preferences such as hidden progression or client date lines.
-
-When `group_bullets_by_client` is enabled, the employer heading contains employment metadata only. Place every project bullet beneath its named customer heading, including the strongest opening achievements. Never lift customer work into employer-level highlights, even with a customer prefix. Rank bullets within each customer section and apply the MaibornWolff project-order rule. Measure the one-page fill pass after applying this layout so any space saved can hold more relevant customer work.
-
-For an included project, establish ownership, overall delivery scope and the main stack before narrower feature details. A candidate-reviewed employment-group project may specify one to three `opening_evidence_ids`, referencing confirmed public resume evidence belonging to that project. Preserve their reviewed order within the customer section. During one-page expansion, try these opening points together before supplementary details; if three do not fit, try the first two. Do not add a project as isolated features when its opening cannot fit. Cloud infrastructure delivery is relevant evidence even when its bullet does not contain the word backend. Existing variant snapshots never inherit opening points that they omitted.
-
-Draft a three-to-four-sentence summary from selected evidence and nonoverlapping, month-accurate career duration; run the independent evidence review through the existing restricted owner model provider. Do not borrow job requirements as candidate experience, change seniority, merge quantities from different projects or equate mentoring with line management. Keep the result a reviewable draft; a summary is not a profile update. A supplied summary must match the current profile and selection digest.
-
-Only optimize space when an actual render overflows: deduplicate tags, tighten spacing without shrinking fonts, try approved short alternatives, then omit unprotected skill keywords or policy-listed certifications with no job relevance. Honor explicit per-job certification omissions/protections in `job_overrides`. Keep all original facts and credentials in the master profile. Prefer one page, permit two for strong relevant experience, and enforce any stricter confirmed variant cap. Confirmed public `volunteering` records belong in the sidebar only when their relevance terms match and the selected variant includes them.
-
-If the result is one page, use its available space for relevant confirmed content. Measure both columns in the actual PDF and aim to fill at least 92% of the main column's usable height. Try approved full wording before adding more projects. With the candidate's explicit `fill_same_employer_projects` permission, consider other job-relevant projects from a candidate-reviewed employment group already represented in the resume, using exact public wording and the MaibornWolff project-order rule. Keep each addition only if a new render remains one page at the existing font sizes and fits the normal margins. Never add unrelated work, duplicate achievements, an excluded employer or unconfirmed material merely to fill space. If no more permitted relevant content fits, retain the remaining whitespace and record that reason in the private manifest. Final audits and visual review remain mandatory.
-
-Before recording `package_generated`, require actual PDF text, bold spans, link targets, Languages/Education/Volunteering content, page limits, margins and overlap checks. Inspect every rendered page visually. Missing verification dependencies, model failure, stale review or failed audit leave the previous package and stage intact. Keep manifests and review images private. Never send/upload/submit a preview without the candidate's separate instruction.
+Profiles without confirmed blueprints keep the confirmed `resume_variants`
+path: a complete candidate-approved snapshot chosen by `role_terms` and
+`match_terms`, wording preserved exactly, `max_pages` enforced, architecture
+titles refused without a role-scoped variant. Before reusing an owner-approved
+PDF for an exact job, verify it against its `resume_refinement_history` entry
+(`approved_pdf`, `reference_pdf_sha256`, approval digests). Never send, upload
+or submit a preview without the candidate's separate instruction.
 
 ## Scraping Strategy
 The owner's scraper uses **breadth-first round-robin** across one bucket per
@@ -585,64 +576,39 @@ crons, Interested, Apply, Proceed and final-submit approval stay separate,
 explicit decisions; never use `--policy-run` or the autopilot policy to skip
 them.
 
-### Package content checks after Apply
+### Package review after Apply
 
-The automated Apply route owns package generation. Review its output against
-the rules below. If generation fails, report the failure and resolve the
-readiness gate before retrying `--apply`; do not manually mark
-`package_generated`. A missing profile, unresolved required facts, or an
-inconsistent same-employer date progression requires resume refinement and an
-exact candidate-confirmed correction.
+The Apply route generates the permanent package. With confirmed blueprints the
+code enforces the resume rules (confirmed wording only, employer order, page
+target, sidebar, languages, links, PDF audit) and records what it did in the
+private `tailoring_manifest.json`. If generation fails, report the failure and
+resolve the readiness gate before retrying `--apply`; never mark
+`package_generated` by hand. Inconsistent same-employer dates or missing
+required facts need an exact candidate-confirmed correction, not a guess.
 
-**Tailoring checks:**
+Review before asking to Proceed:
+- Read `resume_score`, `score_flags`, `resume_needs_review`, the layout's
+  dropped bullets, dropped projects and omitted skills or certifications, and
+  the summary source (model or fallback) in the manifest.
+- Inspect every page image for clipping, broken words, orphaned headings and
+  an under-used page two. A layout note ending in `(sidebar)` means the
+  sidebar, not the bullets, needs the owner's attention.
+- Check that the PDF annotations open only verified contact and certificate
+  links.
+- A requested cover letter must tell job-specific stories with verified
+  outcomes, with no unsupported claims or repeated sentences, and pass its
+  `review_flags`.
+- The package directory holds only renderer-compatible public resume data,
+  optional cover-letter data and the private manifest. Evidence metadata,
+  facets, blueprints, refiner state, private notes and application defaults
+  never reach a PDF.
 
-   First select a matching `candidate-confirmed` role-family variant, if one exists. Match `role_terms` against the job title as complete terms, then rank eligible variants with supporting `match_terms`. Preserve its confirmed wording and included facts while ranking its bullets for the specific job, apply the global chronology and optional-role rules below, use the selected public resume as the cover-letter evidence source, and enforce its optional `max_pages` value before recording `package_generated`. Before using a fixed variant, compare its included experience with newer candidate-confirmed public evidence that strongly matches the posting. If relevant evidence is missing, show the gap and propose a complete updated variant for candidate confirmation; never silently add it to the approved snapshot. If no confirmed variant matches, use the legacy rules below, except for architecture-titled jobs: pause those until a matching role-scoped variant is confirmed.
-
-   For legacy tailoring, show MaibornWolff before the CTO role whenever both appear. Keep all other employers in reverse chronological order: current roles first, then ended roles by end date, with newer starts first among current roles. Rank confirmed public evidence only within each experience. Group promotions at the same employer under one employer-tenure heading when a `candidate-reviewed` `employment_groups` snapshot exists, then order MaibornWolff client engagements by job relevance, using newest-first dates for ties; keep other employers' client sections newest to oldest. Keep client dates distinct from employment dates in the source data, but show only the employer tenure in the PDF. Omit employer and school logos from every resume. Include the CTO role for leadership, management, and architecture roles; include the oldest standalone role only when its technical work directly matches the posting. Adapt the summary from confirmed strengths without customer or project names or the word "currently". Keep the profile headline unchanged. Rank skills by job relevance and keep each sidebar category compact enough to match the reviewed template; leave the full verified skills in the master profile. Keep each role's displayed `Keywords` aligned with its selected bullets or the job requirements; do not carry over unrelated keywords merely because they exist in the master profile.
-
-   **CRITICAL: The master-profile.json contains REAL data. Do not change its factual companies, roles, dates, education, or certifications. The grouped employer heading may present the complete tenure and promotion history from candidate-reviewed evidence; keep client-engagement dates separate and exact.**
-
-   What you MUST keep unchanged (copy verbatim from master profile):
-   - All `company` names exactly as written
-   - All role titles and promotion facts, including those summarized beneath a grouped employer heading
-   - All employer, role, and client-engagement dates and locations; never imply that an ended client engagement is still current
-   - All source education facts; use only candidate-approved `display_degree` and `display_school` labels in the PDF
-   - Certification names exactly as written; the opt-in quality policy may omit eligible irrelevant credentials only during overflow or on an explicit per-job candidate instruction
-   - The `name`, `email`, `phone`, `linkedin` fields exactly as written
-   - The `website` field exactly as written when present; show only safe verified contact links in PDFs
-   - The factual wording of included work; use the candidate-reviewed engagement snapshot when presenting grouped client history
-
-   What you CAN adjust (minor refinements only):
-   - **Skills ordering**: reorder the skill categories so the most relevant one for this job appears first
-   - **Certification presentation**: reorder candidate-confirmed certifications for role relevance. When exact candidate-confirmed verification URLs exist, preserve certification names as strings and provide renderer-safe HTTPS links through a `certification_links` mapping keyed by the exact certification name; never invent a credential URL.
-   - **Summary paragraph**: describe the candidate's confirmed strengths and relevant scope; do not name a customer or single project, or say "currently"
-   - **Experience bullets**: select existing bullets and candidate-confirmed public evidence to cover the posting's strongest requirements; remove repeated claims and keep every core fact unchanged
-   - **Experience order**: show MaibornWolff before CTO when both are included; otherwise sort employers from newest to oldest. Do not rank roles by keyword relevance.
-   - **Same-employer grouping**: show one text company heading with complete tenure; honor an approved opt-in preference to hide promotion history. Display selected MaibornWolff client engagements in relevance order, with newest-first dates breaking ties; keep other employers' client sections chronological and do not print client dates. For a confirmed variant, retain its exact selected bullet wording and map bullets to the candidate-reviewed client dates only when the client is identifiable by an approved alias or an unambiguous date span. Keep ambiguous work under its role heading instead of guessing a client.
-   - **VERSE presentation**: show the role title as `Chief Technology Officer (CTO)` without `Co-Founder`; link the VERSE company name to the candidate-provided `https://verse.ad` URL. Carry its validated `company_url` from the public experience record into the PDF.
-   - **Experience inclusion**: include the CTO role only for roles that call for leadership or comparable responsibility; omit an old standalone role when its stack is not relevant
-
-   What you MUST NOT do:
-   - Do NOT invent new companies, roles, or experiences
-   - Do NOT change source dates, titles, company names, or locations without a candidate correction; keep employer and client dates distinct in source data while printing only the employer tenure for grouped MaibornWolff work
-   - Do NOT add skills or certifications not in the master profile or its candidate-confirmed evidence
-   - Do NOT remove relevant employment history or education; apply only the candidate's explicit optional-role rules
-   - Do NOT change the person's name, contact info, or education history
-
-Verify the permanent package directory contains only renderer-compatible public
-resume data, optional cover-letter data, and a private `tailoring_manifest.json` with the
-tailoring mode, selected variant, profile digest, page count, and passed
-readiness checks. Do not expose evidence metadata, refiner state, private notes,
-or application defaults in the PDFs. Inspect every PDF page for clipping, broken
-words, orphaned headings, MaibornWolff-before-CTO order, and newest-to-oldest
-order for other employers; verify relevance order for MaibornWolff client sections. Compare its layout with the
-candidate's reviewed two-column PDF. Confirm optional-role omissions, relevant
-confirmed evidence, page limits, and PDF annotations for verified contact and
-certificate links. When a cover letter was requested, review it for job-specific
-examples, unsupported claims, repeated sentences, review_flags, and PDF layout.
-Keep fixed variant wording unchanged until the candidate
-approves revised wording. If review finds a problem, repair package generation
-and rerun `--apply` before asking to Proceed.
+Legacy variant path (profiles without confirmed blueprints): keep the selected
+variant's wording and included facts, show MaibornWolff before the CTO role and
+other employers newest to oldest, print employer tenure only for grouped client
+work, include the CTO role only for leadership scope, and render no logos.
+Report a relevant confirmed fact missing from a variant as a gap for a new
+confirmed variant; never add it to the snapshot.
 
 ### When user asks "job stats" or "search status":
 - Query SQLite database at `data/jobs.db`
@@ -711,6 +677,10 @@ python3 -m jobhunter_auto_apply.cli submit --job-id <job_id> --page-url <current
   shared helpers in `jobhunter_sources/base.py`)
 - PDF renderer: `render_pdf.py`
 - Resume Refiner validation and safe updates: `resume_refiner.py`
+- Resume blueprints: `resume_pipeline.py` (plan, summary, fit, score),
+  `resume_evidence.py`, `resume_blueprints.py`, `resume_layout.py`,
+  `resume_scorecard.py`; harness `tools/eval_resume_packages.py`; migration
+  `tools/migrate_profile_blueprints.py`
 - Master profile: `data/master-profile.json` (local, ignored)
 - Profile schema example: `data/master-profile.example.json`
 - Database: `data/jobs.db` (local, ignored)
@@ -736,18 +706,12 @@ cp .env.example .env  # Edit with real values
 ```
 
 ## Resume Tailoring Rules (MANDATORY)
-These rules are NON-NEGOTIABLE. Violating them produces a fraudulent resume.
-- **NEVER fabricate** companies, job titles, dates, education, certifications, or skills
-- **NEVER change** company names, job titles, date ranges, locations, or education entries — copy them verbatim from master-profile.json
-- **INCLUDE** current and relevant employment. Show MaibornWolff before CTO when both appear, and sort other employers in reverse chronology. The CTO role is conditional on leadership scope; the oldest standalone role is conditional on direct relevance.
-- **ONLY adjust**: summary paragraph wording, skills category ordering, experience bullet emphasis, and optional-role inclusion under the candidate's rules
-- **Bullet rewording** means highlighting relevant keywords that are already truthful — NOT inventing new accomplishments
-- **Refined evidence** may be used only when it is candidate-confirmed, public, and visible to that document type
-- **NEVER expose** the evidence bank, refiner session, application defaults, or private/interview-only notes in generated application JSON or PDFs
-- **CONSIDER** all eligible confirmed public evidence before ranking bullets within each role; never reorder roles by relevance
-- **VERIFY** links in the PDF itself. Never invent a website or certification URL; use only validated public profile links
-- The tailored JSON must use the renderer-compatible public profile structure, not the private/refinement fields from master-profile.json
-- When in doubt, keep the original text unchanged
+Violating these produces a fraudulent resume.
+- **NEVER fabricate** companies, titles, dates, education, certifications or skills, and **NEVER reword** a bullet, headline or summary. Every sentence in a resume is candidate-confirmed wording from `master-profile.json` (evidence bank, blueprints, variants), copied verbatim.
+- Selection, ordering, page fitting and the summary review are the code's job. Your job is confirming new wording, facets and blueprint choices with the candidate and reviewing the output.
+- **NEVER expose** the evidence bank, facets, blueprints, refiner session, application defaults or private notes in generated JSON or PDFs.
+- **VERIFY** links in the PDF itself. Never invent a website or certification URL.
+- When in doubt, keep the confirmed text unchanged and ask.
 
 
 ## Invited candidate service

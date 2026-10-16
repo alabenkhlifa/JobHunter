@@ -102,6 +102,14 @@ Only evidence marked `candidate-confirmed`, `public`, and visible to `resume` or
 
 For a role family that needs a deliberately curated resume structure, Resume Refiner may add a `resume_variants` entry after the user confirms the complete public output. Each variant has a stable ID, `match_terms`, optional title-scoped `role_terms`, optional priority and `max_pages`, optional omitted sections, and a complete renderer-compatible public resume snapshot. Identity and contact data always come from the master profile; unspecified master-profile resume sections are not inherited. JobHunter selects only `candidate-confirmed` variants, preserves their wording and order exactly, and normally falls back to legacy evidence ranking when none matches. Architecture-titled jobs are stricter: they require a matching role-scoped confirmed variant instead of the generic fallback. The renderer must report a page count within `max_pages` before the application can reach `package_generated`.
 
+The current resume path uses role-family blueprints and evidence facets instead of fixed variants. Put the changes in a private updates file (never in git) with up to four keys: `facets` (per evidence ID: `project`, `kind`, `stack`, `domains`), `new_evidence` (evidence items whose `public_text` already exists verbatim as confirmed wording; anything else is refused), `engagement_roles` (the confirmed role title per company and client engagement) and `resume_blueprints` (one entry per role family with the confirmed headline, summary, skills, certification order, page target and project limits). Run the migration as a dry run first, then again with `--apply`; it writes a timestamped backup next to the profile and replaces it atomically. Validate the profile afterwards. Only `candidate-confirmed` blueprints are used, and one of them may carry `default: true` as the fallback for titles no blueprint lists. Each package's private manifest then records `resume_score`, `resume_needs_review` and `score_flags`. The evaluation harness `tools/eval_resume_packages.py` runs only on a COPY of `data/jobs.db`, never on the live database.
+
+```bash
+python tools/migrate_profile_blueprints.py --profile data/master-profile.json --updates <private_updates.json>   # dry run
+python tools/migrate_profile_blueprints.py --profile data/master-profile.json --updates <private_updates.json> --apply
+python resume_refiner.py validate data/master-profile.json
+```
+
 Package generation also pauses when the profile contains an obvious inconsistent same-employer progression, such as an earlier lower-seniority role marked `Present` after a later higher-seniority role has ended. Confirm and store the exact date before retrying; do not guess it. Each successful package includes a private `tailoring_manifest.json` recording the selected mode, variant ID, profile digest, page count, and readiness checks.
 
 ## 5. Dedicated application mailbox and dual-account model
@@ -409,7 +417,7 @@ The autopilot (`jobhunter_autopilot/`) lets the engine submit without a per-appl
    python -m jobhunter_autopilot.cli plan --dry-run   # read-only; lists preflight.missing_application_defaults
    ```
 
-   The policy lives in `~/.jobhunter/state/auto_apply.json` (0600). Change it only with `config set K=V` (`min_score`, `max_per_day`, `roles`, `locations.cities`, `companies.allow`, `companies.deny`, `preferred_stack`), `enable`, `disable`, `pause [--until DATE]`, `resume`, `live`, `rehearsal`, `reset`.
+   The policy lives in `~/.jobhunter/state/auto_apply.json` (0600). Change it only with `config set K=V` (`min_score`, `min_resume_score`, `max_per_day`, `roles`, `locations.cities`, `companies.allow`, `companies.deny`, `preferred_stack`), `enable`, `disable`, `pause [--until DATE]`, `resume`, `live`, `rehearsal`, `reset`.
 2. Install the Hermes skill `auto-apply` and the wrapper scripts `jobhunter_autopilot.py`, `jobhunter_autopilot_review_batch.py`, `jobhunter_autopilot_plan.py` under `~/.hermes/`, then start a new Hermes session so the skill is visible. In Telegram, plain phrases such as "auto apply settings", "set auto apply min score 80", "enable auto apply" or "auto apply go live" run the matching `config` command.
 3. Create the two cron jobs (full commands in the `auto-apply` skill, "Operator setup"):
 
@@ -424,6 +432,8 @@ The autopilot (`jobhunter_autopilot/`) lets the engine submit without a per-appl
 
    The plan pre-run does selection, availability checks, salary/company research, packages and answers before the agent starts, so the agent's terminal timeout does not cut them off.
 4. Rehearsal → live: `config enable` turns it on in `rehearsal` mode (every form filled, final submit refused, screenshot saved, summary sent). After checking a few rehearsals, `config set max_per_day=1` and `config live`. A submit counts as `submitted` only after `verify-receipt` confirms the portal receipt; raise the cap once a few live runs look right.
+
+   A package whose resume scores below `min_resume_score` (default 60) or is flagged for review is handed off as `resume_needs_review` at plan time and never applied unattended.
 
 ## 9. Privacy Notice / Terms & Conditions gates
 
