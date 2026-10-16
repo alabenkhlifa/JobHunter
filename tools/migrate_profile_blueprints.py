@@ -6,7 +6,11 @@ The updates file is private JSON::
     {"facets": {"<evidence id>": {"project": ..., "kind": ..., "stack": [...], "domains": [...]}},
      "new_evidence": [<evidence_bank items whose public_text already exists as confirmed wording>],
      "engagement_roles": {"<company>": {"<engagement name>": "<confirmed role title>"}},
-     "resume_blueprints": [<blueprints>]}
+     "resume_blueprints": [<blueprints>],
+     "hide_from": {"<evidence id>": ["resume"]}}
+
+``hide_from`` removes the listed values from an evidence item's ``visibility``,
+so a confirmed bullet stops appearing on resumes without being deleted.
 
 Nothing new is worded here: an indexed item is refused unless its text already
 appears verbatim in the candidate's confirmed experience, employment groups,
@@ -50,7 +54,8 @@ def confirmed_wording(profile):
 def merge(profile, updates):
     """Return (merged profile, report). Raises ValueError for anything that is not already confirmed."""
     merged = copy.deepcopy(profile)
-    report = {"facets": 0, "new_evidence": 0, "skipped_evidence": 0, "engagement_roles": 0, "blueprints": 0}
+    report = {"facets": 0, "new_evidence": 0, "skipped_evidence": 0, "engagement_roles": 0, "blueprints": 0,
+              "hidden": 0}
     bank = {e.get("id"): e for e in merged.get("evidence_bank") or [] if isinstance(e, dict)}
     for evidence_id, facets in (updates.get("facets") or {}).items():
         if evidence_id not in bank:
@@ -69,8 +74,20 @@ def merge(profile, updates):
         if item.get("experience_id") not in experience_ids:
             raise ValueError(f"new evidence {item.get('id')} references an unknown experience")
         merged.setdefault("evidence_bank", []).append(copy.deepcopy(item))
-        bank[item["id"]] = item
+        bank[item["id"]] = merged["evidence_bank"][-1]
         report["new_evidence"] += 1
+    for evidence_id, values in (updates.get("hide_from") or {}).items():
+        if evidence_id not in bank:
+            raise ValueError(f"hide_from references unknown evidence {evidence_id}")
+        if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+            raise ValueError(f"hide_from values for {evidence_id} must be a list of strings")
+        record = bank[evidence_id]
+        current = record.get("visibility")
+        current = [current] if isinstance(current, str) else list(current or [])
+        kept = [v for v in current if v not in values]
+        if kept != current:
+            record["visibility"] = kept
+            report["hidden"] += 1
     for company, roles in (updates.get("engagement_roles") or {}).items():
         group = next((g for g in merged.get("employment_groups") or [] if g.get("company") == company), None)
         if group is None:

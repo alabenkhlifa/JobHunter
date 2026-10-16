@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
 import migrate_profile_blueprints as migrate  # noqa: E402
@@ -53,3 +55,32 @@ def test_migration_refuses_new_wording_that_is_not_already_confirmed(profile, tm
     file.write_text(json.dumps(updates))
     assert migrate.main(["--profile", str(path), "--updates", str(file), "--apply"]) == 2
     assert json.loads(path.read_text()) == profile
+
+
+def hide_updates():
+    return {"hide_from": {"cars-video": ["resume"]}}
+
+
+def with_cover_letter(profile):
+    bank = {e["id"]: e for e in profile["evidence_bank"]}
+    bank["cars-video"]["visibility"] = ["resume", "cover-letter"]
+    return profile
+
+
+def test_hide_from_drops_resume_and_keeps_other_visibility(profile):
+    merged, report = migrate.merge(with_cover_letter(profile), hide_updates())
+    bank = {e["id"]: e for e in merged["evidence_bank"]}
+    assert bank["cars-video"]["visibility"] == ["cover-letter"]
+    assert report["hidden"] == 1
+    migrate.validate_profile(merged)
+
+
+def test_hide_from_is_idempotent(profile):
+    merged, _ = migrate.merge(with_cover_letter(profile), hide_updates())
+    again, report = migrate.merge(merged, hide_updates())
+    assert report["hidden"] == 0 and again == merged
+
+
+def test_hide_from_refuses_unknown_evidence(profile):
+    with pytest.raises(ValueError, match="hide_from"):
+        migrate.merge(profile, {"hide_from": {"missing": ["resume"]}})
