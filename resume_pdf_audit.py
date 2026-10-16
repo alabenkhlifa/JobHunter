@@ -45,9 +45,19 @@ def _links(resume):
 
 
 def resume_layout_metrics(path):
-    """Measure occupied body height in each column of the actual one-page PDF."""
+    """Page count, the main column's fill on every page, and both columns' fill for a one-page PDF."""
     with fitz.open(path) as document:
-        result = {"pages": len(document)}
+        result = {"pages": len(document), "main_fills": []}
+        for index, page in enumerate(document, 1):
+            top_limit = 85 if index == 1 else StyledResumePDF.PAGE_TOP - 12
+            body = [word for word in page.get_text("words")
+                    if StyledResumePDF.MAIN_X <= word[0] < StyledResumePDF.MAIN_X + StyledResumePDF.MAIN_W
+                    and word[1] >= top_limit]
+            fill = 0.0
+            if body:
+                top, bottom = min(w[1] for w in body), max(w[3] for w in body)
+                fill = round(min(1, (bottom - top) / (StyledResumePDF.BOTTOM - top)), 4)
+            result["main_fills"].append(fill)
         if len(document) != 1:
             return result
         words = document[0].get_text("words")

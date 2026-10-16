@@ -118,7 +118,7 @@ def test_codes():
     assert not codes.is_valid("unanswerable:")
     assert not codes.is_valid("made_up")
     assert "Notice period" in codes.describe("unanswerable:Notice period")
-    assert len(codes.HARD_STOPS) == 14
+    assert len(codes.HARD_STOPS) == 15
 
 
 def test_store_schema_log_and_cap():
@@ -157,3 +157,13 @@ def test_lock_is_exclusive(tmp_path):
             assert not second
     with store.autopilot_lock(path) as again:
         assert again
+
+
+def test_min_resume_score_is_a_settable_bounded_integer():
+    p = policy.defaults()
+    p["enabled"] = True
+    assert policy.validate(p)["min_resume_score"] == 60
+    p["min_resume_score"] = 101
+    with pytest.raises(policy.PolicyError):
+        policy.validate(p)
+    assert "min_resume_score" in policy.KEYS

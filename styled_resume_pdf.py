@@ -779,6 +779,9 @@ class StyledResumePDF(FPDF):
 
     def _engagement_heading_lines(self, engagement):
         name = str(engagement.get("name") or "")
+        role = str(engagement.get("role") or "").strip()
+        if role:
+            name = f"{name} \u00b7 {role}"
         return self._wrap(name, self.MAIN_W - 25.5, "Rubik", "B", 8.2)
 
     def _engagement_header(self, engagement, y, *, continued=False):

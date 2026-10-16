@@ -186,10 +186,32 @@ def package_evidence_proposal(conn, job_id):
     return evidence_proposal(read_manifest(row[0])) if row and row[0] else None
 
 
+def _resume_fields(manifest):
+    """Resume score fields from a blueprint manifest; None/False/[] for legacy packages."""
+    manifest = manifest if isinstance(manifest, dict) else {}
+    score = manifest.get("resume_score")
+    return {"resume_score": score if isinstance(score, int) and not isinstance(score, bool) else None,
+            "resume_needs_review": manifest.get("resume_needs_review") is True,
+            "resume_flags": [str(f) for f in (manifest.get("score_flags") or []) if f]}
+
+
+def resume_review(package, policy):
+    """The hand-off detail when the package's resume needs a human, else None."""
+    score = package.get("resume_score")
+    flags = package.get("resume_flags") or []
+    if package.get("resume_needs_review"):
+        return f"score {score if score is not None else '?'}: " + ("; ".join(flags) or "scorer asked for review")
+    threshold = policy.get("min_resume_score")
+    if score is not None and isinstance(threshold, int) and score < threshold:
+        return f"score {score} below {threshold}" + (": " + "; ".join(flags) if flags else "")
+    return None
+
+
 def _package_dict(package):
+    manifest = read_manifest(package.package_dir)
     return {"dir": str(package.package_dir), "resume_pdf": str(package.resume_pdf),
             "cover_pdf": str(package.cover_pdf) if package.cover_pdf else None,
-            "evidence_proposal": evidence_proposal(read_manifest(package.package_dir))}
+            "evidence_proposal": evidence_proposal(manifest), **_resume_fields(manifest)}
 
 
 def existing_package(conn, job_id, profile):
@@ -209,7 +231,7 @@ def existing_package(conn, job_id, profile):
         return None
     cover = directory / "CoverLetter.pdf"
     return {"dir": str(directory), "resume_pdf": str(resume), "cover_pdf": str(cover) if cover.is_file() else None,
-            "evidence_proposal": evidence_proposal(manifest)}
+            "evidence_proposal": evidence_proposal(manifest), **_resume_fields(manifest)}
 
 
 def make_package(job_id, *, db_path, profile_path, output_dir, **options):
@@ -420,6 +442,17 @@ def _build(plan, db_path, policy, *, now, dry_run, no_package, no_research, outp
                             conn, job, codes.PACKAGE_NOT_READY, detail, run_id=run_id, policy=policy,
                             sender=sender, now=now))
                     continue
+            review = resume_review(package, policy) if package else None
+            if review:
+                label = {"job_id": job["id"], "title": job.get("title"), "company": job.get("company")}
+                if dry_run:
+                    plan["handoffs"].append(dict(label, reason=f"{codes.RESUME_NEEDS_REVIEW}: {review[:200]}",
+                                                 status="blocked", telegram="skipped"))
+                else:
+                    plan["handoffs"].append(block_and_hand_off(
+                        conn, job, codes.RESUME_NEEDS_REVIEW, review[:200], run_id=run_id, policy=policy,
+                        sender=sender, now=now))
+                continue
             answers, note = run_answers(profile, research, mailbox=mailbox)
             if note:
                 notes.append(f"{job['id']}: {note}")
@@ -493,6 +526,16 @@ def _build(plan, db_path, policy, *, now, dry_run, no_package, no_research, outp
                         notes.append(f"package generation failed ({type(exc).__name__}); planning stopped")
                         stop = True
                         break
+                    review = resume_review(package, policy)
+                    if review:
+                        if dry_run:
+                            plan["handoffs"].append(dict(label, reason=f"{codes.RESUME_NEEDS_REVIEW}: {review[:200]}",
+                                                         status="blocked", telegram="skipped"))
+                        else:
+                            plan["handoffs"].append(block_and_hand_off(
+                                conn, job, codes.RESUME_NEEDS_REVIEW, review[:200], run_id=run_id, policy=policy,
+                                sender=sender, now=now))
+                        continue
                     if not dry_run:
                         conn.execute("UPDATE jobs SET status='interested' WHERE id=? AND status<>'interested'",
                                      (job["id"],))

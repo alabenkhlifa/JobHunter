@@ -1,0 +1,25 @@
+# Evaluation set: real postings (score >= 75) from the Pi database, mixed role families.
+# architect
+sj-5adf1e9651   # Product Architect, Denodo, Madrid
+li-4471351509   # Software Architect, Air Apps, Zurich
+li-4460235791   # Java Microservices Architect, NTT DATA, Madrid
+sj-79de8bfbae   # Backend Solutions Architect Reef, Mapfre, Madrid
+li-4416813325   # (SENIOR) SOFTWARE ARCHITECT - API & INTEGRATION, Canyon, Barcelona
+li-4418781200   # Technical Architect, Sage, Barcelona
+sj-f8c5d85675   # Smart Factory Solutions Architect, Straumann, Madrid
+# lead
+li-4470931205   # Lead Software Engineer, Clarivate, Barcelona
+sdj-i0mcmil     # Lead Software Engineer, Swiss Re, Madrid
+sj-f793d797aa   # Technical Lead Java (Remote), knowmad mood, Madrid
+li-4477300261   # Tech Leader, BNP Paribas Personal Finance, Madrid
+li-4370823360   # Software Engineer Tech Lead, AXA, Barcelona (Node/Azure)
+# senior backend java/kotlin
+li-4473613888   # Software Backend Engineer, ING, Madrid
+li-4474143085   # Senior Java Developer, InnoIT, Barcelona
+li-4474191258   # Backend Developer Java AWS Kafka, Malthus Darwin, Barcelona
+li-4478475487   # Senior Backend Engineer (Java & Kafka), Joppy, Madrid
+li-4465514270   # SENIOR JAVA DEVELOPER, Amaris, Barcelona (candidate-approved reference resume)
+li-4475850046   # Senior Java Software Developer, Allianz Technology, Barcelona
+# platform
+li-4464117012   # Lead Software Engineer - Cloud & API Architecture, Rocken, Zurich
+foundit-69239086 # Senior Software Engineer - Java FullStack - Platform Services, Emirates, Dubai

@@ -33,6 +33,7 @@ import job_scoring
 import scraper
 from resume_bullet_ranking import bullet_match, order_bullet_indexes
 from resume_inline import normalized_text
+import resume_pipeline
 import resume_quality
 from resume_refiner import (
     apply_resume_variant,
@@ -1885,6 +1886,9 @@ def _resume_for_job(
     generated, or built for a specific job/company in the resume content.
     """
     validate_profile(profile)
+    if resume_pipeline.enabled(profile):
+        # Blueprint profiles select confirmed evidence per posting; there is no snapshot variant.
+        return resume_pipeline.plan(profile, job).payload, None
     quality = resume_quality.enabled(profile)
     job_text = _job_relevance_text(job)
     job_title = str(job.get("title") or "")
@@ -2363,7 +2367,7 @@ def _assert_tailoring_ready(
             "The candidate profile has an inconsistent same-employer role progression. "
             "Confirm the exact role end date before generating another package."
         )
-    if not _role_variant_requirement_satisfied(job, selected_variant):
+    if not resume_pipeline.enabled(profile) and not _role_variant_requirement_satisfied(job, selected_variant):
         raise TailoringReadinessError(
             "No candidate-confirmed resume variant matches this architecture role. "
             "Complete the Software Architect resume variant before generating the package."
@@ -3033,12 +3037,27 @@ def prepare_application_package(
                 "Do not regenerate its application package."
             )
         profile = _load_profile(profile_path)
-        resume_payload, selected_variant = _resume_for_job(profile, job)
-        quality = resume_quality.enabled(profile)
+        blueprint_plan, summary_info = None, None
+        if resume_pipeline.enabled(profile):
+            try:
+                blueprint_plan = resume_pipeline.plan(profile, job)
+            except resume_pipeline.BlueprintError as exc:
+                raise TailoringReadinessError(str(exc)) from None
+            resume_payload, selected_variant = blueprint_plan.payload, None
+        else:
+            resume_payload, selected_variant = _resume_for_job(profile, job)
+        quality = resume_quality.enabled(profile) and blueprint_plan is None
         propose = bool(accept_evidence_proposals) and quality and selected_variant is not None
         _assert_tailoring_ready(profile, job, selected_variant, check_evidence=not propose)
         quality_report, pdf_checks, summary_review, proposal = {}, {}, None, None
-        if quality:
+        if blueprint_plan is not None:
+            try:
+                summary_text, summary_info = resume_pipeline.summarize(
+                    profile, job, blueprint_plan, planner=summary_planner, draft=resume_summary_draft)
+            except resume_quality.ResumeQualityError as exc:
+                raise TailoringReadinessError(str(exc)) from None
+            resume_payload["summary"] = summary_text
+        elif quality:
             try:
                 selection = resume_payload
                 gaps = _evidence_proposal_gaps(profile, job, selection, prior_evidence_ids) if propose else None
@@ -3068,7 +3087,7 @@ def prepare_application_package(
         _assert_direct_output_child(package_dir, output_root)
         cover_source = resume_payload if selected_variant is not None else profile
         variant_max_pages = selected_variant.get("max_pages") if selected_variant is not None else None
-        if not render_pdfs and (variant_max_pages is not None or quality):
+        if not render_pdfs and (variant_max_pages is not None or quality or blueprint_plan is not None):
             raise RuntimeError("A page-limited confirmed resume variant requires PDF rendering")
 
         output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -3104,8 +3123,31 @@ def prepare_application_package(
                 letter_payload,
             )
         resume_page_count: int | None = None
+        blueprint_fields: dict[str, Any] = {}
         if render_pdfs:
-            if quality:
+            if blueprint_plan is not None:
+                def render_blueprint_payload(payload):
+                    _write_private_json(staged_resume_json, payload)
+                    _render_pdf("resume", staged_resume_json, staged_resume_pdf)
+                    from resume_pdf_audit import resume_layout_metrics
+                    return resume_layout_metrics(staged_resume_pdf)
+                try:
+                    resume_payload, layout_report = resume_pipeline.fit(
+                        blueprint_plan, resume_payload, profile, job, render_blueprint_payload)
+                    render_blueprint_payload(resume_payload)
+                    resume_page_count = layout_report["pages"]
+                    from resume_pdf_audit import audit_resume_pdf, render_review_pages
+                    pdf_checks = audit_resume_pdf(staged_resume_pdf, resume_payload, max_pages=2)
+                    render_review_pages(staged_resume_pdf, staging_dir / "review-pages")
+                except (resume_quality.ResumeQualityError, ValueError) as exc:
+                    raise TailoringReadinessError(str(exc)) from None
+                except ImportError:
+                    raise TailoringReadinessError("Mandatory PDF verification dependencies are unavailable") from None
+                card = resume_pipeline.assess(blueprint_plan, resume_payload, profile, layout_report=layout_report,
+                                              summary_info=summary_info, audit=pdf_checks)
+                blueprint_fields = resume_pipeline.manifest_fields(
+                    blueprint_plan, resume_payload, layout_report=layout_report, summary_info=summary_info, card=card)
+            elif quality:
                 def render_quality_payload(payload):
                     _write_private_json(staged_resume_json, payload)
                     _render_pdf("resume", staged_resume_json, staged_resume_pdf)
@@ -3144,7 +3186,7 @@ def prepare_application_package(
         _write_private_json(
             staged_manifest_json,
             {
-                "manifest_version": 2 if quality else 1,
+                "manifest_version": 3 if blueprint_plan is not None else 2 if quality else 1,
                 "job_id": job_id,
                 "job_title": str(job.get("title") or ""),
                 "tailoring_mode": "confirmed_variant" if selected_variant is not None else "legacy_fallback",
@@ -3156,11 +3198,12 @@ def prepare_application_package(
                 **({"resume_quality": quality_report, "summary_review": {**summary_review,
                     "review_source": "provided_reviewed_draft" if resume_summary_draft is not None else "independent_model"}} if quality else {}),
                 **(proposal or {}),
+                **blueprint_fields,
                 "quality_checks": {
                     **pdf_checks,
                     "timeline_consistent": True,
-                    "role_variant_required": _requires_confirmed_role_variant(job),
-                    "role_variant_requirement_satisfied": _role_variant_requirement_satisfied(
+                    "role_variant_required": blueprint_plan is None and _requires_confirmed_role_variant(job),
+                    "role_variant_requirement_satisfied": blueprint_plan is not None or _role_variant_requirement_satisfied(
                         job,
                         selected_variant,
                     ),

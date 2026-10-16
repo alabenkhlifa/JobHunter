@@ -400,3 +400,37 @@ def test_render_errors_defer_without_blocking(world, monkeypatch):
     assert result["deferred"][0]["job_id"] == job["id"] and result["handoffs"] == []
     assert log_status(world.conn, job["id"]) == "deferred"
     assert world.conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0] == 0
+
+
+def test_low_resume_score_hands_off_with_the_scorer_flags(world):
+    bad = add_job(world.conn, score=95)
+    world.manifest_extra.update({"resume_score": 41, "resume_needs_review": True,
+                                 "score_flags": ["role family: posting architect, blueprint backend", "page two under-used (12%)"]})
+    sender = Sender()
+    result, _ = build(world, sender=sender)
+    assert result["applications"] == []
+    handoff = result["handoffs"][0]
+    assert handoff["job_id"] == bad["id"] and handoff["telegram"] == "sent"
+    assert handoff["reason"].startswith("resume_needs_review: score 41")
+    assert "role family" in handoff["reason"]
+    stage, error = world.conn.execute("SELECT stage, error FROM applications WHERE job_id=?", (bad["id"],)).fetchone()
+    assert stage == "blocked_auto_apply" and error.startswith("resume_needs_review: ")
+    assert log_status(world.conn, bad["id"]) == "handed_off"
+
+
+def test_policy_threshold_applies_to_the_resume_score(world):
+    add_job(world.conn, score=90)
+    world.manifest_extra.update({"resume_score": 65, "resume_needs_review": False, "score_flags": []})
+    result, _ = build(world, enabled_policy(min_resume_score=70))
+    assert result["applications"] == [] and result["handoffs"][0]["reason"].startswith("resume_needs_review: score 65 below 70")
+    other = add_job(world.conn, score=90)
+    result, _ = build(world, enabled_policy(min_resume_score=60))
+    assert [a["job_id"] for a in result["applications"]] == [other["id"]]
+    package = result["applications"][0]["package"]
+    assert package["resume_score"] == 65 and package["resume_needs_review"] is False and package["resume_flags"] == []
+
+
+def test_legacy_manifests_without_a_score_are_not_handed_off(world):
+    add_job(world.conn)
+    result, _ = build(world, enabled_policy(min_resume_score=90))
+    assert len(result["applications"]) == 1 and result["applications"][0]["package"]["resume_score"] is None

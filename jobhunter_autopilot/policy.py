@@ -43,6 +43,7 @@ DEFAULTS = {
     "paused": False,
     "paused_until": None,
     "min_score": 75,
+    "min_resume_score": 60,
     "roles": ["senior_software_engineer", "lead_software_engineer"],
     "preferred_stack": ["java", "spring", "kotlin", "microservices"],
     "locations": {"countries": ["es"], "cities": []},
@@ -184,6 +185,7 @@ def validate(policy):
     if policy.get("paused_until") is not None:
         _parse_aware(policy["paused_until"], "paused_until")
     _int(policy.get("min_score"), "min_score", 0, 100)
+    _int(policy.get("min_resume_score"), "min_resume_score", 0, 100)
     _int(policy.get("max_per_day"), "max_per_day", 0, 10)
     _int(policy.get("max_handoffs_per_run"), "max_handoffs_per_run", 0, 10)
     _int(policy.get("review_batch_size"), "review_batch_size", 1, 40)
@@ -234,7 +236,7 @@ def validate(policy):
 
 _BOOLS = {"true": True, "yes": True, "on": True, "1": True,
           "false": False, "no": False, "off": False, "0": False}
-_INT_KEYS = {"min_score": (0, 100), "max_per_day": (0, 10), "max_handoffs_per_run": (0, 10),
+_INT_KEYS = {"min_score": (0, 100), "min_resume_score": (0, 100), "max_per_day": (0, 10), "max_handoffs_per_run": (0, 10),
              "review_batch_size": (1, 40), "salary_ask.round_to": (1, 10000)}
 _LIST_KEYS = {"roles", "preferred_stack", "locations.countries", "locations.cities",
               "companies.allow", "companies.deny", "include_statuses"}
@@ -387,7 +389,7 @@ def summary_text(policy, now=None):
     deny = ", ".join(policy["companies"]["deny"]) or "none"
     return "\n".join([
         f"Auto apply: {state} ({mode})",
-        f"Min score {policy['min_score']} · max {policy['max_per_day']}/day · "
+        f"Min score {policy['min_score']} · resume score ≥ {policy['min_resume_score']} · max {policy['max_per_day']}/day · "
         f"roles: {', '.join(_label(r) for r in policy['roles'])}",
         f"Locations: {countries} ({cities}) · stack boost: {', '.join(policy['preferred_stack']) or 'none'}",
         f"Companies: allow {allow} · deny {deny}",

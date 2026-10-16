@@ -78,7 +78,7 @@ def test_config_round_trip(env, capsys):
     code, out = run(capsys, args + ["config", "show"])
     assert code == 0 and out.startswith("Auto apply: OFF (rehearsal")
     code, out = run(capsys, args + ["--via", "telegram", "config", "set", "min_score=80", "max_per_day=1"])
-    assert code == 0 and "Min score 80 · max 1/day" in out
+    assert code == 0 and "Min score 80 · resume score ≥ 60 · max 1/day" in out
     assert stat.S_IMODE(os.stat(fresh).st_mode) == 0o600
     assert policy.load(fresh)["updated_via"] == "telegram"
     assert run(capsys, args + ["config", "enable"])[1].startswith("Auto apply: ON (rehearsal")

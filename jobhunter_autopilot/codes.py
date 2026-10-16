@@ -21,12 +21,13 @@ LINKEDIN_EASY_APPLY = "linkedin_easy_apply"
 RECEIPT_UNVERIFIED = "receipt_unverified"
 BROWSER_UNAVAILABLE = "browser_unavailable"
 BUDGET_EXCEEDED = "budget_exceeded"
+RESUME_NEEDS_REVIEW = "resume_needs_review"
 
 HARD_STOPS = frozenset({
     CAPTCHA, PHONE_OR_IDENTITY, NO_AI_ANSWER, SALARY_PERIOD_AMBIGUOUS, FORM_UNVERIFIED,
     EMPLOYER_UNVERIFIED, ACCOUNT_CREATION_FAILED, EMAIL_VERIFICATION_UNSUPPORTED,
     PACKAGE_NOT_READY, COVER_LETTER_FAILED, LINKEDIN_EASY_APPLY, RECEIPT_UNVERIFIED,
-    BROWSER_UNAVAILABLE, BUDGET_EXCEEDED,
+    BROWSER_UNAVAILABLE, BUDGET_EXCEEDED, RESUME_NEEDS_REVIEW,
 })
 
 DESCRIPTIONS = {
@@ -44,6 +45,7 @@ DESCRIPTIONS = {
     RECEIPT_UNVERIFIED: "the submission could not be confirmed",
     BROWSER_UNAVAILABLE: "the browser was unavailable",
     BUDGET_EXCEEDED: "the application took longer than its time budget",
+    RESUME_NEEDS_REVIEW: "the generated resume scored below the review threshold",
 }
 
 MAX_LABEL = 120
