@@ -18,6 +18,7 @@ import resume_evidence as evidence
 import resume_layout as layout
 import resume_quality
 import resume_scorecard as scorecard
+from resume_inline import normalized_text
 
 SUMMARY_GUIDANCE = (
     " summary_focus lists the kinds of work this role family leads with; draw the second and third sentences from the "
@@ -130,10 +131,30 @@ def _irrelevant_certifications(profile, job, payload):
     return result
 
 
+def _irrelevant_skills(profile, job, payload):
+    """(category, tag) pairs the page planner may omit, longest category first, last tag first.
+
+    A category's first three tags stay; so do protected skills and tags that the
+    posting or a selected bullet names.
+    """
+    protected = {normalized_text(s) for s in (profile.get("resume_quality") or {}).get("protected_skills", [])}
+    bullets = [b for role in payload.get("experience") or [] for entry in role.get("engagements") or [role]
+               for b in entry.get("bullets") or []]
+    corpus = evidence._text(" ".join([*(str(job.get(k) or "") for k in ("title", "description", "tech_required")), *map(str, bullets)]))
+    categories = [(c, tags) for c, tags in (payload.get("skills") or {}).items() if isinstance(tags, list)]
+    result = []
+    for category, tags in sorted(categories, key=lambda item: -len(item[1])):
+        for tag in reversed(tags[3:]):
+            if normalized_text(tag) not in protected and not evidence._contains(corpus, evidence._text(tag)):
+                result.append((category, tag))
+    return result
+
+
 def fit(plan_, payload, profile, job, render):
     """Fit the payload to the blueprint's pages; returns (payload, layout report)."""
     return layout.fit_pages(payload, render, plan_.scores, pages=int(plan_.blueprint.get("pages") or 1),
-                            openings=plan_.openings, omittable_certifications=_irrelevant_certifications(profile, job, payload))
+                            openings=plan_.openings, omittable_certifications=_irrelevant_certifications(profile, job, payload),
+                            omittable_skills=_irrelevant_skills(profile, job, payload))
 
 
 def assess(plan_, payload, profile, *, layout_report, summary_info, audit):

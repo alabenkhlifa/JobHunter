@@ -1,9 +1,12 @@
 """Page planning: make the resume fit its blueprint's page target by trimming the weakest evidence.
 
 Order of attempts: tighter spacing, then listed irrelevant certifications, then
-the lowest-scored non-opening bullets, then whole weak projects. A two-page
-target falls back to one page when page two would stay mostly empty. Wording
-is never changed; the input payload is never mutated.
+the lowest-scored non-opening bullets, then whole weak projects. Bullets only
+go while the main column itself spills over; a sidebar-only overflow is reported
+instead. Skill tags that neither the posting nor the selected bullets name go
+before that overflow is reported. A two-page target falls back to one page when
+page two would stay mostly empty. Wording is never changed; the input payload is
+never mutated.
 """
 
 from __future__ import annotations
@@ -71,7 +74,23 @@ def _drop_weakest(payload, scores, openings, report):
     return True
 
 
-def _shrink(payload, render, scores, openings, target, report, omittable):
+def _omit_skill(payload, pending, report):
+    """Remove the next listed skill tag still on the page; return False when none is left."""
+    skills = payload.get("skills") or {}
+    while pending:
+        category, tag = pending.pop(0)
+        tags = skills.get(category)
+        if isinstance(tags, list) and tag in tags:
+            tags.remove(tag)
+            if not tags:
+                del skills[category]
+            report["omitted_skills"].append(tag)
+            return True
+    return False
+
+
+def _shrink(payload, render, scores, openings, target, report, omittable, omittable_skills=()):
+    pending_skills = list(omittable_skills)
     pages, fills = _measure(render, payload)
     if pages > target:
         payload.setdefault("layout", {})["compact_spacing"] = True
@@ -86,6 +105,14 @@ def _shrink(payload, render, scores, openings, target, report, omittable):
             report["omitted_certifications"].append(cert)
             pages, fills = _measure(render, payload)
     while pages > target:
+        if fills and fills[-1] == 0:
+            # The main column already ends before the overflow page: only the sidebar spills,
+            # and dropping bullets would empty the resume without fixing that.
+            if _omit_skill(payload, pending_skills, report):
+                pages, fills = _measure(render, payload)
+                continue
+            report["note"] = f"overflow: {pages} pages for a {target}-page target (sidebar)"
+            break
         if not _drop_weakest(payload, scores, openings, report):
             report["note"] = f"overflow: {pages} pages for a {target}-page target"
             break
@@ -93,16 +120,19 @@ def _shrink(payload, render, scores, openings, target, report, omittable):
     return pages, fills
 
 
-def fit_pages(payload, render, scores, *, pages, openings=(), omittable_certifications=(), min_page_two_fill=MIN_PAGE_TWO_FILL):
+def fit_pages(payload, render, scores, *, pages, openings=(), omittable_certifications=(), omittable_skills=(),
+              min_page_two_fill=MIN_PAGE_TWO_FILL):
     """Return (fitted payload, report). ``scores`` and ``openings`` are keyed by bullet text."""
     work = copy.deepcopy(payload)
     openings = set(openings)
     report = {"target_pages": pages, "dropped": [], "dropped_projects": [], "omitted_certifications": [],
-              "compact": False, "note": ""}
-    measured, fills = _shrink(work, render, scores, openings, pages, report, list(omittable_certifications))
+              "omitted_skills": [], "compact": False, "note": ""}
+    measured, fills = _shrink(work, render, scores, openings, pages, report, list(omittable_certifications),
+                              list(omittable_skills))
     if pages == 2 and measured == 2 and fills and fills[-1] < min_page_two_fill:
         trial, trial_report = copy.deepcopy(work), copy.deepcopy(report)
-        trial_pages, trial_fills = _shrink(trial, render, scores, openings, 1, trial_report, list(omittable_certifications))
+        trial_pages, trial_fills = _shrink(trial, render, scores, openings, 1, trial_report,
+                                           list(omittable_certifications), list(omittable_skills))
         if trial_pages == 1:
             work, report, measured, fills = trial, trial_report, trial_pages, trial_fills
             report["note"] = "page two under-used"

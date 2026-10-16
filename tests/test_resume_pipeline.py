@@ -168,3 +168,13 @@ def test_layout_metrics_report_every_page_and_renderer_shows_project_roles(tmp_p
     assert metrics["pages"] == 2 and len(metrics["main_fills"]) == 2 and 0 < metrics["main_fills"][1] <= 1
     with fitz.open(path) as document:
         assert "Project 0 · Software Architect" in document[0].get_text().replace("\n", " ")
+
+
+def test_irrelevant_skills_keep_each_category_head_and_posting_or_bullet_terms():
+    profile = {"resume_quality": {"protected_skills": ["Kubernetes"]}}
+    job = {"title": "Lead Software Engineer", "description": "Lead a Java team. CI/CD with GitHub Actions.", "tech_required": "java"}
+    payload = {"skills": {"Backend": ["Java", "Kotlin", "Spring Boot", "MQTT", "Kubernetes", "Docker", "GitHub Actions"],
+                          "Leadership": ["Team management", "Mentoring", "Agile/Scrum", "Cross-functional coordination"]},
+               "experience": [{"company": "Group Co", "engagements": [{"name": "Cars", "bullets": ["Ran services on Docker."]}]}]}
+    assert pipeline._irrelevant_skills(profile, job, payload) == [
+        ("Backend", "MQTT"), ("Leadership", "Cross-functional coordination")]

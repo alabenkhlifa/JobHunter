@@ -94,3 +94,34 @@ def test_reports_overflow_when_nothing_more_can_be_dropped():
     assert report["pages"] == 1 and report["dropped_projects"] == ["Farm"]
     original = copy.deepcopy(payload)
     assert payload == original  # the input payload is never mutated
+
+
+def test_keeps_bullets_when_only_the_sidebar_spills_onto_the_next_page():
+    payload = payload_with([("Cars", ["own", "mig"]), ("Farm", ["arch", "weak"])])
+    seen = []
+
+    def render(data):
+        seen.append(len(data["certifications"]))
+        return {"pages": 2, "main_fills": [0.3, 0.0]}  # the main column ends on page one
+
+    fitted, report = layout.fit_pages(payload, render, SCORES, pages=1, openings={"own", "arch"},
+                                      omittable_certifications=["Cert B"])
+    assert report["dropped"] == [] and report["dropped_projects"] == []
+    assert fitted["certifications"] == ["Cert A"] and report["compact"] is True  # sidebar trims still run
+    assert report["pages"] == 2 and report["note"] == "overflow: 2 pages for a 1-page target (sidebar)"
+    assert seen == [2, 2, 1]
+
+
+def test_sidebar_overflow_omits_unnamed_skill_tags_before_giving_up():
+    payload = payload_with([("Cars", ["own", "mig"])])
+    payload["skills"] = {"Backend": ["Java", "MQTT", "Docker"], "Leadership": ["Mentoring", "Agile"]}
+
+    def render(data):
+        tags = sum(len(v) for v in data["skills"].values())
+        return {"pages": 2, "main_fills": [0.5, 0.0]} if tags > 3 else {"pages": 1, "main_fills": [0.5]}
+
+    fitted, report = layout.fit_pages(payload, render, SCORES, pages=1, openings={"own"},
+                                      omittable_skills=[("Backend", "MQTT"), ("Leadership", "Agile"), ("Backend", "Docker")])
+    assert fitted["skills"] == {"Backend": ["Java", "Docker"], "Leadership": ["Mentoring"]}
+    assert report["omitted_skills"] == ["MQTT", "Agile"] and report["dropped"] == [] and report["pages"] == 1
+    assert fitted["experience"][0]["bullets"] == ["own", "mig"]

@@ -139,8 +139,15 @@ def build(profile, job, blueprint, selection):
     payload["certifications"] = [c for c in blueprint.get("certifications") or [] if c in known]
     links = profile.get("certification_links") or {}
     payload["certification_links"] = {c: links[c] for c in payload["certifications"] if c in links}
-    payload["education"] = [{k: v for k, v in item.items() if k in EDUCATION_FIELDS}
-                            for item in profile.get("education") or [] if isinstance(item, dict)]
+    reviewed_sidebar = bool((profile.get("resume_quality") or {}).get("reviewed_sidebar"))
+    education = [{k: v for k, v in item.items() if k in EDUCATION_FIELDS}
+                 for item in profile.get("education") or [] if isinstance(item, dict)]
+    if reviewed_sidebar:
+        # The reviewed sidebar lists degrees in their display wording; teaching and courses
+        # that older snapshots kept under Education are shown under Teaching & Training.
+        reviewed = [e for e in education if e.get("display_degree") or e.get("display_school")]
+        education = reviewed or education
+    payload["education"] = education
     payload["additional"] = {"languages": languages}
     payload["volunteering"] = resume_quality.public_volunteering(profile)
 
@@ -183,7 +190,7 @@ def build(profile, job, blueprint, selection):
         experience.append(role)
     payload["experience"] = experience
     result = resume_quality.presentation(payload, profile, job)
-    if (profile.get("resume_quality") or {}).get("reviewed_sidebar") and result.get("volunteering"):
+    if reviewed_sidebar and result.get("volunteering"):
         # The reviewed sidebar shows teaching as a title and date; the last record for the
         # same organization and dates is the candidate's current wording.
         latest = {}

@@ -155,3 +155,20 @@ def test_reviewed_sidebar_shows_teaching_as_title_and_date_only_without_duplicat
     full_profile["resume_quality"]["reviewed_sidebar"] = False
     payload = blueprints.build(full_profile, job, chosen, evidence.select(full_profile, job, chosen))
     assert [v["description"] for v in payload["volunteering"]] == ["Microservices and Spring", "", "Four sessions"]
+
+
+def test_reviewed_sidebar_lists_only_the_reviewed_degree_wording(full_profile):
+    full_profile["education"] = [
+        {"degree": "Engineering Diploma", "school": "Example University of Technology", "dates": "09/2014 - 07/2019"},
+        {"degree": "University Instructor, Spring", "school": "University", "dates": "2022 - Present"},
+        {"degree": "Two-day course", "school": "Employer"},
+        {"degree": "Engineering Diploma", "school": "Example University of Technology", "dates": "09/2014 - 07/2019",
+         "display_school": "Example University", "display_degree": "Diploma"},
+    ]
+    job = java_job()
+    chosen = blueprints.choose(full_profile, job)
+    payload = blueprints.build(full_profile, job, chosen, evidence.select(full_profile, job, chosen))
+    assert payload["education"] == [full_profile["education"][3]]  # teaching lives in Teaching & Training
+    full_profile["resume_quality"]["reviewed_sidebar"] = False
+    payload = blueprints.build(full_profile, job, chosen, evidence.select(full_profile, job, chosen))
+    assert [e["degree"] for e in payload["education"]] == [e["degree"] for e in full_profile["education"]]
