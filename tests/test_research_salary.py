@@ -411,7 +411,7 @@ def test_to_dict_has_exactly_the_contract_shape():
                                             "scope", "proxy_for_level"}
                for source in data["sources"] if "evidence" in source)
     assert data["researched_at"] == "2026-10-15T12:00:00Z"
-    assert data["version"] == 2
+    assert data["version"] == jobhunter_research.RESEARCH_VERSION
     json.dumps(data)
 
 

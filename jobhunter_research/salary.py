@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable, Iterable
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, unquote, urlparse
 
 from jobhunter_research import roles
 
@@ -311,6 +311,12 @@ def site_name(url: str) -> str:
 
 
 _EVIDENCE_LEVEL = re.compile(r"\b(staff|principal|lead|senior|sr\.?|s[ée]nior)\b", re.I)
+COHORT_FIELDS = ("scope", "level", "compensation_basis", "proxy_for_level", "geography", "statistic")
+
+
+def evidence_cohort(evidence: dict[str, str]) -> tuple[str, ...]:
+    return tuple(_plain(evidence.get(key, "")) if key == "geography" else evidence.get(key, "")
+                 for key in COHORT_FIELDS)
 
 
 def source_evidence(source: dict[str, Any]) -> dict[str, str]:
@@ -325,7 +331,7 @@ def source_evidence(source: dict[str, Any]) -> dict[str, str]:
                               "lead" if match and match.group(1) == "lead" else
                               "senior" if match else "unknown")
     if not evidence.get("compensation_basis"):
-        if re.search(r"total\s+comp|total\s+compensation|total\s+pay", plain):
+        if re.search(r"total\s+comp|total\s+compensation|total\s+pay|compensation\s+package", plain):
             evidence["compensation_basis"] = "total_comp"
         elif re.search(r"base\s+(?:salary|pay)|gross\s+annual\s+base", plain):
             evidence["compensation_basis"] = "base"
@@ -334,8 +340,12 @@ def source_evidence(source: dict[str, Any]) -> dict[str, str]:
     if not evidence.get("statistic"):
         if re.search(r"\b(?:25th|75th|p25|p75|percentile|range)\b", plain):
             evidence["statistic"] = "percentile_range" if re.search(r"percentile|25th|75th|p25|p75", plain) else "range"
-        elif re.search(r"median|mean|average|promedio|mediana", plain):
+        elif any(amount.is_range for amount in iter_amounts(text)) or re.search(r"\b(?:low|bajo)\b.*\b(?:high|alto)\b", plain):
+            evidence["statistic"] = "range"
+        elif re.search(r"median|mediana", plain):
             evidence["statistic"] = "median"
+        elif re.search(r"mean|average|promedio", plain):
+            evidence["statistic"] = "average"
         elif re.search(r"\bhighest\b|\blowest\b|\bmaximum\b|\bminimum\b", plain):
             evidence["statistic"] = "single_point"
         else:
@@ -368,14 +378,13 @@ def summarize_sources(sources: Iterable[dict[str, Any]], *, kind: str, currency:
     for source in selected:
         key = site_name(source.get("url", "")) or str(source.get("name") or source.get("url"))
         groups.setdefault(key, []).append(source)
-    cohorts: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    cohorts: dict[tuple[str, ...], list[dict[str, Any]]] = {}
     for group in groups.values():
         for source in group:
             evidence = source_evidence(source)
-            # Company-wide and role-specific numbers, and base and total-comp
-            # figures, must never be blended into a synthetic range.
-            cohort = (evidence["scope"], evidence["level"], evidence["compensation_basis"],
-                      evidence.get("proxy_for_level", ""))
+            # Keep scope, pay type, geography and statistical measurement
+            # separate. A site's average is not another site's range endpoint.
+            cohort = evidence_cohort(evidence)
             cohorts.setdefault(cohort, []).append(source)
     candidates = []
     for cohort, cohort_sources in cohorts.items():
@@ -398,12 +407,13 @@ def summarize_sources(sources: Iterable[dict[str, Any]], *, kind: str, currency:
     # Prefer specifically leveled role evidence. Broad company aggregates remain
     # queryable when they are the only evidence, but callers can label their scope.
     cohort, result, names = max(candidates, key=lambda item: (
-        item[0][0] == "role_specific", item[0][1] != "unknown", bool(item[0][3]), item[1][2], len(item[2])))
+        item[0][0] == "role_specific", item[0][1] != "unknown", bool(item[0][3]),
+        item[0][5] in {"range", "percentile_range"}, item[1][2], len(item[2])))
     low, high, agreeing = result
     return {"low": low, "high": high, "agreeing": agreeing, "currency": currency, "period": period,
             "names": list(dict.fromkeys(name for name in names if name)), "scope": cohort[0],
             "level": cohort[1], "compensation_basis": cohort[2],
-            "proxy_for_level": cohort[3] or None}
+            "proxy_for_level": cohort[3] or None, "geography": cohort[4], "statistic": cohort[5]}
 
 
 def ask_from_range(low: int | None, high: int | None, quantile: float = 0.75, round_to: int = 1000) -> int | None:
@@ -757,6 +767,14 @@ def _display_name(site: str, ctx, text: str) -> str:
     return site
 
 
+def _observed_geography(ctx, result: dict[str, str]) -> str:
+    text = _plain(_evidence_text(result) + " " + unquote(result.get("url", "")))
+    for place in (ctx.city, ctx.country_label):
+        if place and re.search(rf"\b{re.escape(_plain(place))}\b", text):
+            return place
+    return "unknown"
+
+
 def market_sources_from_results(ctx, results: list[dict[str, str]], now_iso: str) -> list[dict[str, str]]:
     flow = _flow()
     candidates = []
@@ -781,7 +799,7 @@ def market_sources_from_results(ctx, results: list[dict[str, str]], now_iso: str
         seen.add(result["url"])
         text = _evidence_text(result)
         inferred = source_evidence({"kind": "market", "snippet": text})
-        inferred.update(role_family=ctx.family or "unknown", geography=ctx.city or ctx.country_label or "unknown")
+        inferred.update(role_family=ctx.family or "unknown", geography=_observed_geography(ctx, result))
         sources.append(_source("market", _display_name(site_name(result["url"]), ctx, text), result["url"], text,
                                now_iso, evidence=inferred))
     return sources[:6]
@@ -806,7 +824,7 @@ def company_sources_from_results(ctx, results: list[dict[str, str]], now_iso: st
         site = site_name(result["url"]) or urlparse(result["url"]).netloc.removeprefix("www.")
         text = _evidence_text(result)
         inferred = source_evidence({"kind": "company", "snippet": text})
-        inferred.update(role_family=ctx.family or "unknown", geography=ctx.city or ctx.country_label or "unknown")
+        inferred.update(role_family=ctx.family or "unknown", geography=_observed_geography(ctx, result))
         sources.append(_source("company", f"{site}: {flow.company_search_name(ctx.employer)}", result["url"],
                                text, now_iso, evidence=inferred))
     return sources[:4]

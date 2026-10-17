@@ -173,3 +173,43 @@ def test_levels_redirect_with_wrong_role_or_region_is_rejected():
     notes = []
     assert salary.fetch_levels(ctx, lambda _url: SimpleNamespace(status_code=200, text=wrong_role), "t", notes) is None
     assert notes == ["Levels.fyi page identity did not match the requested Spain role and level."]
+
+
+def test_live_range_and_average_are_kept_separate_in_decision_and_card():
+    ctx = jobhunter_research.build_context(_spain_job("Senior Software Engineer", "UST"))
+    sources = [
+        {"kind": "market", "name": "talent.com madrid", "url": "https://es.talent.com/salary",
+         "snippet": "Senior Software Engineer Madrid low €33,000 · median €37,500 · high €46,000 per year",
+         "evidence": {"level": "senior", "scope": "role_specific", "geography": "madrid", "statistic": "range"}},
+        {"kind": "market", "name": "PayScale Madrid", "url": "https://www.payscale.com/research/ES/Madrid",
+         "snippet": "The average Senior Software Engineer salary in Madrid, Spain is €59,486 per year."},
+    ]
+    # Match the actual source descriptors produced by the search adapter.
+    sources[1]["evidence"] = {"level": "senior", "scope": "role_specific", "geography": "Madrid"}
+
+    summary = salary.summarize_sources(sources, kind="market", currency="EUR", period="year")
+    assert (summary["low"], summary["high"], summary["agreeing"]) == (33000, 46000, 1)
+    assert summary["names"] == ["talent.com madrid"]
+    with patch("jobhunter_interest_flow.salary_target", return_value=None):
+        pay = salary.decide(ctx, None, sources)
+    assert (pay["low"], pay["high"], pay["confidence"]) == (33000, 46000, "medium")
+    lines = jobhunter_research.format_salary_lines({"salary": {"currency": "EUR", "period": "year"},
+                                                   "sources": sources})
+    assert len(lines) == 2
+    assert "€33k–€46k" in lines[0] and "PayScale" not in lines[0]
+    assert "€59k/year" in lines[1] and "reported average" in lines[1]
+
+
+def test_country_salary_page_does_not_inherit_requested_city_or_seniority():
+    ctx = jobhunter_research.build_context(_spain_job("Senior Software Engineer", "UST"))
+    rows = [{"title": "UST Software Engineer Salary in Spain | €30.5K-€56.4K+ | Levels.fyi",
+             "url": "https://www.levels.fyi/companies/ust/salaries/software-engineer/locations/spain",
+             "snippet": "The median Software Engineer compensation package at UST in Spain totals $64.6K per year."}]
+
+    sources = salary.company_sources_from_results(ctx, rows, "t")
+
+    assert len(sources) == 1
+    assert sources[0]["evidence"]["geography"] == "Spain"
+    assert sources[0]["evidence"]["scope"] == "company_wide"
+    assert sources[0]["evidence"]["level"] == "unknown"
+    assert sources[0]["evidence"]["compensation_basis"] == "total_comp"

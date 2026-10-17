@@ -24,7 +24,7 @@ from jobhunter_research import cache, company, roles, salary
 from jobhunter_research.salary import ask_from_range
 from jobhunter_research.search import BROWSER_HEADERS
 
-RESEARCH_VERSION = 2
+RESEARCH_VERSION = 3
 FETCH_TIMEOUT = 10
 __all__ = ["RESEARCH_VERSION", "ResearchResult", "research", "ask_from_range", "format_salary_lines",
            "default_fetch"]
@@ -303,7 +303,7 @@ def format_salary_lines(result: ResearchResult | dict[str, Any]) -> list[str]:
             if source.get("kind") != kind:
                 continue
             descriptors = salary.source_evidence(source)
-            key = tuple(descriptors.get(k) for k in ("scope", "level", "compensation_basis", "proxy_for_level"))
+            key = salary.evidence_cohort(descriptors)
             cohorts.setdefault(key, []).append(source)
         for key, cohort in cohorts.items():
             summary = salary.summarize_sources(cohort, kind=kind, currency=currency, period=period)
@@ -319,6 +319,8 @@ def format_salary_lines(result: ResearchResult | dict[str, Any]) -> list[str]:
                 details.append("base salary")
             if key[3]:
                 details.append(f"{key[1]} data used as {key[3]} proxy")
+            if key[5] in {"average", "median"}:
+                details.append(f"reported {key[5]}")
             lines.append(f"{label}: {html.escape(text)} ({html.escape('; '.join(details))})")
     if pay.get("basis") == "estimate":
         summary = salary.summarize_sources(sources, kind="benchmark", currency=currency, period=period)
@@ -344,8 +346,10 @@ def _ask_text(pay: dict[str, Any]) -> str:
         why = "configured target"
     elif basis in {"none", "configured"}:
         why = "configured target"
-    elif ask == ask_from_range(pay.get("low"), pay.get("high")):
+    elif pay.get("low") != pay.get("high") and ask == ask_from_range(pay.get("low"), pay.get("high")):
         why = f"75th pct of {basis} range"
+    elif pay.get("low") == pay.get("high"):
+        why = f"from {basis} observation"
     else:
         why = f"from {basis} range"
     return f"{salary.format_amount(ask, currency, compact=False)}/{period} ({why})"

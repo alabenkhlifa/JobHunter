@@ -228,7 +228,7 @@ def test_research_job_adds_labelled_market_salary_evidence(monkeypatch):
     message = flow.build_research_brief_message(sample_job(), research)
     assert "No employer-published range verified." in message
     assert "No comparable company salary range verified." in message
-    assert "Market: AED 21k/month (Glassdoor Dubai)" in message
+    assert "Market: AED 21k/month (Glassdoor Dubai; reported average)" in message
     assert "Ask: AED 30,000/month (configured target)" in message
 
 
@@ -2882,7 +2882,8 @@ def test_spain_research_card_labels_published_market_and_ask(monkeypatch):
     assert research.research["salary"]["basis"] == "published"
     assert research.research["salary"]["ask_amount"] == 68000
     assert "Published: €60,000 - €70,000 a year (SpainJobs.io)" in message
-    assert "Market: €46k–€55k/year (Glassdoor Valencia, talent.com Valencia)" in message
+    assert "Market: €52k/year (Glassdoor Valencia; reported average)" in message
+    assert "Market: €40k–€58k/year (talent.com Valencia)" in message
     assert "Ask: €68,000/year (75th pct of published range)" in message
     assert "No employer-published range verified." not in message
     assert len(message) < 900
