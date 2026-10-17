@@ -130,6 +130,35 @@ Do not change confirmation or visibility flags to make a fact eligible. Ask the 
 
 ### Resume generation
 
+An enabled `resume_blocks` catalog takes priority over blueprints and legacy
+variants. Its Software Engineer flavor covers Senior Backend Engineer and
+Senior Software Engineer. The catalog stores exact approved headlines,
+summaries and complete project blocks. Never draft a replacement summary,
+rank or trim bullets, add projects, or infer a flavor from the job title.
+Draft flavors such as Architect stay unavailable until their wording is approved.
+
+After company research, Interested automatically opens the Telegram picker:
+flavor, page limit, then projects. Apply reopens the picker when needed. Each project button toggles its entire fixed block. Generate
+runs only after the owner confirms that selection. `resume_choice` controls
+are job-bound, expire and become invalid after use or a newer card. Use the
+latest card; never manufacture callbacks or bypass the picker with inferred IDs.
+`python callback_handler.py --apply <job_id>` opens the same picker for text
+requests. An unattended run without an explicit selection must hand the job
+back for the owner's choice. Submission approval remains a separate step.
+
+The renderer preserves all selected wording. It may compact spacing; an
+oversize selection asks for fewer projects or another page limit. It records
+actual page count, `layout.main_fills` and `layout.page_two_sparse` in the
+manifest. If page two is below half full, tell the owner and show every page
+before Proceed. A two-page limit can produce a single page. Never add filler.
+
+Add later approvals to the private catalog without changing existing approved
+wording. `tools/import_resume_blocks.py` can seed a catalog from a reviewed
+renderer JSON and its matching PDF (dry-run by default, backup on `--apply`).
+It verifies text, font, geometry and link parity before importing.
+
+For profiles without an enabled fixed catalog, the following earlier paths apply.
+
 When the profile holds candidate-confirmed `resume_blueprints`, the code builds
 every resume (`resume_pipeline.py`): it picks the blueprint for the posting's
 role family (backend, lead, architect, platform; the `default` blueprint
@@ -502,20 +531,30 @@ For each candidate job, the scraper fetches the full description and extracts:
 
 ### Interested, Apply, and Proceed are separate decisions
 
+Use short Telegram messages with a clear emoji heading, blank lines between
+sections and bold labels. Acknowledge received commands immediately (for
+example, “✅ Received” followed by the action being processed). The gateway
+removes accepted CTA keyboards and sends a persistent receipt. Do not repeat
+a command while its receipt says it is processing; use the new card when it
+arrives. Keep facts and failures specific; decorative text must not obscure
+what happens next.
+
 1. When the user says they are interested in one or more jobs, resolve each job
    ID from the digest or named posting. For each job run
    `python3 callback_handler.py --interested <job_id>`. This marks interest and
    sends the same research card as the Telegram Interested button, including
    company and salary context plus Apply, Ignore, and Details buttons. The
-   research card is a brief, not an application package. If delivery fails,
+   research card is a brief, not an application package. With fixed blocks,
+   it is followed immediately by the flavor picker. If delivery fails,
    report that failure and retry the card before moving forward. Do not
    generate documents or open the application yet.
-2. Wait for a separate Apply choice for each job. The card's Apply button
-   generates the package through `callback_handler.py`. If the user replies in
-   text instead, run `python3 callback_handler.py --apply <job_id>` for each
-   selected job. This checks tailoring readiness, generates the resume by
-   default, records `package_generated`, sends its PDF, and sends the Proceed
-   card only after Telegram confirms delivery. Generate a cover letter with
+2. With fixed blocks, continue through the flavor, length and project picker
+   shown after research; Apply can reopen it. Wait for the owner's Generate
+   choice before making documents. For text requests, run
+   `python3 callback_handler.py --apply <job_id>` to open the same picker.
+   Without an enabled fixed catalog, this command generates through the earlier
+   blueprint or variant path. Generation records `package_generated`, sends
+   the PDF, then shows Proceed only after Telegram confirms delivery. Generate a cover letter with
    `--apply <job_id> --cover-letter` only when the user asks for one or the
    specific posting/application explicitly requires one. First run
    `python3 jobhunter_interest_flow.py --job-id <job_id> --cover-context` to
@@ -578,7 +617,12 @@ them.
 
 ### Package review after Apply
 
-The Apply route generates the permanent package. With confirmed blueprints the
+For fixed blocks, the Generate choice creates the permanent package. Read
+`resume_selection`, `resume_blocks_sha256`, `resume_pages`, `summary_review.source`
+(`fixed`), `layout.page_two_sparse` and the PDF audit flags. Compare the selected
+blocks with the output and inspect all page images before Proceed.
+
+For profiles without fixed blocks, the Apply route generates the permanent package. With confirmed blueprints the
 code enforces the resume rules (confirmed wording only, employer order, page
 target, sidebar, languages, links, PDF audit) and records what it did in the
 private `tailoring_manifest.json`. If generation fails, report the failure and

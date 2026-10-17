@@ -25,7 +25,7 @@ def database(monkeypatch, tmp_path):
 def job(**over):
     row = dict(id="sj-abc123", title="Backend Architect", company="Acme", location="Madrid, Spain", score=70,
                url="https://www.spainjobs.io/companies/acme/backend-architect--abc1234567", source="SpainJobs.io",
-               date_posted="2026-09-30T00:00:00+00:00", description="Java Spring Boot microservices on AWS.")
+               date_posted=datetime.now(timezone.utc).date().isoformat(), description="Java Spring Boot microservices on AWS.")
     row.update(over)
     return row
 

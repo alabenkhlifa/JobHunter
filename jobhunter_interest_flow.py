@@ -8,6 +8,7 @@ network calls so Telegram callbacks remain reliable.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import html
 import json
@@ -33,6 +34,7 @@ import job_scoring
 import scraper
 from resume_bullet_ranking import bullet_match, order_bullet_indexes
 from resume_inline import normalized_text
+import resume_blocks
 import resume_pipeline
 import resume_quality
 from resume_refiner import (
@@ -1414,20 +1416,23 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
     company_line = " ".join(str(research.company_summary or "Company details not verified.").split())
     if len(company_line) > 220:
         company_line = company_line[:219].rstrip() + "…"
-    benefits_block = f"\n<b>Benefits:</b> {_esc(benefits_line)}" if benefits_line else ""
+    benefits_block = f"\n\n<b>🎁 Benefits:</b> {_esc(benefits_line)}" if benefits_line else ""
     fit_checks = _posting_fit_checks(job)
-    fit_block = f"\n<b>Fit checks:</b> {_esc('; '.join(fit_checks))}." if fit_checks else ""
+    fit_block = f"\n\n<b>🧭 Fit checks:</b> {_esc('; '.join(fit_checks))}." if fit_checks else ""
     visa_note = _posting_visa_note(job)
-    visa_block = f"\n<b>Visa:</b> {_esc(visa_note)}" if visa_note else ""
+    visa_block = f"\n\n<b>🛂 Visa:</b> {_esc(visa_note)}" if visa_note else ""
 
     return f"""🔎 <b>Research</b>
 
 <b>{_esc(job.get('title'))}</b>
 {_esc(company_name)} — {_esc(job.get('location'))}{f" (via {_esc(research.posting_company)})" if research.posting_company else ""}
 
-<b>Company:</b> {_esc(company_line)}
-<b>Pay:</b> {pay_block}{benefits_block}{fit_block}{visa_block}
-<b>Questions to Ask:</b> Base salary, currency, pay period and bonus/equity terms.
+<b>🏢 Company:</b> {_esc(company_line)}
+
+<b>💰 Pay:</b>
+{pay_block}{benefits_block}{fit_block}{visa_block}
+
+<b>❓ Questions to Ask:</b> Base salary, currency, pay period and bonus/equity terms.
 
 Choose next step:"""
 
@@ -2998,6 +3003,7 @@ def prepare_application_package(
     include_cover_letter: bool = False,
     cover_letter_draft: dict[str, Any] | None = None,
     resume_summary_draft: dict[str, Any] | None = None,
+    resume_selection: dict[str, Any] | None = None,
     summary_planner=None,
     accept_evidence_proposals: bool = False,
     prior_evidence_ids: Sequence[str] = (),
@@ -3038,7 +3044,26 @@ def prepare_application_package(
             )
         profile = _load_profile(profile_path)
         blueprint_plan, summary_info = None, None
-        if resume_pipeline.enabled(profile):
+        fixed_blocks = isinstance(profile.get("resume_blocks"), dict) and profile["resume_blocks"].get("enabled") is True
+        if fixed_blocks:
+            if resume_selection is None:
+                raise TailoringReadinessError(
+                    "Choose a confirmed resume flavor and project set before generating this package."
+                )
+            if resume_summary_draft is not None:
+                raise TailoringReadinessError("Fixed resume blocks do not accept generated summary drafts.")
+            try:
+                blocks_catalog = resume_blocks.catalog(profile)
+                resume_payload = resume_blocks.build(profile, resume_selection)
+                blocks_variant = next(v for v in blocks_catalog["variants"] if v["id"] == resume_selection["variant_id"])
+                fixed_digest = resume_blocks.content_digest(profile, resume_selection)
+            except (resume_blocks.ResumeBlocksError, KeyError, StopIteration) as exc:
+                raise TailoringReadinessError(str(exc) or "The selected fixed resume blocks are invalid.") from None
+            selected_variant = None
+            summary_info = {"source": "fixed", "variant_id": blocks_variant["id"]}
+        elif resume_selection is not None:
+            raise TailoringReadinessError("This profile does not have an enabled fixed resume catalog.")
+        elif resume_pipeline.enabled(profile):
             try:
                 blueprint_plan = resume_pipeline.plan(profile, job)
             except resume_pipeline.BlueprintError as exc:
@@ -3046,9 +3071,10 @@ def prepare_application_package(
             resume_payload, selected_variant = blueprint_plan.payload, None
         else:
             resume_payload, selected_variant = _resume_for_job(profile, job)
-        quality = resume_quality.enabled(profile) and blueprint_plan is None
+        quality = False if fixed_blocks else resume_quality.enabled(profile) and blueprint_plan is None
         propose = bool(accept_evidence_proposals) and quality and selected_variant is not None
-        _assert_tailoring_ready(profile, job, selected_variant, check_evidence=not propose)
+        if not fixed_blocks:
+            _assert_tailoring_ready(profile, job, selected_variant, check_evidence=not propose)
         quality_report, pdf_checks, summary_review, proposal = {}, {}, None, None
         if blueprint_plan is not None:
             try:
@@ -3072,7 +3098,12 @@ def prepare_application_package(
         elif resume_summary_draft is not None:
             raise ValueError("Summary drafts require the enabled owner quality flow")
         languages = (resume_payload.get("additional") or {}).get("languages")
-        if not isinstance(languages, str) or not languages.strip(" \t\r\n|\u00b7;,"):
+        language_list_ok = fixed_blocks and isinstance(languages, list) and bool(languages) and all(
+            (isinstance(item, str) and bool(item.strip())) or
+            (isinstance(item, dict) and isinstance(item.get("name"), str) and bool(item["name"].strip()))
+            for item in languages
+        )
+        if not (isinstance(languages, str) and languages.strip(" \t\r\n|\u00b7;,") or language_list_ok):
             raise TailoringReadinessError(
                 "Languages are required in every resume. Confirm the candidate's languages "
                 "before generating an application package; do not infer proficiency levels."
@@ -3086,8 +3117,9 @@ def prepare_application_package(
         package_dir = output_root / f"{safe_job_id}-{_slug(job.get('company') or '')}-{_slug(job.get('title') or '')}"
         _assert_direct_output_child(package_dir, output_root)
         cover_source = resume_payload if selected_variant is not None else profile
-        variant_max_pages = selected_variant.get("max_pages") if selected_variant is not None else None
-        if not render_pdfs and (variant_max_pages is not None or quality or blueprint_plan is not None):
+        variant_max_pages = (blocks_variant["max_pages"] if fixed_blocks else
+                             selected_variant.get("max_pages") if selected_variant is not None else None)
+        if not render_pdfs and (variant_max_pages is not None or quality or blueprint_plan is not None or fixed_blocks):
             raise RuntimeError("A page-limited confirmed resume variant requires PDF rendering")
 
         output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -3124,8 +3156,33 @@ def prepare_application_package(
             )
         resume_page_count: int | None = None
         blueprint_fields: dict[str, Any] = {}
+        fixed_fields: dict[str, Any] = {}
         if render_pdfs:
-            if blueprint_plan is not None:
+            if fixed_blocks:
+                def render_fixed_payload(payload):
+                    _write_private_json(staged_resume_json, payload)
+                    _render_pdf("resume", staged_resume_json, staged_resume_pdf)
+                    from resume_pdf_audit import resume_layout_metrics
+                    return resume_layout_metrics(staged_resume_pdf)
+                try:
+                    resume_payload, layout_report = resume_blocks.fit(
+                        resume_payload, render_fixed_payload, blocks_variant["max_pages"])
+                    render_fixed_payload(resume_payload)
+                    resume_page_count = layout_report["pages"]
+                    from resume_pdf_audit import audit_resume_pdf, render_review_pages
+                    pdf_checks = audit_resume_pdf(staged_resume_pdf, resume_payload,
+                                                  max_pages=blocks_variant["max_pages"])
+                    render_review_pages(staged_resume_pdf, staging_dir / "review-pages")
+                except (resume_blocks.ResumeBlocksError, ValueError) as exc:
+                    raise TailoringReadinessError(str(exc)) from None
+                except ImportError:
+                    raise TailoringReadinessError("Mandatory PDF verification dependencies are unavailable") from None
+                fixed_fields = {
+                    "resume_selection": copy.deepcopy(resume_selection),
+                    "resume_blocks_sha256": fixed_digest,
+                    "layout": layout_report,
+                }
+            elif blueprint_plan is not None:
                 def render_blueprint_payload(payload):
                     _write_private_json(staged_resume_json, payload)
                     _render_pdf("resume", staged_resume_json, staged_resume_pdf)
@@ -3186,11 +3243,11 @@ def prepare_application_package(
         _write_private_json(
             staged_manifest_json,
             {
-                "manifest_version": 3 if blueprint_plan is not None else 2 if quality else 1,
+                "manifest_version": 4 if fixed_blocks else 3 if blueprint_plan is not None else 2 if quality else 1,
                 "job_id": job_id,
                 "job_title": str(job.get("title") or ""),
-                "tailoring_mode": "confirmed_variant" if selected_variant is not None else "legacy_fallback",
-                "bullet_ordering": "responsibility_evidence_v2" if quality else "responsibility_evidence_v1",
+                "tailoring_mode": "fixed_blocks" if fixed_blocks else "confirmed_variant" if selected_variant is not None else "legacy_fallback",
+                "bullet_ordering": "fixed_blocks_v1" if fixed_blocks else "responsibility_evidence_v2" if quality else "responsibility_evidence_v1",
                 "selected_variant_id": selected_variant.get("id") if selected_variant is not None else None,
                 "profile_sha256": _profile_digest(profile),
                 "resume_pages": resume_page_count,
@@ -3199,14 +3256,15 @@ def prepare_application_package(
                     "review_source": "provided_reviewed_draft" if resume_summary_draft is not None else "independent_model"}} if quality else {}),
                 **(proposal or {}),
                 **blueprint_fields,
+                **fixed_fields,
+                **({"summary_review": {"text": resume_payload.get("summary", ""), "source": "fixed"}}
+                   if fixed_blocks else {}),
                 "quality_checks": {
                     **pdf_checks,
                     "timeline_consistent": True,
-                    "role_variant_required": blueprint_plan is None and _requires_confirmed_role_variant(job),
-                    "role_variant_requirement_satisfied": blueprint_plan is not None or _role_variant_requirement_satisfied(
-                        job,
-                        selected_variant,
-                    ),
+                    "role_variant_required": False if fixed_blocks else blueprint_plan is None and _requires_confirmed_role_variant(job),
+                    "role_variant_requirement_satisfied": True if fixed_blocks else blueprint_plan is not None or _role_variant_requirement_satisfied(
+                        job, selected_variant),
                 },
             },
         )
