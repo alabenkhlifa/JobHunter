@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="A private workspace to edit, preview and approve resume flavors and variants.">
+  <title>Resume Studio</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Resume Studio home"><span class="brand-icon">R<span>·</span></span><span>Resume <strong>Studio</strong></span></a>
+    <div class="workspace-label"><span class="live-dot"></span> PRIVATE REVIEW WORKSPACE</div>
+    <div class="header-actions"><span id="save-status" role="status">Connecting…</span><button id="undo" class="button quiet" disabled>↶ Undo</button><button id="export" class="button quiet">Export review ↗</button></div>
+  </header>
+  <div id="error" class="error-banner" role="alert" hidden></div>
+  <div class="workspace">
+    <aside class="navigation">
+      <div class="nav-eyebrow">YOUR RESUME LIBRARY</div>
+      <div class="nav-heading">Flavors <button id="add-flavor" class="icon-button" aria-label="Add flavor">+</button></div>
+      <div id="flavor-list" class="nav-list"></div>
+      <div class="nav-heading variant-heading">Variants <button id="add-variant" class="icon-button" aria-label="Add variant">+</button></div>
+      <div id="variant-list" class="nav-list"></div>
+      <div class="nav-divider"></div>
+      <div class="nav-eyebrow">EDIT & REVIEW</div>
+      <nav id="section-list" aria-label="Editor sections">
+        <button data-section="flavor" class="section-button active"><span>☰</span> Headline & summary</button>
+        <button data-section="variant" class="section-button"><span>▦</span> Projects & page limit</button>
+        <button data-section="projects" class="section-button"><span>▤</span> Project wording</button>
+        <button data-section="sidebar" class="section-button"><span>◫</span> Contact & sidebar</button>
+        <button data-section="changes" class="section-button"><span>↔</span> Changes & requests <b id="request-count"></b></button>
+      </nav>
+      <div class="nav-footer"><span class="live-dot"></span><div><strong>Connected to local files</strong><p>Edits autosave. The active Pi profile stays separate.</p></div></div>
+    </aside>
+    <main class="editor">
+      <div class="editor-heading"><div><div id="breadcrumb" class="eyebrow">SOFTWARE ENGINEER</div><h1 id="editor-title">Headline & summary</h1></div><span id="draft-badge" class="badge">Draft</span></div>
+      <div id="editor-content"></div>
+      <div class="editor-bottom"><span>Every word stays under your control.</span><button id="new-request" class="button quiet">＋ Change request</button></div>
+    </main>
+    <section class="preview" aria-label="Live resume preview">
+      <div class="preview-toolbar"><div><span class="live-dot"></span><strong>Live preview</strong><span class="preview-subtitle">Actual resume renderer</span></div><div class="preview-tools"><button id="zoom-out" class="icon-button" aria-label="Zoom out">−</button><span id="zoom-label">Fit</span><button id="zoom-in" class="icon-button" aria-label="Zoom in">+</button><a id="download" class="button quiet disabled" target="_blank" rel="noopener">PDF ↗</a></div></div>
+      <div class="preview-meta"><span id="page-info">Preparing your resume…</span><span id="render-status" role="status">Connecting</span></div>
+      <div id="preview-warnings" class="preview-warnings" hidden></div>
+      <div id="pages" class="pages"><div class="preview-placeholder"><span class="loading-ring"></span><p>Rendering your resume</p><small>Using the same fonts, spacing and layout as the generator.</small></div></div>
+      <div class="approval-bar"><div><strong id="approval-label">Review this version</strong><p id="approval-detail">Approval is saved for this exact text and selection.</p></div><button id="approve" class="button primary" disabled>Approve version <span>✓</span></button></div>
+    </section>
+  </div>
+  <dialog id="request-dialog"><form id="request-form"><div class="dialog-top"><span class="eyebrow">COLLABORATE ON THE WORDING</span><button type="button" data-close class="icon-button" aria-label="Close dialog">×</button></div><h2>Request a change</h2><p id="request-target" class="muted">General feedback on this resume.</p><blockquote id="request-before" hidden></blockquote><label for="request-message">What would you like changed?</label><textarea id="request-message" rows="5" placeholder="Describe the change, the tone, or the facts to preserve…" required></textarea><p class="hint">Your request is saved locally for the assistant to read. Proposed replacements appear under Changes & requests.</p><div class="dialog-actions"><button type="button" data-close class="button quiet">Cancel</button><button class="button primary">Save request</button></div></form></dialog>
+  <dialog id="create-dialog"><form id="create-form"><div class="dialog-top"><span class="eyebrow">RESUME LIBRARY</span><button type="button" data-close class="icon-button" aria-label="Close dialog">×</button></div><h2 id="create-title">New flavor</h2><label for="create-name">Name</label><input id="create-name" required maxlength="120" autocomplete="off"><p id="create-hint" class="hint"></p><div class="dialog-actions"><button type="button" data-close class="button quiet">Cancel</button><button class="button primary">Create draft</button></div></form></dialog>
+  <dialog id="approve-dialog"><form id="approve-form"><div class="dialog-top"><span class="eyebrow">EXACT VERSION APPROVAL</span><button type="button" data-close class="icon-button" aria-label="Close dialog">×</button></div><h2>Approve this resume?</h2><p id="approve-description"></p><p class="hint">This records approval of the current text, sidebar, page limit and selected projects in this review workspace. Later edits require a new approval. Applying the reviewed catalog to the Pi is a separate step.</p><div class="dialog-actions"><button type="button" data-close class="button quiet">Keep reviewing</button><button class="button primary">Confirm approval ✓</button></div></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
