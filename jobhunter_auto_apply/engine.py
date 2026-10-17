@@ -493,7 +493,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       const src = el.getAttribute('src') || '';
       const style = window.getComputedStyle(el);
       const rect = el.getBoundingClientRect();
-      return /recaptcha|hcaptcha/i.test(src) && style.display !== 'none' && style.visibility !== 'hidden'
+      return /recaptcha|hcaptcha|captcha-delivery\.com/i.test(src) && style.display !== 'none' && style.visibility !== 'hidden'
         && rect.width >= 120 && rect.height >= 100;
     })
   };
@@ -807,7 +807,7 @@ class AutoApplyEngine:
     const src = frame.getAttribute('src') || '';
     const rect = frame.getBoundingClientRect();
     const style = getComputedStyle(frame);
-    return /recaptcha|hcaptcha/i.test(src) && style.display !== 'none' && style.visibility !== 'hidden'
+    return /recaptcha|hcaptcha|captcha-delivery\\.com/i.test(src) && style.display !== 'none' && style.visibility !== 'hidden'
       && rect.width >= 120 && rect.height >= 100;
   }});
   if (challenge) return {{ok:false, reason:'human verification is open'}};

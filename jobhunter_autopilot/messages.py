@@ -213,6 +213,14 @@ def summary(stats):
     return fit(lines)
 
 
+HANDOFF_HINTS = {
+    codes.LINKEDIN_SIGNED_OUT: "Ask Hermes to open the LinkedIn login in the application browser, then sign in "
+                               "over VNC; the next runs use that session.",
+    codes.CAPTCHA: "To finish it in the application browser, ask Hermes to open this offer there, then "
+                   "connect with VNC.",
+}
+
+
 def handoff(job, code, detail="", *, after_submit=False):
     """The lines put above the research card when a hard stop hands a job back."""
     reason = codes.describe(code)
@@ -220,9 +228,43 @@ def handoff(job, code, detail="", *, after_submit=False):
         reason = f"{reason} — {detail}"
     lines = [f"✋ <b>Autopilot handed this offer to you</b>: {esc(reason, 300)}"]
     if after_submit:
-        lines.append("The submit button was already clicked. Check the browser (noVNC) and the jobs "
-                     "mailbox before applying again.")
+        lines.append("The submit button was already clicked. Check the application browser (VNC) and the "
+                     "jobs mailbox before applying again.")
+    elif code in HANDOFF_HINTS:
+        lines.append(HANDOFF_HINTS[code])
     return "\n".join(lines)
+
+
+def manual_apply(job, *, host, apply_url, criteria=None, research=None, documents=0):
+    """The card for an offer on an anti-bot site: the apply link and the resume, for him to submit."""
+    city = city_of(job)
+    title = (f"✋ <b>Apply by hand</b> · <b>{esc(job.get('title'), 120)} — {esc(job.get('company'), 80)}</b>"
+             + (f" ({esc(city, 40)})" if city else ""))
+    attached = ("The tailored resume is attached below." if documents == 1
+                else "The tailored resume and cover letter are attached below." if documents > 1
+                else "The tailored resume could not be attached; ask Hermes for it.")
+    lines = [
+        title,
+        f"{esc(host, 60)} blocks automated browsers, so the autopilot did not try. Submit it yourself. {attached}",
+        "Apply: " + (link(apply_url, urlsplit(safe_url(apply_url)).netloc or host) or "link unavailable"),
+    ]
+    if criteria:
+        lines.append("Why: " + " · ".join(esc(item, 120) for item in criteria))
+    salary = " · ".join(esc(line, 220) for line in salary_lines(research))
+    ask = ask_amount(research)
+    if ask:
+        currency = ((research or {}).get("salary") or {}).get("currency") or "EUR"
+        salary += " · Ask: " + esc(money(ask, currency, short=False), 40)
+    lines.append(salary)
+    return fit(lines)
+
+
+def manual_keyboard(job_id, apply_url):
+    row = []
+    if safe_url(apply_url):
+        row.append({"text": "🔗 Open application", "url": safe_url(apply_url)})
+    row.append({"text": "🚫 Ignore", "callback_data": f"ignore:{job_id}"})
+    return {"inline_keyboard": [row]}
 
 
 def with_card(prefix, card):

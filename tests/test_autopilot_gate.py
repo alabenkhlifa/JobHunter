@@ -90,6 +90,21 @@ def test_linkedin_pages_only_inspect(env):
     assert refused.value.code == "linkedin_easy_apply"
 
 
+@pytest.mark.parametrize("url", [
+    "https://jobs.smartrecruiters.com/oneclick-ui/company/Acme/publication/1",
+    "https://www.smartr.me/oneclick-ui/company/Acme/publication/1",
+])
+def test_anti_bot_application_sites_are_refused_even_for_inspect(env, url):
+    conn, db, path = env
+    job = add_job(conn)
+    store.upsert_log(conn, RUN_ID, job["id"], "packaged")
+    for action in ("inspect", "upload", "submit"):
+        with pytest.raises(gate.PolicyRefused) as refused:
+            authorize(db, path, job["id"], action, page_url=url)
+        assert refused.value.code == "anti_bot_ats"
+    assert log_status(conn, job["id"]) == "packaged"
+
+
 def test_cap_counts_today_only_in_policy_timezone(env, tmp_path):
     conn, db, _ = env
     path = write_policy(tmp_path / "cap.json", enabled_policy(mode="live", max_per_day=1))

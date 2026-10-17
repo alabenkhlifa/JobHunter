@@ -4,7 +4,7 @@
 policy, requires today's log row to be ``packaged`` or ``applying``, refuses
 any second submission, counts the daily cap, and moves the row to
 ``applying`` inside ``BEGIN IMMEDIATE`` so two engine processes cannot both
-take the last slot.
+take the last slot. Pages on ``codes.MANUAL_HOSTS`` are refused outright.
 """
 
 from __future__ import annotations
@@ -59,6 +59,10 @@ def authorize(db_path, job_id, action, *, page_url, now=None, policy_path=None):
             raise PolicyRefused("page_url must be an http(s) URL")
     if action != "inspect" and parts is not None and _linkedin(parts.hostname):
         raise PolicyRefused("LinkedIn Easy Apply is not automated", code=codes.LINKEDIN_EASY_APPLY)
+    manual = codes.manual_host(page_url) if parts is not None else None
+    if manual:
+        raise PolicyRefused(f"{codes.ANTI_BOT_ATS}: {manual} blocks automated browsers; hand the job off",
+                            code=codes.ANTI_BOT_ATS)
     mode = policy["mode"]
     if action == "submit" and mode != "live":
         raise PolicyRefused("rehearsal mode: the final submit is refused")

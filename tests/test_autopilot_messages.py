@@ -110,6 +110,39 @@ def test_handoff_text():
     assert len(messages.with_card(text, card)) <= 4096
 
 
+def test_handoff_hints_tell_him_how_to_unblock():
+    signed_out = messages.handoff(JOB, "linkedin_signed_out")
+    assert "not signed in to LinkedIn" in signed_out and "sign in over VNC" in signed_out
+    assert "VNC" in messages.handoff(JOB, "captcha")
+    after = messages.handoff(JOB, "captcha", after_submit=True)
+    assert "application browser (VNC)" in after and "noVNC" not in after
+    assert len(messages.handoff(JOB, "form_unverified").splitlines()) == 1
+
+
+def test_manual_apply_card(no_research_module):
+    url = "https://jobs.smartrecruiters.com/Acme/1?a=1&b=<2>"
+    text = messages.manual_apply(JOB, host="smartrecruiters.com", apply_url=url, criteria=CRITERIA,
+                                 research=research_payload("li-1"), documents=1)
+    lines = text.splitlines()
+    assert lines[0] == "✋ <b>Apply by hand</b> · <b>Senior Backend Engineer — Acme Software</b> (Madrid)"
+    assert "smartrecruiters.com blocks automated browsers" in lines[1] and "resume is attached" in lines[1]
+    assert lines[2] == ('Apply: <a href="https://jobs.smartrecruiters.com/Acme/1?a=1&amp;b=&lt;2&gt;">'
+                        'jobs.smartrecruiters.com</a>')
+    assert lines[3] == "Why: " + " · ".join(CRITERIA)
+    assert lines[4].startswith("Expected salary: ") and lines[4].endswith("Ask: €62,000")
+    missing = messages.manual_apply(JOB, host="smartr.me", apply_url="javascript:alert(1)", documents=0)
+    assert "link unavailable" in missing and "could not be attached" in missing and "javascript" not in missing
+    assert "cover letter" in messages.manual_apply(JOB, host="smartr.me", apply_url=url, documents=2)
+
+
+def test_manual_keyboard():
+    url = "https://jobs.smartrecruiters.com/Acme/1"
+    assert messages.manual_keyboard("sj-1", url) == {"inline_keyboard": [[
+        {"text": "🔗 Open application", "url": url}, {"text": "🚫 Ignore", "callback_data": "ignore:sj-1"}]]}
+    assert messages.manual_keyboard("sj-1", "ftp://x") == {"inline_keyboard": [[
+        {"text": "🚫 Ignore", "callback_data": "ignore:sj-1"}]]}
+
+
 def test_formatter_without_ranges_falls_back_to_the_stored_range(monkeypatch):
     module = types.ModuleType("jobhunter_research")
     module.format_salary_lines = lambda result: ["Ask: €62,000/year (75th pct)"]

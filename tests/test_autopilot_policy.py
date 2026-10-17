@@ -118,7 +118,24 @@ def test_codes():
     assert not codes.is_valid("unanswerable:")
     assert not codes.is_valid("made_up")
     assert "Notice period" in codes.describe("unanswerable:Notice period")
-    assert len(codes.HARD_STOPS) == 15
+    assert len(codes.HARD_STOPS) == 17
+    assert codes.is_valid("anti_bot_ats") and codes.is_valid("linkedin_signed_out")
+    assert "apply by hand" in codes.describe("anti_bot_ats")
+
+
+@pytest.mark.parametrize("url, host", [
+    ("https://jobs.smartrecruiters.com/Miratech1/744000153478804", "smartrecruiters.com"),
+    ("https://jobs.smartrecruiters.com/oneclick-ui/company/Miratech1/publication/x", "smartrecruiters.com"),
+    ("https://www.smartr.me/oneclick-ui/company/Miratech1/publication/x", "smartr.me"),
+    ("https://SMARTRECRUITERS.COM./x", "smartrecruiters.com"),
+    ("https://notsmartrecruiters.com/x", None),
+    ("https://smartrecruiters.com.evil.example/x", None),
+    ("https://boards.greenhouse.io/acme/jobs/1", None),
+    ("", None),
+    (None, None),
+])
+def test_manual_host(url, host):
+    assert codes.manual_host(url) == host
 
 
 def test_store_schema_log_and_cap():

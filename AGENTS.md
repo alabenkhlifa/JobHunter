@@ -55,7 +55,7 @@ Use `jobhunter_auto_apply` conservatively:
 
 When missing fields appear, inspect local profile data and cached confirmed answers first. Ask only for unconfirmed or sensitive fields, with clear CTA-style options.
 
-Routine email-code verification for an already-approved application must use the dedicated mailbox reader automatically; do not delegate code retrieval to the owner. The submit helper handles recognized email codes; `verify-email` resumes its pending step without resubmitting. For CAPTCHA, phone or identity-verification blockers, do not click/solve them. If the browser runs on a Raspberry Pi or remote desktop, instruct the user to connect with a phone VNC client over LAN/VPN, complete the challenge manually, and report back before continuing.
+Routine email-code verification for an already-approved application must use the dedicated mailbox reader automatically; do not delegate code retrieval to the owner. The submit helper handles recognized email codes; `verify-email` resumes its pending step without resubmitting. For CAPTCHA, phone or identity-verification blockers, do not click/solve them. If the browser runs on a Raspberry Pi or remote desktop, first confirm it is visible there (on the Pi: `~/.hermes/scripts/jobhunter_autopilot.py browser status` exits 0 with `visible: true`; a headless browser shows nothing over VNC), put the page in front (`... browser open <job_id>`), then instruct the user to connect with a phone VNC client over the VPN, complete the challenge manually, and report back before continuing. Never relaunch Chromium with other flags or another profile; restart its service instead.
 
 ## Development rules
 

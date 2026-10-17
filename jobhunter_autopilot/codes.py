@@ -3,8 +3,16 @@
 A hard stop hands the job back to the manual flow: the application stage
 becomes ``blocked_auto_apply`` with ``error='<code>: <detail>'`` and the
 research card (Apply/Ignore/Details) is sent. The engine uses the same
-literals, so they never change spelling.
+literals, so they never change spelling. The auto-apply skill's hard-stop
+table lists the same codes.
+
+``MANUAL_HOSTS`` are application sites behind anti-bot checks that stop an
+automated browser. The plan marks their offers manual up front
+(``anti_bot_ats``): no browser attempt, a card with the apply link and the
+generated resume instead.
 """
+
+from urllib.parse import urlsplit
 
 CAPTCHA = "captcha"
 PHONE_OR_IDENTITY = "phone_or_identity"
@@ -22,13 +30,20 @@ RECEIPT_UNVERIFIED = "receipt_unverified"
 BROWSER_UNAVAILABLE = "browser_unavailable"
 BUDGET_EXCEEDED = "budget_exceeded"
 RESUME_NEEDS_REVIEW = "resume_needs_review"
+ANTI_BOT_ATS = "anti_bot_ats"
+LINKEDIN_SIGNED_OUT = "linkedin_signed_out"
 
 HARD_STOPS = frozenset({
     CAPTCHA, PHONE_OR_IDENTITY, NO_AI_ANSWER, SALARY_PERIOD_AMBIGUOUS, FORM_UNVERIFIED,
     EMPLOYER_UNVERIFIED, ACCOUNT_CREATION_FAILED, EMAIL_VERIFICATION_UNSUPPORTED,
     PACKAGE_NOT_READY, COVER_LETTER_FAILED, LINKEDIN_EASY_APPLY, RECEIPT_UNVERIFIED,
-    BROWSER_UNAVAILABLE, BUDGET_EXCEEDED, RESUME_NEEDS_REVIEW,
+    BROWSER_UNAVAILABLE, BUDGET_EXCEEDED, RESUME_NEEDS_REVIEW, ANTI_BOT_ATS, LINKEDIN_SIGNED_OUT,
 })
+
+# Hosts (and their subdomains) whose apply flow sits behind an anti-bot check.
+# SmartRecruiters' application pages answer automated Chromium with a DataDome
+# "Device Check"; smartr.me is its one-click apply site.
+MANUAL_HOSTS = ("smartrecruiters.com", "smartr.me")
 
 DESCRIPTIONS = {
     CAPTCHA: "the site showed a CAPTCHA",
@@ -46,6 +61,8 @@ DESCRIPTIONS = {
     BROWSER_UNAVAILABLE: "the browser was unavailable",
     BUDGET_EXCEEDED: "the application took longer than its time budget",
     RESUME_NEEDS_REVIEW: "the generated resume scored below the review threshold",
+    ANTI_BOT_ATS: "the application site blocks automated browsers; apply by hand",
+    LINKEDIN_SIGNED_OUT: "the application browser is not signed in to LinkedIn",
 }
 
 MAX_LABEL = 120
@@ -69,3 +86,15 @@ def describe(code):
     if code.startswith(UNANSWERABLE_PREFIX):
         return f"a question could not be answered safely: {code[len(UNANSWERABLE_PREFIX):].strip()}"
     return DESCRIPTIONS.get(code, code.replace("_", " "))
+
+
+def manual_host(url):
+    """The ``MANUAL_HOSTS`` entry the URL's host belongs to, else None."""
+    try:
+        host = (urlsplit(str(url or "").strip()).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    for base in MANUAL_HOSTS:
+        if host == base or host.endswith("." + base):
+            return base
+    return None

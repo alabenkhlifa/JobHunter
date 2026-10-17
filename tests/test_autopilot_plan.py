@@ -434,3 +434,79 @@ def test_legacy_manifests_without_a_score_are_not_handed_off(world):
     add_job(world.conn)
     result, _ = build(world, enabled_policy(min_resume_score=90))
     assert len(result["applications"]) == 1 and result["applications"][0]["package"]["resume_score"] is None
+
+
+SR_URL = "https://jobs.smartrecruiters.com/Miratech1/744000153478804"
+
+
+def test_anti_bot_offer_is_handed_off_with_its_link_and_resume_and_never_planned(world):
+    manual = add_job(world.conn, score=95, apply_url=SR_URL)
+    normal = add_job(world.conn, score=90)
+    sender = Sender()
+    result, _ = build(world, enabled_policy(max_per_day=1), sender=sender)
+    assert [a["job_id"] for a in result["applications"]] == [normal["id"]]
+    assert result["cap"]["remaining"] == 1 and result["counts"]["manual"] == 1
+    assert result["manual_hosts"] == ["smartrecruiters.com", "smartr.me"]
+    entry = result["manual"][0]
+    assert entry["job_id"] == manual["id"] and entry["telegram"] == "sent" and entry["status"] == "handed_off"
+    assert entry["reason"] == "anti_bot_ats: smartrecruiters.com" and entry["apply_url"] == SR_URL
+    assert {p["job_id"] for p in world.packaged} == {manual["id"], normal["id"]}
+    text, keyboard = sender.messages[0]
+    assert "Apply by hand" in text and "blocks automated browsers" in text and "did not try" in text
+    assert "resume is attached" in text and SR_URL in text
+    assert keyboard["inline_keyboard"][0][0] == {"text": "🔗 Open application", "url": SR_URL}
+    assert keyboard["inline_keyboard"][0][1]["callback_data"] == f"ignore:{manual['id']}"
+    assert [Path(path).name for path, _ in sender.documents] == ["Resume.pdf"]
+    stage, error = world.conn.execute("SELECT stage, error FROM applications WHERE job_id=? ORDER BY id DESC",
+                                      (manual["id"],)).fetchone()
+    assert stage == "blocked_auto_apply" and error == "anti_bot_ats: smartrecruiters.com"
+    assert log_status(world.conn, manual["id"]) == "handed_off"
+    assert log_status(world.conn, normal["id"]) == "packaged"
+    # A same-day re-run neither re-sends the card nor plans the job.
+    again, _ = build(world, enabled_policy(max_per_day=1), sender=sender)
+    assert again["manual"] == [] and len(sender.messages) == 1
+    assert [a["job_id"] for a in again["applications"]] == [normal["id"]]
+
+
+def test_route_url_prefers_the_employer_posting_then_the_listing():
+    listing = "https://jobs.smartrecruiters.com/Acme/1"
+    assert plan.route_url({"url": listing, "apply_url": ""}) == listing
+    assert plan.route_url({"url": "https://www.linkedin.com/jobs/view/1", "apply_url": SR_URL}) == SR_URL
+    assert plan.route_url({"url": SR_URL, "apply_url": SR_URL}) == SR_URL
+
+
+def test_anti_bot_offers_beyond_the_hand_off_cap_wait_unpackaged(world):
+    first = add_job(world.conn, score=95, apply_url=SR_URL + "1")
+    second = add_job(world.conn, score=94, apply_url=SR_URL + "2")
+    result, _ = build(world, enabled_policy(max_handoffs_per_run=1))
+    assert [m["job_id"] for m in result["manual"]] == [first["id"]]
+    assert result["deferred"] == [{"job_id": second["id"], "title": second["title"], "company": second["company"],
+                                   "reason": "anti_bot_ats: hand-off cap reached"}]
+    assert [p["job_id"] for p in world.packaged] == [first["id"]]
+    assert log_status(world.conn, second["id"]) == "deferred"
+    assert world.conn.execute("SELECT COUNT(*) FROM applications WHERE job_id=?", (second["id"],)).fetchone()[0] == 0
+
+
+def test_dry_run_lists_anti_bot_offers_without_sending(world):
+    job = add_job(world.conn, apply_url=SR_URL)
+    before = world.db.read_bytes()
+    sender = Sender()
+    result, _ = build(world, dry_run=True, sender=sender)
+    assert result["applications"] == [] and sender.messages == []
+    assert result["manual"][0]["job_id"] == job["id"] and result["manual"][0]["telegram"] == "skipped"
+    assert world.db.read_bytes() == before
+
+
+def test_browser_facts_join_the_plan_when_the_browser_answers(world):
+    add_job(world.conn)
+    result, _ = build(world, browser_info=lambda: {"visible": True, "linkedin_logged_in": False})
+    assert result["browser"] == {"cdp_port": 9333, "ok": True, "visible": True, "linkedin_logged_in": False}
+
+    def broken():
+        raise RuntimeError("boom")
+
+    result, _ = build(world, browser_info=broken)
+    assert result["browser"] == {"cdp_port": 9333, "ok": True} and "browser status unavailable" in result["notes"]
+    called = []
+    result, _ = build(world, probe=lambda: False, browser_info=lambda: called.append(1) or {})
+    assert called == [] and result["browser"]["ok"] is False

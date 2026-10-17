@@ -17,7 +17,7 @@ from pathlib import Path
 import jobhunter_interest_flow as interest_flow
 import scraper
 
-from . import codes, messages, plan, review, store
+from . import browser, codes, messages, plan, review, store
 from . import policy as policy_module
 
 OK, ERROR, INVALID, PENDING, REFUSED, TELEGRAM = 0, 1, 2, 3, 4, 5
@@ -229,7 +229,7 @@ def cmd_plan(args):
     result, code = plan.build_plan(
         path, current, now=_now(args), dry_run=args.dry_run, no_package=args.no_package,
         no_research=args.no_research, output_dir=args.output_dir, profile_path=_profile_path(args),
-        sender=sender)
+        sender=sender, browser_info=browser.summary)
     emit(result)
     return code
 
@@ -522,6 +522,50 @@ def cmd_status(args):
     return OK
 
 
+# ── The application browser (hand-offs over VNC) ───────────────────────────────
+
+def _browser_code(state):
+    """0 visible on the desktop · 3 running but invisible (headless/minimized) · 2 not answering."""
+    if not state.get("reachable"):
+        return INVALID
+    return OK if state.get("visible") else PENDING
+
+
+def cmd_browser(args):
+    if args.browser_action == "status":
+        state = browser.status()
+        emit(dict(state, ok=state["visible"]))
+        return _browser_code(state)
+    if bool(args.job_id) == bool(args.linkedin_login):
+        raise CliError(INVALID, "use: browser open <job_id> | browser open --linkedin-login")
+    payload = {}
+    if args.linkedin_login:
+        url = browser.LINKEDIN_LOGIN_URL
+    else:
+        conn = _connect(args, read_only=True)
+        try:
+            job = _job(conn, args.job_id)
+        finally:
+            conn.close()
+        url = plan.route_url(job)
+        payload = {"job_id": job["id"], "title": job.get("title"), "company": job.get("company")}
+        manual = codes.manual_host(url)
+        if manual:
+            payload["manual_host"] = manual
+    try:
+        opened = browser.open_tab(url)
+    except ValueError as exc:
+        raise CliError(INVALID, str(exc)) from None
+    except browser.BrowserUnavailable as exc:
+        raise CliError(INVALID, str(exc), hint=f"{browser.RESTART_HINT}, then check again") from None
+    state = browser.status()
+    payload.update(opened, visible=state["visible"], linkedin=state["linkedin"])
+    if not state["visible"]:
+        payload["hint"] = state.get("hint")
+    emit(dict(payload, ok=state["visible"]))
+    return _browser_code(state)
+
+
 # ── Parser ───────────────────────────────────────────────────────────────────
 
 GLOBAL_OPTIONS = (
@@ -592,6 +636,13 @@ def build_parser():
 
     command(commands, "summary", help="send the run summary once").add_argument("--force", action="store_true")
     command(commands, "status", help="policy and today's run")
+
+    browser_parser = command(commands, "browser", help="the application browser shown on the Pi desktop (VNC)")
+    browser_actions = browser_parser.add_subparsers(dest="browser_action", required=True)
+    command(browser_actions, "status", help="visible on the desktop? signed in to LinkedIn?")
+    opener = command(browser_actions, "open", help="open an offer (or the LinkedIn login) in a front tab")
+    opener.add_argument("job_id", nargs="?")
+    opener.add_argument("--linkedin-login", action="store_true")
     return parser
 
 
@@ -599,7 +650,7 @@ HANDLERS = {
     "config": cmd_config, "review-batch": cmd_review_batch, "record-review": cmd_record_review,
     "plan": cmd_plan, "package": cmd_package, "answers": cmd_answers,
     "record-submitted": cmd_record_submitted, "rehearsed": cmd_rehearsed, "blocked": cmd_blocked,
-    "summary": cmd_summary, "status": cmd_status,
+    "summary": cmd_summary, "status": cmd_status, "browser": cmd_browser,
 }
 
 

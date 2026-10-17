@@ -75,6 +75,16 @@ def test_inspect_page_requires_loaded_page_and_complete_fields():
     assert not incomplete.safe_to_continue
 
 
+def test_inspect_page_counts_a_datadome_iframe_as_a_challenge():
+    # DataDome serves its device check / CAPTCHA in a full-page captcha-delivery.com iframe.
+    client = FakeClient({"url": "https://jobs.example.test/apply", "title": "Apply", "text": ""})
+    seen = []
+    original = client.evaluate
+    client.evaluate = lambda expression, **kwargs: seen.append(expression) or original(expression, **kwargs)
+    inspect_page(client)
+    assert r"/recaptcha|hcaptcha|captcha-delivery\.com/i" in seen[0]
+
+
 def test_engine_does_not_record_blank_inspection(tmp_path):
     db = tmp_path / "jobs.db"
     engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False),

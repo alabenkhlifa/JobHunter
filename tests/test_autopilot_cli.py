@@ -476,3 +476,52 @@ def test_global_options_work_after_the_command(env, capsys):
     assert code == 0 and policy.load(path)["min_score"] == 81 and policy.load(path)["updated_via"] == "telegram"
     code, out = run(capsys, ["--policy", str(path), "config", "show", "--json"])
     assert out["min_score"] == 81
+
+
+VISIBLE = {"reachable": True, "visible": True, "headless": False, "window_state": "normal", "tabs": [],
+           "linkedin": {"logged_in": True, "expires_at": None}, "service": "hermes-job-browser.service"}
+
+
+def test_browser_status_exit_codes(env, capsys, monkeypatch):
+    *_, base, _ = env
+    from jobhunter_autopilot import browser
+    monkeypatch.setattr(browser, "status", lambda: dict(VISIBLE))
+    code, out = run(capsys, base + ["browser", "status"])
+    assert code == 0 and out["ok"] is True and out["linkedin"]["logged_in"] is True
+    monkeypatch.setattr(browser, "status", lambda: dict(VISIBLE, visible=False, headless=True, hint="restart"))
+    code, out = run(capsys, base + ["browser", "status"])
+    assert code == 3 and out["ok"] is False and out["hint"] == "restart"
+    monkeypatch.setattr(browser, "status", lambda: dict(VISIBLE, reachable=False, visible=False))
+    assert run(capsys, base + ["browser", "status"])[0] == 2
+
+
+def test_browser_open_puts_the_offer_in_front(env, capsys, monkeypatch):
+    conn, *_, base, _ = env
+    from jobhunter_autopilot import browser
+    job = add_job(conn, apply_url="https://jobs.smartrecruiters.com/Acme/1")
+    opened = []
+    monkeypatch.setattr(browser, "open_tab", lambda url: opened.append(url) or {"tab_id": "T", "url": url})
+    monkeypatch.setattr(browser, "status", lambda: dict(VISIBLE))
+    code, out = run(capsys, base + ["browser", "open", job["id"]])
+    assert code == 0 and opened == ["https://jobs.smartrecruiters.com/Acme/1"]
+    assert out["job_id"] == job["id"] and out["visible"] is True and out["manual_host"] == "smartrecruiters.com"
+    code, out = run(capsys, base + ["browser", "open", "--linkedin-login"])
+    assert code == 0 and opened[-1] == "https://www.linkedin.com/login" and out["linkedin"]["logged_in"] is True
+    monkeypatch.setattr(browser, "status", lambda: dict(VISIBLE, visible=False, hint="restart it"))
+    code, out = run(capsys, base + ["browser", "open", job["id"]])
+    assert code == 3 and out["ok"] is False and out["hint"] == "restart it"
+
+
+def test_browser_open_needs_one_target_and_a_live_browser(env, capsys, monkeypatch):
+    conn, *_, base, _ = env
+    from jobhunter_autopilot import browser
+    assert run(capsys, base + ["browser", "open"])[0] == 2
+    assert run(capsys, base + ["browser", "open", "li-1", "--linkedin-login"])[0] == 2
+    assert run(capsys, base + ["browser", "open", "missing-job"])[0] == 2
+
+    def down(url):
+        raise browser.BrowserUnavailable("DevTools port 9333 is not answering")
+
+    monkeypatch.setattr(browser, "open_tab", down)
+    code, out = run(capsys, base + ["browser", "open", "--linkedin-login"])
+    assert code == 2 and "not answering" in out["error"] and "restart" in out["hint"]

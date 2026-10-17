@@ -1,7 +1,9 @@
 """Cron B pre-run: everything deterministic before the agent opens a browser.
 
 lock → selection → availability → research → package → answers → cap →
-log rows → plan JSON. A retry the same day carries today's ``packaged`` and
+log rows → plan JSON. Offers on an anti-bot application site
+(``codes.MANUAL_HOSTS``) are packaged but never planned: they go to him as a
+manual card with the apply link and the resume (``manual``). A retry the same day carries today's ``packaged`` and
 ``applying`` rows forward, retries ``selected``/``deferred`` ones and never
 plans beyond the remaining cap. ``dry_run`` reads the database read-only,
 sends nothing, writes no log rows and packages into a temporary copy.
@@ -317,6 +319,45 @@ def block_and_hand_off(conn, job, code, detail="", *, run_id, policy, sender, no
     return dict(outcome, status="handed_off", telegram="sent")
 
 
+def route_url(job):
+    """The page the agent would open: the employer posting, else the listing."""
+    return scraper.official_apply_url(job) or job.get("url") or ""
+
+
+def manual_hand_off(conn, job, host, package, *, run_id, sender, now=None, criteria=None, research=None,
+                    sync=True):
+    """Hand an anti-bot offer to him up front: apply link and resume, never a browser attempt.
+
+    Returns ``{"job_id", "reason", "apply_url", "status", "telegram"}`` where
+    telegram is sent | already_sent | failed | documents_failed | skipped.
+    """
+    now = now or datetime.now(timezone.utc)
+    job_id = job["id"]
+    apply_url = route_url(job)
+    reason = f"{codes.ANTI_BOT_ATS}: {host}"
+    outcome = {"job_id": job_id, "title": job.get("title"), "company": job.get("company"), "reason": reason,
+               "apply_url": apply_url, "resume_pdf": (package or {}).get("resume_pdf")}
+    if not after_submit(conn, job_id):
+        scraper.record_application_stage(conn, job_id, "blocked_auto_apply", error=reason, now=now, sync=sync)
+    current = store.get_log(conn, run_id, job_id)
+    if current and current.get("telegram_notified_at") and current["status"] == "handed_off":
+        return dict(outcome, status="handed_off", telegram="already_sent")
+    store.upsert_log(conn, run_id, job_id, "blocked", criteria=criteria, reason=reason, now=now)
+    if sender is None:
+        return dict(outcome, status="blocked", telegram="skipped")
+    documents = [Path(path) for path in ((package or {}).get("resume_pdf"), (package or {}).get("cover_pdf"))
+                 if path and Path(path).is_file()]
+    text = messages.manual_apply(job, host=host, apply_url=apply_url, criteria=criteria, research=research,
+                                 documents=len(documents))
+    if not sender.send(text, messages.manual_keyboard(job_id, apply_url)):
+        return dict(outcome, status="blocked", telegram="failed")
+    store.upsert_log(conn, run_id, job_id, "handed_off", reason=reason, now=now, commit=False)
+    store.mark_notified(conn, run_id, job_id, now=now)
+    caption = f"{messages.esc(job.get('title'), 100)} — {messages.esc(job.get('company'), 60)}"
+    sent = all([sender.document(path, caption=caption) for path in documents])
+    return dict(outcome, status="handed_off", telegram="sent" if sent else "documents_failed")
+
+
 # ── The plan ─────────────────────────────────────────────────────────────────
 
 def _skeleton(policy, *, run_id, now, dry_run, active):
@@ -327,7 +368,8 @@ def _skeleton(policy, *, run_id, now, dry_run, active):
         "cap": {"max_per_day": policy["max_per_day"], "used_today": 0, "remaining": 0},
         "browser": {"cdp_port": CDP_PORT, "ok": False},
         "preflight": {"missing_application_defaults": [], "jobs_mailbox": None},
-        "applications": [], "deferred": [], "closed": [], "handoffs": [], "counts": {}, "notes": [],
+        "applications": [], "deferred": [], "closed": [], "handoffs": [], "manual": [],
+        "manual_hosts": list(codes.MANUAL_HOSTS), "counts": {}, "notes": [],
     }
 
 
@@ -353,8 +395,12 @@ def _copy_database(db_path, directory):
 
 def build_plan(db_path, policy, *, now=None, dry_run=False, no_package=False, no_research=False,
                output_dir=None, profile_path=None, sender=None, check=None, monitor=None,
-               probe=None, lock_path=None):
-    """Return ``(plan, exit_code)``; 0 ok, 3 when another run holds the lock."""
+               probe=None, lock_path=None, browser_info=None):
+    """Return ``(plan, exit_code)``; 0 ok, 3 when another run holds the lock.
+
+    ``browser_info`` (``browser.summary`` in real runs) adds whether the
+    browser is visible on the desktop and signed in to LinkedIn.
+    """
     now = now or datetime.now(timezone.utc)
     run_id = store.run_id_for(now, policy["timezone"])
     active = policy_module.is_active(policy, now)
@@ -365,6 +411,11 @@ def build_plan(db_path, policy, *, now=None, dry_run=False, no_package=False, no
     plan["preflight"] = {"missing_application_defaults": missing_application_defaults(profile),
                          "profile_found": profile is not None, "jobs_mailbox": mailbox}
     plan["browser"]["ok"] = bool((probe or probe_browser)())
+    if browser_info is not None and plan["browser"]["ok"]:
+        try:
+            plan["browser"].update(browser_info())
+        except Exception:  # noqa: BLE001 - extra browser facts never block the plan
+            plan["notes"].append("browser status unavailable")
     if not dry_run and not active:
         plan["notes"].append("autopilot disabled" if not policy["enabled"] else "autopilot paused")
         return plan, 0
@@ -490,6 +541,14 @@ def _build(plan, db_path, policy, *, now, dry_run, no_package, no_research, outp
                     log(job["id"], "deferred", criteria=job["criteria"],
                         reason=f"availability unknown: {checked.get('reason')}")
                     continue
+                manual = codes.manual_host(route_url(job))
+                if manual and (len(plan["manual"]) >= policy["max_handoffs_per_run"] or not dry_run and
+                               store.count_status(conn, run_id, "handed_off") >= policy["max_handoffs_per_run"]):
+                    # Keep it for another day instead of blocking it without a card.
+                    reason = f"{codes.ANTI_BOT_ATS}: hand-off cap reached"
+                    plan["deferred"].append(dict(label, reason=reason))
+                    log(job["id"], "deferred", criteria=job["criteria"], reason=reason)
+                    continue
                 log(job["id"], "selected", criteria=job["criteria"])
                 research, note = (None, None) if no_research else run_research(
                     job, conn=None if dry_run else conn, now=now)
@@ -540,6 +599,18 @@ def _build(plan, db_path, policy, *, now, dry_run, no_package, no_research, outp
                         conn.execute("UPDATE jobs SET status='interested' WHERE id=? AND status<>'interested'",
                                      (job["id"],))
                         conn.commit()
+                if manual:
+                    # Never planned, so no apply slot is used; he submits it himself.
+                    if dry_run:
+                        plan["manual"].append(dict(label, reason=f"{codes.ANTI_BOT_ATS}: {manual}",
+                                                   apply_url=route_url(job),
+                                                   resume_pdf=(package or {}).get("resume_pdf"),
+                                                   status="blocked", telegram="skipped"))
+                    else:
+                        plan["manual"].append(manual_hand_off(
+                            conn, job, manual, package, run_id=run_id, sender=sender, now=now,
+                            criteria=job["criteria"], research=research))
+                    continue
                 answers, note = run_answers(profile, research, mailbox=mailbox)
                 if note:
                     notes.append(f"{job['id']}: {note}")
@@ -563,7 +634,7 @@ def _build(plan, db_path, policy, *, now, dry_run, no_package, no_research, outp
             "selected": len(result["selected"]), "needs_review": len(result["needs_review"]),
             "filtered": result["filtered"], "carried_over": len(carried),
             "planned": len(plan["applications"]), "deferred": len(plan["deferred"]),
-            "closed": len(plan["closed"]), "handoffs": len(plan["handoffs"]),
+            "closed": len(plan["closed"]), "handoffs": len(plan["handoffs"]), "manual": len(plan["manual"]),
         }
         if scratch:
             plan["dry_run_output"] = str(package_dir)
