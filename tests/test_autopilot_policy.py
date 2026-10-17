@@ -118,8 +118,12 @@ def test_codes():
     assert not codes.is_valid("unanswerable:")
     assert not codes.is_valid("made_up")
     assert "Notice period" in codes.describe("unanswerable:Notice period")
-    assert len(codes.HARD_STOPS) == 17
+    assert len(codes.HARD_STOPS) == 18
     assert codes.is_valid("anti_bot_ats") and codes.is_valid("linkedin_signed_out")
+    assert codes.is_valid("multi_step_form") and "multi-step form" in codes.describe("multi_step_form")
+    assert codes.MANUAL_APPLY == {"multi_step_form", "linkedin_easy_apply", "form_unverified", "captcha",
+                                  "anti_bot_ats"}
+    assert codes.MANUAL_APPLY <= codes.HARD_STOPS
     assert "apply by hand" in codes.describe("anti_bot_ats")
 
 

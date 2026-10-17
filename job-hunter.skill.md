@@ -575,7 +575,10 @@ Everything else in this skill still applies: no fabricated or guessed answers,
 no CAPTCHA/phone/identity bypass, no answers where the employer forbids AI, no
 LinkedIn Easy Apply, a verified receipt before `submitted`, and no retry after
 `submission_attempted`. Any hard stop records `blocked_auto_apply` and hands the
-job to the manual flow above through its research card. Outside the autopilot
+job back: an "Apply by hand" card with the link and the tailored resume when he
+must apply himself (multi-step form, unverified form, Easy Apply, CAPTCHA,
+anti-bot site; see the auto-apply hard-stop list), else the manual flow above
+through its research card. Outside the autopilot
 crons, Interested, Apply, Proceed and final-submit approval stay separate,
 explicit decisions; never use `--policy-run` or the autopilot policy to skip
 them.

@@ -411,9 +411,21 @@ def cmd_rehearsed(args):
     return code
 
 
+def _manual_package(conn, args, code):
+    """The tailored package when this hard stop goes to him as an "Apply by hand" card, else None."""
+    if code not in codes.MANUAL_APPLY or plan.after_submit(conn, args.job_id):
+        return None
+    return plan.existing_package(conn, args.job_id, plan.load_profile(_profile_path(args)))
+
+
 def cmd_blocked(args):
+    """Record a hard stop: an "Apply by hand" card (link, resume) for ``codes.MANUAL_APPLY``
+    stops with a package, else the research card."""
     if not codes.is_valid(args.reason):
         raise CliError(INVALID, f"unknown hard-stop code {args.reason!r}")
+    page_url = messages.safe_url(args.url) if args.url else None
+    if args.url and not page_url:
+        raise CliError(INVALID, "--url must be an http(s) URL")
     current = _policy(args)
     now = _now(args)
     run_id = store.run_id_for(now, current["timezone"])
@@ -425,12 +437,20 @@ def cmd_blocked(args):
         if row["status"] in ("submitted", "rehearsed", "closed"):
             raise CliError(INVALID, f"job {args.job_id} is already {row['status']} today")
         sender, wanted = _sender(args)
-        outcome = plan.block_and_hand_off(conn, job, args.reason, detail, run_id=run_id, policy=current,
-                                          sender=sender, now=now)
+        package = _manual_package(conn, args, args.reason)
+        if package:
+            apply_url = page_url or plan.route_url(job)
+            host = codes.manual_host(apply_url) if args.reason == codes.ANTI_BOT_ATS else None
+            outcome = plan.manual_hand_off(conn, job, host, package, run_id=run_id, sender=sender, now=now,
+                                           criteria=row.get("criteria"), research=plan.cached_research(conn, job["id"]),
+                                           code=args.reason, detail=detail, apply_url=apply_url, policy=current)
+        else:
+            outcome = plan.block_and_hand_off(conn, job, args.reason, detail, run_id=run_id, policy=current,
+                                              sender=sender, now=now)
     finally:
         conn.close()
     emit(dict(outcome, ok=True))
-    if wanted and outcome["telegram"] in ("failed", "skipped"):
+    if wanted and outcome["telegram"] in ("failed", "skipped", "documents_failed"):
         return TELEGRAM
     return OK
 
@@ -633,6 +653,7 @@ def build_parser():
     blocked.add_argument("job_id")
     blocked.add_argument("--reason", required=True, metavar="CODE")
     blocked.add_argument("--detail", default="")
+    blocked.add_argument("--url", metavar="URL", help="the employer page reached; the Apply-by-hand card links there")
 
     command(commands, "summary", help="send the run summary once").add_argument("--force", action="store_true")
     command(commands, "status", help="policy and today's run")

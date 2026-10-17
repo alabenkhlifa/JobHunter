@@ -10,6 +10,10 @@ table lists the same codes.
 automated browser. The plan marks their offers manual up front
 (``anti_bot_ats``): no browser attempt, a card with the apply link and the
 generated resume instead.
+
+``MANUAL_APPLY`` are the hard stops he finishes himself on the employer's
+site; when the job has a tailored package, ``blocked`` sends that same
+"Apply by hand" card (link, resume) instead of the research card.
 """
 
 from urllib.parse import urlsplit
@@ -32,13 +36,16 @@ BUDGET_EXCEEDED = "budget_exceeded"
 RESUME_NEEDS_REVIEW = "resume_needs_review"
 ANTI_BOT_ATS = "anti_bot_ats"
 LINKEDIN_SIGNED_OUT = "linkedin_signed_out"
+MULTI_STEP_FORM = "multi_step_form"
 
 HARD_STOPS = frozenset({
     CAPTCHA, PHONE_OR_IDENTITY, NO_AI_ANSWER, SALARY_PERIOD_AMBIGUOUS, FORM_UNVERIFIED,
     EMPLOYER_UNVERIFIED, ACCOUNT_CREATION_FAILED, EMAIL_VERIFICATION_UNSUPPORTED,
     PACKAGE_NOT_READY, COVER_LETTER_FAILED, LINKEDIN_EASY_APPLY, RECEIPT_UNVERIFIED,
     BROWSER_UNAVAILABLE, BUDGET_EXCEEDED, RESUME_NEEDS_REVIEW, ANTI_BOT_ATS, LINKEDIN_SIGNED_OUT,
+    MULTI_STEP_FORM,
 })
+MANUAL_APPLY = frozenset({MULTI_STEP_FORM, LINKEDIN_EASY_APPLY, FORM_UNVERIFIED, CAPTCHA, ANTI_BOT_ATS})
 
 # Hosts (and their subdomains) whose apply flow sits behind an anti-bot check.
 # SmartRecruiters' application pages answer automated Chromium with a DataDome
@@ -63,6 +70,7 @@ DESCRIPTIONS = {
     RESUME_NEEDS_REVIEW: "the generated resume scored below the review threshold",
     ANTI_BOT_ATS: "the application site blocks automated browsers; apply by hand",
     LINKEDIN_SIGNED_OUT: "the application browser is not signed in to LinkedIn",
+    MULTI_STEP_FORM: "the application is a multi-step form the autopilot cannot fill yet",
 }
 
 MAX_LABEL = 120

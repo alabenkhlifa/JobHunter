@@ -235,19 +235,32 @@ def handoff(job, code, detail="", *, after_submit=False):
     return "\n".join(lines)
 
 
-def manual_apply(job, *, host, apply_url, criteria=None, research=None, documents=0):
-    """The card for an offer on an anti-bot site: the apply link and the resume, for him to submit."""
+def manual_apply(job, *, apply_url, host=None, code=codes.ANTI_BOT_ATS, detail="", criteria=None, research=None,
+                 documents=0):
+    """The "Apply by hand" card: the apply link and the resume, for him to submit.
+
+    An anti-bot offer (``host``) was never tried; any other ``codes.MANUAL_APPLY``
+    hard stop says why the autopilot stopped (``code``, ``detail``).
+    """
     city = city_of(job)
     title = (f"✋ <b>Apply by hand</b> · <b>{esc(job.get('title'), 120)} — {esc(job.get('company'), 80)}</b>"
              + (f" ({esc(city, 40)})" if city else ""))
     attached = ("The tailored resume is attached below." if documents == 1
                 else "The tailored resume and cover letter are attached below." if documents > 1
                 else "The tailored resume could not be attached; ask Hermes for it.")
+    if code == codes.ANTI_BOT_ATS and host:
+        why = f"{esc(host, 60)} blocks automated browsers, so the autopilot did not try."
+    else:
+        reason = codes.describe(code) + (f" — {detail}" if detail else "")
+        why = f"The autopilot stopped: {esc(reason, 300).rstrip('.')}."
     lines = [
         title,
-        f"{esc(host, 60)} blocks automated browsers, so the autopilot did not try. Submit it yourself. {attached}",
-        "Apply: " + (link(apply_url, urlsplit(safe_url(apply_url)).netloc or host) or "link unavailable"),
+        f"{why} Submit it yourself. {attached}",
+        "Apply: " + (link(apply_url, urlsplit(safe_url(apply_url)).netloc or host or "application")
+                     or "link unavailable"),
     ]
+    if code in HANDOFF_HINTS:
+        lines.append(HANDOFF_HINTS[code])
     if criteria:
         lines.append("Why: " + " · ".join(esc(item, 120) for item in criteria))
     salary = " · ".join(esc(line, 220) for line in salary_lines(research))

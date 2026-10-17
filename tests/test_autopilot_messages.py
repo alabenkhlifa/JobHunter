@@ -135,6 +135,21 @@ def test_manual_apply_card(no_research_module):
     assert "cover letter" in messages.manual_apply(JOB, host="smartr.me", apply_url=url, documents=2)
 
 
+def test_manual_apply_card_for_a_hard_stop_met_in_the_browser(no_research_module):
+    url = "https://bwelcome.hr.bnpparibas/en_US/externalcareers/ApplicationMethods?jobId=105012"
+    text = messages.manual_apply(JOB, code="multi_step_form", detail="<Select your resume>", apply_url=url,
+                                 criteria=CRITERIA, research=research_payload("li-1"), documents=1)
+    lines = text.splitlines()
+    assert lines[1] == ("The autopilot stopped: the application is a multi-step form the autopilot cannot fill yet"
+                        " — &lt;Select your resume&gt;. Submit it yourself. The tailored resume is attached below.")
+    assert lines[2].endswith(">bwelcome.hr.bnpparibas</a>") and lines[3].startswith("Why: ")
+    captcha = messages.manual_apply(JOB, code="captcha", apply_url=url).splitlines()
+    assert captcha[1].startswith("The autopilot stopped: the site showed a CAPTCHA.")
+    assert "VNC" in captcha[3]
+    assert "blocks automated browsers" in messages.manual_apply(JOB, code="anti_bot_ats", apply_url=url)
+    assert ".. Submit" not in messages.manual_apply(JOB, code="form_unverified", detail="No form.", apply_url=url)
+
+
 def test_manual_keyboard():
     url = "https://jobs.smartrecruiters.com/Acme/1"
     assert messages.manual_keyboard("sj-1", url) == {"inline_keyboard": [[

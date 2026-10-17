@@ -325,16 +325,21 @@ def route_url(job):
 
 
 def manual_hand_off(conn, job, host, package, *, run_id, sender, now=None, criteria=None, research=None,
-                    sync=True):
-    """Hand an anti-bot offer to him up front: apply link and resume, never a browser attempt.
+                    sync=True, code=codes.ANTI_BOT_ATS, detail="", apply_url=None, policy=None):
+    """Hand an offer to him to submit himself: an "Apply by hand" card with the link and the resume.
+
+    The plan sends it up front for an anti-bot offer (``host``, never a browser
+    attempt); ``blocked`` sends it for a ``codes.MANUAL_APPLY`` hard stop met
+    in the browser (``code``, ``detail``, the page reached as ``apply_url``,
+    within ``policy``'s hand-off cap).
 
     Returns ``{"job_id", "reason", "apply_url", "status", "telegram"}`` where
-    telegram is sent | already_sent | failed | documents_failed | skipped.
+    telegram is sent | already_sent | failed | documents_failed | skipped | cap.
     """
     now = now or datetime.now(timezone.utc)
     job_id = job["id"]
-    apply_url = route_url(job)
-    reason = f"{codes.ANTI_BOT_ATS}: {host}"
+    apply_url = apply_url or route_url(job)
+    reason = f"{code}: {detail or host}" if detail or host else code
     outcome = {"job_id": job_id, "title": job.get("title"), "company": job.get("company"), "reason": reason,
                "apply_url": apply_url, "resume_pdf": (package or {}).get("resume_pdf")}
     if not after_submit(conn, job_id):
@@ -343,12 +348,14 @@ def manual_hand_off(conn, job, host, package, *, run_id, sender, now=None, crite
     if current and current.get("telegram_notified_at") and current["status"] == "handed_off":
         return dict(outcome, status="handed_off", telegram="already_sent")
     store.upsert_log(conn, run_id, job_id, "blocked", criteria=criteria, reason=reason, now=now)
+    if policy is not None and store.count_status(conn, run_id, "handed_off") >= policy["max_handoffs_per_run"]:
+        return dict(outcome, status="blocked", telegram="cap")
     if sender is None:
         return dict(outcome, status="blocked", telegram="skipped")
     documents = [Path(path) for path in ((package or {}).get("resume_pdf"), (package or {}).get("cover_pdf"))
                  if path and Path(path).is_file()]
-    text = messages.manual_apply(job, host=host, apply_url=apply_url, criteria=criteria, research=research,
-                                 documents=len(documents))
+    text = messages.manual_apply(job, host=host, code=code, detail=detail, apply_url=apply_url, criteria=criteria,
+                                 research=research, documents=len(documents))
     if not sender.send(text, messages.manual_keyboard(job_id, apply_url)):
         return dict(outcome, status="blocked", telegram="failed")
     store.upsert_log(conn, run_id, job_id, "handed_off", reason=reason, now=now, commit=False)

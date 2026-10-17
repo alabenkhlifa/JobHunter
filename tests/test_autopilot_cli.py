@@ -408,6 +408,127 @@ def test_blocked_telegram_unconfirmed_exits_5_with_state_saved(env, capsys, monk
     assert code == 0 and out["telegram"] == "sent"
 
 
+BNP_STEP = "https://bwelcome.hr.bnpparibas/en_US/externalcareers/ApplicationMethods?jobId=105012&source=web"
+
+
+def packaged(conn, profile, job, *, cover=False):
+    """A tailored package for ``job`` built from the test profile (what the plan leaves behind)."""
+    directory = profile.parent / "output" / f"{job['id']}-pkg"
+    directory.mkdir(parents=True)
+    (directory / "Resume.pdf").write_bytes(b"%PDF resume")
+    if cover:
+        (directory / "CoverLetter.pdf").write_bytes(b"%PDF cover")
+    digest = interest_flow._profile_digest(json.loads(profile.read_text()))
+    (directory / "tailoring_manifest.json").write_text(json.dumps({"job_id": job["id"], "profile_sha256": digest}))
+    scraper.record_application_stage(conn, job["id"], "package_generated", package_path=str(directory), sync=False)
+    return directory
+
+
+def test_multi_step_form_sends_the_apply_by_hand_card_with_the_page_reached_and_the_resume(env, capsys):
+    conn, base, profile = env[0], env[4], env[3]
+    job = add_job(conn, status="interested")
+    store.upsert_log(conn, RUN_ID, job["id"], "applying", criteria=["score 87 ≥ 75", "reviewer: send"])
+    packaged(conn, profile, job, cover=True)
+    argv = base + ["blocked", job["id"], "--reason", "multi_step_form", "--detail", "step 1 of 4: upload CV",
+                   "--url", BNP_STEP]
+    with mock.patch.object(scraper.requests, "post", return_value=telegram_ok()) as post:
+        code, out = run(capsys, argv)
+        assert code == 0 and out["status"] == "handed_off" and out["telegram"] == "sent"
+        assert out["apply_url"] == BNP_STEP and out["reason"] == "multi_step_form: step 1 of 4: upload CV"
+        payload = sent(post)[0].kwargs["json"]
+        lines = payload["text"].splitlines()
+        assert lines[0].startswith("✋ <b>Apply by hand</b> · <b>Senior Backend Engineer")
+        assert "The autopilot stopped: the application is a multi-step form" in lines[1]
+        assert "step 1 of 4: upload CV" in lines[1] and "resume and cover letter are attached" in lines[1]
+        assert lines[2].startswith('Apply: <a href="https://bwelcome.hr.bnpparibas/')
+        assert lines[2].endswith(">bwelcome.hr.bnpparibas</a>")
+        assert lines[3] == "Why: score 87 ≥ 75 · reviewer: send"
+        assert lines[4].startswith("Expected salary:")
+        assert "🔎 <b>Research</b>" not in payload["text"]
+        assert payload["reply_markup"]["inline_keyboard"][0] == [
+            {"text": "🔗 Open application", "url": BNP_STEP},
+            {"text": "🚫 Ignore", "callback_data": f"ignore:{job['id']}"}]
+        documents = [Path(call.kwargs["files"]["document"].name).name for call in sent(post, "sendDocument")]
+        assert documents == ["Resume.pdf", "CoverLetter.pdf"]
+        code, out = run(capsys, argv)
+        assert code == 0 and out["telegram"] == "already_sent" and len(sent(post)) == 1
+    stage, error = conn.execute("SELECT stage, error FROM applications WHERE job_id=?", (job["id"],)).fetchone()
+    assert stage == "blocked_auto_apply" and error == "multi_step_form: step 1 of 4: upload CV"
+    assert log_status(conn, job["id"]) == "handed_off"
+    assert conn.execute("SELECT COUNT(*) FROM job_feedback").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("code", ["linkedin_easy_apply", "form_unverified", "captcha", "anti_bot_ats"])
+def test_manual_hard_stops_with_a_package_link_the_offer_when_no_url_is_given(env, capsys, code):
+    conn, base, profile = env[0], env[4], env[3]
+    job = add_job(conn)
+    store.upsert_log(conn, RUN_ID, job["id"], "applying")
+    packaged(conn, profile, job)
+    with mock.patch.object(scraper.requests, "post", return_value=telegram_ok()) as post:
+        code_, out = run(capsys, base + ["blocked", job["id"], "--reason", code])
+        assert code_ == 0 and out["telegram"] == "sent" and out["apply_url"] == job["url"]
+        text = sent(post)[0].kwargs["json"]["text"]
+        assert "Apply by hand" in text and "resume is attached" in text and job["url"] in text
+        assert ("VNC" in text) == (code == "captcha")
+        assert len(sent(post, "sendDocument")) == 1
+
+
+def test_anti_bot_ats_met_in_the_browser_names_the_site(env, capsys):
+    conn, base, profile = env[0], env[4], env[3]
+    job = add_job(conn)
+    store.upsert_log(conn, RUN_ID, job["id"], "applying")
+    packaged(conn, profile, job)
+    url = "https://jobs.smartrecruiters.com/Acme/744000153478804"
+    with mock.patch.object(scraper.requests, "post", return_value=telegram_ok()) as post:
+        code, out = run(capsys, base + ["blocked", job["id"], "--reason", "anti_bot_ats", "--url", url])
+        assert code == 0 and out["reason"] == "anti_bot_ats: smartrecruiters.com"
+        assert "smartrecruiters.com blocks automated browsers" in sent(post)[0].kwargs["json"]["text"]
+
+
+def test_other_hard_stops_and_after_submit_keep_the_research_card(env, capsys):
+    conn, base, profile = env[0], env[4], env[3]
+    other, clicked = add_job(conn), add_job(conn)
+    for job in (other, clicked):
+        store.upsert_log(conn, RUN_ID, job["id"], "applying")
+        packaged(conn, profile, job)
+    scraper.record_application_stage(conn, clicked["id"], "submission_attempted", sync=False)
+    with mock.patch.object(scraper.requests, "post", return_value=telegram_ok()) as post:
+        assert run(capsys, base + ["blocked", other["id"], "--reason", "phone_or_identity", "--url", BNP_STEP])[0] == 0
+        assert run(capsys, base + ["blocked", clicked["id"], "--reason", "captcha"])[0] == 0
+        first, second = (call.kwargs["json"]["text"] for call in sent(post))
+        assert "🔎 <b>Research</b>" in first and "Apply by hand" not in first
+        assert "already clicked" in second and "Apply by hand" not in second
+        assert sent(post, "sendDocument") == []
+
+
+def test_apply_by_hand_card_respects_the_hand_off_cap_and_reports_unsent_documents(env, capsys):
+    conn, db, _, profile, _, tmp = env
+    policy_path = write_policy(tmp / "one.json", enabled_policy(mode="live", max_handoffs_per_run=1))
+    base = ["--db", str(db), "--policy", str(policy_path), "--profile", str(profile)]
+    first, second = add_job(conn), add_job(conn)
+    for job in (first, second):
+        store.upsert_log(conn, RUN_ID, job["id"], "applying")
+        packaged(conn, profile, job)
+
+    def post(url, **kwargs):
+        return mock.Mock(status_code=500) if url.endswith("sendDocument") else telegram_ok()
+
+    with mock.patch.object(scraper.requests, "post", side_effect=post):
+        code, out = run(capsys, base + ["blocked", first["id"], "--reason", "multi_step_form"])
+        assert code == 5 and out["telegram"] == "documents_failed" and out["status"] == "handed_off"
+        code, out = run(capsys, base + ["blocked", second["id"], "--reason", "multi_step_form"])
+        assert code == 0 and out["telegram"] == "cap"
+    assert log_status(conn, second["id"]) == "blocked"
+
+
+def test_blocked_rejects_a_non_http_url(env, capsys):
+    conn, base = env[0], env[4]
+    job = add_job(conn)
+    store.upsert_log(conn, RUN_ID, job["id"], "applying")
+    code, out = run(capsys, base + ["blocked", job["id"], "--reason", "multi_step_form", "--url", "javascript:x"])
+    assert code == 2 and "--url" in out["error"] and log_status(conn, job["id"]) == "applying"
+
+
 def test_research_card_falls_back_to_a_minimal_card(monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("no network")
