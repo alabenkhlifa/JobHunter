@@ -24,7 +24,7 @@ from jobhunter_research import cache, company, roles, salary
 from jobhunter_research.salary import ask_from_range
 from jobhunter_research.search import BROWSER_HEADERS
 
-RESEARCH_VERSION = 1
+RESEARCH_VERSION = 2
 FETCH_TIMEOUT = 10
 __all__ = ["RESEARCH_VERSION", "ResearchResult", "research", "ask_from_range", "format_salary_lines",
            "default_fetch"]
@@ -85,10 +85,13 @@ class ResearchResult:
             "version": self.version,
             "researched_at": self.researched_at,
             "salary": {key: s.get(key) for key in ("low", "high", "currency", "period", "basis", "ask_amount",
-                                                    "published_text", "confidence")},
+                                                    "published_text", "confidence", "ask_basis", "compensation_basis", "proxy_for_level")},
             "company": {key: c.get(key) if key != "sources" else list(c.get("sources") or [])
                         for key in ("name", "website", "summary", "industry", "size", "hq", "sources")},
-            "sources": [{key: source.get(key, "") for key in ("kind", "name", "url", "snippet", "retrieved_at")}
+            "sources": [{**{key: source.get(key, "") for key in ("kind", "name", "url", "snippet", "retrieved_at")},
+                         **({"evidence": {key: value for key, value in source["evidence"].items()
+                              if key in {"role_family", "level", "geography", "compensation_basis", "statistic", "scope", "proxy_for_level"}
+                              and isinstance(value, str)}} if isinstance(source.get("evidence"), dict) else {})}
                         for source in self.sources],
             "notes": list(self.notes),
         }
@@ -208,10 +211,12 @@ def research(job: dict[str, Any], *, conn: sqlite3.Connection | None = None, max
         now = now.replace(tzinfo=timezone.utc)
     job_id = str(job.get("id") or "")
     notes: list[str] = []
+    context_sha256 = cache.context_digest(job, {"target": _flow().salary_target(job),
+                                               "quantile": quantile, "round_to": round_to})
     if conn is not None and job_id:
         try:
             cache.ensure_schema(conn)
-            cached = cache.load(conn, job_id, max_age_days, now=now)
+            cached = cache.load(conn, job_id, max_age_days, now=now, context_sha256=context_sha256)
         except sqlite3.Error as exc:
             notes.append(f"Research cache unavailable: {exc.__class__.__name__}.")
             cached = None
@@ -263,11 +268,11 @@ def research(job: dict[str, Any], *, conn: sqlite3.Connection | None = None, max
         summary_origin=profile_result.summary_origin,
     )
     # Always cache: the engine reads the ask from this row when it fills a
-    # salary field. An estimate-only result (providers blocked) expires after
-    # one day in cache.load so it is retried on the next run.
+    # salary field. Incomplete lookups and estimate-only results expire sooner
+    # in cache.load so a temporary provider failure can be retried.
     if conn is not None and job_id:
         try:
-            cache.store(conn, result)
+            cache.store(conn, result, context_sha256=context_sha256)
         except sqlite3.Error as exc:
             result.notes.append(f"Research cache not saved: {exc.__class__.__name__}.")
     return result
@@ -293,10 +298,28 @@ def format_salary_lines(result: ResearchResult | dict[str, Any]) -> list[str]:
         text = text if len(text) <= 80 else text[:79].rstrip() + "…"
         lines.append(f"Published: {html.escape(text)} ({html.escape(str(published.get('name')))})")
     for kind, label in (("company", "Company"), ("market", "Market")):
-        summary = salary.summarize_sources(sources, kind=kind, currency=currency, period=period)
-        if summary:
+        cohorts = {}
+        for source in sources:
+            if source.get("kind") != kind:
+                continue
+            descriptors = salary.source_evidence(source)
+            key = tuple(descriptors.get(k) for k in ("scope", "level", "compensation_basis", "proxy_for_level"))
+            cohorts.setdefault(key, []).append(source)
+        for key, cohort in cohorts.items():
+            summary = salary.summarize_sources(cohort, kind=kind, currency=currency, period=period)
+            if not summary:
+                continue
             text = salary.format_range(summary["low"], summary["high"], summary["currency"], period)
-            lines.append(f"{label}: {html.escape(text)} ({html.escape(_names(sources, kind))})")
+            details = [", ".join(summary["names"][:3])]
+            if key[0] == "company_wide":
+                details.append("seniority unspecified")
+            if key[2] == "total_comp":
+                details.append("total compensation")
+            elif key[2] == "base":
+                details.append("base salary")
+            if key[3]:
+                details.append(f"{key[1]} data used as {key[3]} proxy")
+            lines.append(f"{label}: {html.escape(text)} ({html.escape('; '.join(details))})")
     if pay.get("basis") == "estimate":
         summary = salary.summarize_sources(sources, kind="benchmark", currency=currency, period=period)
         if summary:
@@ -313,13 +336,13 @@ _TARGET_LOCATIONS = {"uae": "Dubai", "saudi": "Riyadh", "switzerland": "Zurich"}
 
 
 def _ask_text(pay: dict[str, Any]) -> str:
-    ask, basis = int(pay["ask_amount"]), str(pay.get("basis") or "none")
+    ask, basis = int(pay["ask_amount"]), str(pay.get("ask_basis") or pay.get("basis") or "none")
     currency, period = pay.get("currency"), pay.get("period") or "year"
     market = next((name for name, units in _MARKET_UNITS.items() if units == (currency, period)), None)
     target = _flow().salary_target({"location": _TARGET_LOCATIONS[market]}) if market in _TARGET_LOCATIONS else None
     if target and int(target["amount"]) == ask and basis != "published":
         why = "configured target"
-    elif basis == "none":
+    elif basis in {"none", "configured"}:
         why = "configured target"
     elif ask == ask_from_range(pay.get("low"), pay.get("high")):
         why = f"75th pct of {basis} range"

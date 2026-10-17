@@ -259,13 +259,19 @@ def figures(text: str, *, currency: str | None, period: str) -> list[tuple[int, 
 
 
 def summarize_figures(rows: list[tuple[int, int, str | None]]) -> tuple[int | None, int | None] | None:
-    """Collapse one site's figures to (low, high); either end may be None."""
+    """Collapse one site's figures to (low, high), requiring a range or center.
+
+    A lone ``highest`` or ``lowest`` observation is not a salary range. Keep it
+    in the source snippet, but do not promote it to an estimated distribution.
+    """
     if not rows:
         return None
     ranges = [(low, high) for low, high, _ in rows if low != high]
     lows = [low for low, high, label in rows if low == high and label == "low"] + [low for low, _ in ranges]
     highs = [low for low, high, label in rows if low == high and label == "high"] + [high for _, high in ranges]
     mids = [low for low, high, label in rows if low == high and label not in {"low", "high"}]
+    if not ranges and not mids and (not lows or not highs):
+        return None
     low = median(lows) if lows else (min(mids) if mids else None)
     high = median(highs) if highs else (max(mids) if mids else None)
     if low is not None and high is not None and low > high:
@@ -304,6 +310,51 @@ def site_name(url: str) -> str:
     return next((name for marker, name in MARKET_SITES if marker in host), "")
 
 
+_EVIDENCE_LEVEL = re.compile(r"\b(staff|principal|lead|senior|sr\.?|s[ée]nior)\b", re.I)
+
+
+def source_evidence(source: dict[str, Any]) -> dict[str, str]:
+    """Return normalized evidence descriptors, inferring them for old sources."""
+    provided = source.get("evidence")
+    evidence = dict(provided) if isinstance(provided, dict) else {}
+    text = " ".join(str(source.get(key) or "") for key in ("name", "snippet", "url"))
+    plain = _plain(text)
+    if not evidence.get("level"):
+        match = _EVIDENCE_LEVEL.search(plain)
+        evidence["level"] = ("staff" if match and match.group(1) in {"staff", "principal"} else
+                              "lead" if match and match.group(1) == "lead" else
+                              "senior" if match else "unknown")
+    if not evidence.get("compensation_basis"):
+        if re.search(r"total\s+comp|total\s+compensation|total\s+pay", plain):
+            evidence["compensation_basis"] = "total_comp"
+        elif re.search(r"base\s+(?:salary|pay)|gross\s+annual\s+base", plain):
+            evidence["compensation_basis"] = "base"
+        else:
+            evidence["compensation_basis"] = "unspecified"
+    if not evidence.get("statistic"):
+        if re.search(r"\b(?:25th|75th|p25|p75|percentile|range)\b", plain):
+            evidence["statistic"] = "percentile_range" if re.search(r"percentile|25th|75th|p25|p75", plain) else "range"
+        elif re.search(r"median|mean|average|promedio|mediana", plain):
+            evidence["statistic"] = "median"
+        elif re.search(r"\bhighest\b|\blowest\b|\bmaximum\b|\bminimum\b", plain):
+            evidence["statistic"] = "single_point"
+        else:
+            evidence["statistic"] = "unknown"
+    if not evidence.get("scope"):
+        kind = source.get("kind")
+        level_marked = evidence["level"] != "unknown"
+        if kind == "company" and (not level_marked or re.search(r"\ball\s+software\s+engineers?\b", plain)):
+            evidence["scope"] = "company_wide"
+        else:
+            evidence["scope"] = "role_specific" if level_marked else "unknown"
+    if not evidence.get("geography"):
+        if re.search(r"\bspain|espa(?:n|ñ)a\b", plain):
+            evidence["geography"] = "Spain"
+        else:
+            evidence["geography"] = "unknown"
+    return evidence
+
+
 def summarize_sources(sources: Iterable[dict[str, Any]], *, kind: str, currency: str | None,
                       period: str) -> dict[str, Any] | None:
     """Range for one evidence kind: {low, high, agreeing, names}."""
@@ -317,19 +368,42 @@ def summarize_sources(sources: Iterable[dict[str, Any]], *, kind: str, currency:
     for source in selected:
         key = site_name(source.get("url", "")) or str(source.get("name") or source.get("url"))
         groups.setdefault(key, []).append(source)
-    pairs, names = [], []
+    cohorts: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for group in groups.values():
-        rows = [row for source in group for row in figures(source.get("snippet", ""), currency=currency, period=period)]
-        pair = summarize_figures(rows)
-        if pair and any(pair):
-            pairs.append(pair)
-            names.extend(str(source.get("name") or "") for source in group)
-    result = aggregate(pairs)
-    if result is None:
+        for source in group:
+            evidence = source_evidence(source)
+            # Company-wide and role-specific numbers, and base and total-comp
+            # figures, must never be blended into a synthetic range.
+            cohort = (evidence["scope"], evidence["level"], evidence["compensation_basis"],
+                      evidence.get("proxy_for_level", ""))
+            cohorts.setdefault(cohort, []).append(source)
+    candidates = []
+    for cohort, cohort_sources in cohorts.items():
+        cohort_groups: dict[str, list[dict[str, Any]]] = {}
+        for source in cohort_sources:
+            key = site_name(source.get("url", "")) or str(source.get("name") or source.get("url"))
+            cohort_groups.setdefault(key, []).append(source)
+        pairs, names = [], []
+        for group in cohort_groups.values():
+            rows = [row for source in group for row in figures(source.get("snippet", ""), currency=currency, period=period)]
+            pair = summarize_figures(rows)
+            if pair and any(pair):
+                pairs.append(pair)
+                names.extend(str(source.get("name") or "") for source in group)
+        result = aggregate(pairs)
+        if result is not None:
+            candidates.append((cohort, result, names))
+    if not candidates:
         return None
+    # Prefer specifically leveled role evidence. Broad company aggregates remain
+    # queryable when they are the only evidence, but callers can label their scope.
+    cohort, result, names = max(candidates, key=lambda item: (
+        item[0][0] == "role_specific", item[0][1] != "unknown", bool(item[0][3]), item[1][2], len(item[2])))
     low, high, agreeing = result
     return {"low": low, "high": high, "agreeing": agreeing, "currency": currency, "period": period,
-            "names": list(dict.fromkeys(name for name in names if name))}
+            "names": list(dict.fromkeys(name for name in names if name)), "scope": cohort[0],
+            "level": cohort[1], "compensation_basis": cohort[2],
+            "proxy_for_level": cohort[3] or None}
 
 
 def ask_from_range(low: int | None, high: int | None, quantile: float = 0.75, round_to: int = 1000) -> int | None:
@@ -456,6 +530,57 @@ def parse_levels_page(html_text: str) -> dict[str, Any] | None:
     return None
 
 
+def _identity_text(html_text: str, tag: str) -> str:
+    match = re.search(rf"<{tag}\b[^>]*>(.*?)</{tag}\s*>", str(html_text or ""), re.I | re.S)
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", match.group(1))).split()) if match else ""
+
+
+def _normalized_identity(value: str) -> str:
+    return " ".join(_plain(value).replace("-", " ").split())
+
+
+def _role_identity_matches(actual: str, ctx, *, allow_senior_proxy: bool = False) -> bool:
+    value = _normalized_identity(actual)
+    actual_family = roles.role_family(actual)
+    swe_families = {"senior_software_engineer", "lead_software_engineer", "backend_engineer"}
+    if ctx.family in swe_families:
+        family_matches = actual_family in swe_families
+    else:
+        family_matches = actual_family == ctx.family
+    if not family_matches:
+        return False
+    expected_level = "senior" if allow_senior_proxy and ctx.level in {"lead", "staff"} else ctx.level
+    actual_level = roles.role_level(actual)
+    return actual_level == expected_level
+
+
+def _talent_identity(html_text: str) -> tuple[str, str]:
+    plain = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", str(html_text or ""))).split())
+    question = re.search(r"¿?Cuánto gana un\s+(.+?)\s+en\s+([^?]+)\?", plain, re.I)
+    if question:
+        return question.group(1).strip(), question.group(2).strip()
+    heading = _identity_text(html_text, "h1")
+    match = re.search(r"^(.+?):\s*salario promedio en\s+([^,]+)", heading, re.I)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    average = re.search(r"La media de\s+(.+?)\s+en\s+(.+?)\s+es de\b", plain, re.I)
+    if average:
+        return average.group(1).strip(), average.group(2).strip()
+    return "", ""
+
+
+def _levels_identity(html_text: str, data: dict[str, Any]) -> tuple[str, str]:
+    role, location = str(data.get("role") or "").strip(), str(data.get("location") or "").strip()
+    if role and location:
+        return role, location
+    heading = _identity_text(html_text, "h1")
+    match = re.search(r"^(.+?)\s+salary in\s+(.+?)\s*$", heading, re.I)
+    if match:
+        role = role or match.group(1).strip()
+        location = location or match.group(2).strip()
+    return role, location
+
+
 def parse_talent_page(html_text: str) -> dict[str, Any] | None:
     plain = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", html_text or "")).split())
     found = {}
@@ -466,15 +591,19 @@ def parse_talent_page(html_text: str) -> dict[str, Any] | None:
     if "low" not in found or "high" not in found:
         return None
     count = re.search(r"Basado en ([\d.,]+) salarios", plain)
-    return {**found, "count": parse_number(count.group(1)) if count else None}
+    role, location = _talent_identity(html_text)
+    return {**found, "count": parse_number(count.group(1)) if count else None, "role": role, "location": location}
 
 
 # --------------------------------------------------------------------------- research steps
 
 
-def _source(kind: str, name: str, url: str, snippet: str, now_iso: str) -> dict[str, str]:
-    return {"kind": kind, "name": name, "url": url, "snippet": " ".join(str(snippet or "").split())[:400],
-            "retrieved_at": now_iso}
+def _source(kind: str, name: str, url: str, snippet: str, now_iso: str, *,
+            evidence: dict[str, str] | None = None) -> dict[str, Any]:
+    source = {"kind": kind, "name": name, "url": url, "snippet": " ".join(str(snippet or "").split())[:400],
+              "retrieved_at": now_iso}
+    source["evidence"] = {**source_evidence(source), **(evidence or {})}
+    return source
 
 
 def _fetch_text(fetch: Callable, url: str, notes: list[str], label: str) -> str | None:
@@ -507,6 +636,11 @@ def fetch_levels(ctx, fetch: Callable, now_iso: str, notes: list[str]) -> dict[s
     if not data or data.get("currency") != "EUR":
         notes.append("Levels.fyi page had no EUR percentiles.")
         return None
+    page_role, page_location = _levels_identity(text, data)
+    if (not page_role or not page_location or not _role_identity_matches(page_role, ctx, allow_senior_proxy=True)
+            or _normalized_identity(page_location) != "spain"):
+        notes.append("Levels.fyi page identity did not match the requested Spain role and level.")
+        return None
     upper = ctx.level in {"lead", "staff"} and data.get("p90") and ctx.family != "engineering_manager"
     low, high = (data.get("p50"), data["p90"]) if upper else (data["p25"], data["p75"])
     span = "median–90th" if upper else "25th–75th"
@@ -516,7 +650,16 @@ def fetch_levels(ctx, fetch: Callable, now_iso: str, notes: list[str]) -> dict[s
                f"low {format_amount(low, 'EUR', compact=False)} · "
                + (f"median {format_amount(data['p50'], 'EUR', compact=False)} · " if data.get("p50") and not upper else "")
                + f"high {format_amount(high, 'EUR', compact=False)} per year")
-    return _source("market", "Levels.fyi Spain", url, snippet, now_iso)
+    levels_evidence = {
+        # The Spain page is the senior-engineer distribution even when we use
+        # its upper quantiles as a proxy for lead/staff roles.
+        "level": "senior" if ctx.level in {"lead", "staff"} else ctx.level,
+        "role_family": ctx.family or "unknown", "geography": "Spain", "scope": "role_specific",
+        "compensation_basis": "total_comp", "statistic": "percentile_range",
+    }
+    if ctx.level in {"lead", "staff"}:
+        levels_evidence["proxy_for_level"] = ctx.level
+    return _source("market", "Levels.fyi Spain", url, snippet, now_iso, evidence=levels_evidence)
 
 
 def fetch_talent(ctx, fetch: Callable, now_iso: str, notes: list[str]) -> dict[str, str] | None:
@@ -531,12 +674,21 @@ def fetch_talent(ctx, fetch: Callable, now_iso: str, notes: list[str]) -> dict[s
     if not data:
         notes.append("talent.com page had no salary figures.")
         return None
+    page_role, page_city = data.get("role", ""), data.get("location", "")
+    expected_city = ctx.city or "España"
+    if (not page_role or not page_city or not _role_identity_matches(page_role, ctx)
+            or _normalized_identity(page_city) != _normalized_identity(expected_city)):
+        notes.append("talent.com page identity did not match the requested role and location.")
+        return None
     count = f", {data['count']} salaries" if data.get("count") else ""
-    snippet = (f"{ctx.search_role}, {ctx.city or 'Spain'} (job-ad salaries{count}): "
+    snippet = (f"{page_role}, {page_city} (job-ad salaries{count}): "
                f"low {format_amount(data['low'], 'EUR', compact=False)} · "
                + (f"median {format_amount(data['median'], 'EUR', compact=False)} · " if data.get("median") else "")
                + f"high {format_amount(data['high'], 'EUR', compact=False)} per year")
-    return _source("market", f"talent.com {ctx.city or 'Spain'}", url, snippet, now_iso)
+    return _source("market", f"talent.com {page_city}", url, snippet, now_iso, evidence={
+        "level": ctx.level or "unknown", "role_family": ctx.family or "unknown",
+        "geography": page_city, "scope": "role_specific",
+        "compensation_basis": "unspecified", "statistic": "range"})
 
 
 def market_query(ctx) -> str:
@@ -618,12 +770,20 @@ def market_sources_from_results(ctx, results: list[dict[str, str]], now_iso: str
             continue
         candidates.append(result)
     sources, seen = [], set()
-    for result in _prefer_level(ctx, candidates):
+    candidates = _prefer_level(ctx, candidates)
+    if ctx.level == "senior":
+        # A query result for the family alone is not evidence for a senior role.
+        candidates = [result for result in candidates
+                      if source_evidence({"kind": "market", "snippet": _evidence_text(result)})["level"] == "senior"]
+    for result in candidates:
         if result["url"] in seen:
             continue
         seen.add(result["url"])
         text = _evidence_text(result)
-        sources.append(_source("market", _display_name(site_name(result["url"]), ctx, text), result["url"], text, now_iso))
+        inferred = source_evidence({"kind": "market", "snippet": text})
+        inferred.update(role_family=ctx.family or "unknown", geography=ctx.city or ctx.country_label or "unknown")
+        sources.append(_source("market", _display_name(site_name(result["url"]), ctx, text), result["url"], text,
+                               now_iso, evidence=inferred))
     return sources[:6]
 
 
@@ -644,8 +804,11 @@ def company_sources_from_results(ctx, results: list[dict[str, str]], now_iso: st
             continue
         seen.add(result["url"])
         site = site_name(result["url"]) or urlparse(result["url"]).netloc.removeprefix("www.")
+        text = _evidence_text(result)
+        inferred = source_evidence({"kind": "company", "snippet": text})
+        inferred.update(role_family=ctx.family or "unknown", geography=ctx.city or ctx.country_label or "unknown")
         sources.append(_source("company", f"{site}: {flow.company_search_name(ctx.employer)}", result["url"],
-                               _evidence_text(result), now_iso))
+                               text, now_iso, evidence=inferred))
     return sources[:4]
 
 
@@ -657,7 +820,11 @@ def published_salary(ctx, now_iso: str) -> tuple[dict[str, Any] | None, dict[str
     parsed = parse_salary_text(text)
     payments = payments_per_year(ctx.description) if parsed else None
     source_name = ctx.source if ctx.source in TRUSTED_SALARY_SOURCES else "Job description"
-    source = _source("published", source_name, str(ctx.job.get("url") or ""), text, now_iso)
+    source = _source("published", source_name, str(ctx.job.get("url") or ""), text, now_iso,
+                     evidence={"level": ctx.level or "unknown", "role_family": ctx.family or "unknown",
+                               "geography": ctx.city or ctx.country_label or "unknown", "scope": "role_specific",
+                               "compensation_basis": "base" if re.search(r"base salary|gross annual base", text, re.I) else "unspecified",
+                               "statistic": "range" if parsed and parsed["low"] != parsed["high"] else "unknown"})
     if not parsed:
         return {"text": text}, source
     currency = parsed["currency"]
@@ -704,6 +871,7 @@ def decide(ctx, published: dict[str, Any] | None, sources: list[dict[str, str]],
         "ask_amount": None, "published_text": (published or {}).get("text") or "", "confidence": "low",
     }
     period = ctx.period or "year"
+    configured_ask = False
     if published and published.get("low") is not None:
         salary.update(low=published["low"], high=published["high"], currency=published["currency"],
                       period=published["period"], basis="published", confidence="high")
@@ -712,31 +880,50 @@ def decide(ctx, published: dict[str, Any] | None, sources: list[dict[str, str]],
             summary = summarize_sources(sources, kind=kind, currency=ctx.currency, period=period)
             if not summary:
                 continue
+            wanted_level = getattr(ctx, "level", None)
+            if kind == "company" and (summary.get("scope") != "role_specific" or
+                                       wanted_level is not None and summary.get("level") not in {wanted_level, "unknown"}):
+                continue
+            if kind == "market" and wanted_level is not None:
+                summary_sources = [source for source in sources if source.get("kind") == kind]
+                acceptable_levels = {wanted_level, "unknown"}
+                if summary.get("proxy_for_level") == wanted_level:
+                    acceptable_levels.add("senior")
+                if summary.get("level") not in acceptable_levels:
+                    continue
             basis = "estimate" if kind == "benchmark" else kind
             if kind == "benchmark":
                 confidence = "low"
             else:
                 confidence = "high" if summary["agreeing"] >= 2 else "medium"
             salary.update(low=summary["low"], high=summary["high"], currency=summary["currency"],
-                          period=period, basis=basis, confidence=confidence)
+                          period=period, basis=basis, confidence=confidence,
+                          compensation_basis=summary.get("compensation_basis", "unspecified"),
+                          ask_basis=basis if kind != "benchmark" else "estimate",
+                          proxy_for_level=summary.get("proxy_for_level"))
             break
     target = _flow().salary_target(ctx.job)
     if target and salary["basis"] != "none" and target["currency"] == salary["currency"]:
-        salary["ask_amount"] = int(target["amount"]) if target["period"] == salary["period"] else ask_from_range(
-            salary["low"], salary["high"], quantile, round_to)
+        if target["period"] == salary["period"]:
+            salary["ask_amount"] = int(target["amount"])
+            configured_ask = True
+        else:
+            salary["ask_amount"] = ask_from_range(salary["low"], salary["high"], quantile, round_to)
     elif target and salary["basis"] == "none":
         salary.update(currency=target["currency"], period=target["period"], ask_amount=int(target["amount"]))
     else:
         salary["ask_amount"] = ask_from_range(salary["low"], salary["high"], quantile, round_to)
-        if salary["basis"] in ("company", "market"):
-            # Company pages often describe a broader or more junior role than the
-            # posting (a "Software Engineer" median for a Senior opening), and a
-            # market figure never knows the employer. Ask the higher of the two
-            # evidence-based figures rather than undersell on either one.
-            asks = [salary["ask_amount"]]
-            for kind in ("company", "market"):
-                summary = summarize_sources(sources, kind=kind, currency=salary["currency"], period=period)
-                if summary:
-                    asks.append(ask_from_range(summary["low"], summary["high"], quantile, round_to))
-            salary["ask_amount"] = max(a for a in asks if a is not None)
+        if salary["ask_amount"] is not None:
+            salary["ask_basis"] = salary.get("basis")
+    if salary["basis"] == "published":
+        salary["compensation_basis"] = source_evidence({"kind": "published", "snippet": (published or {}).get("text", "")}).get("compensation_basis")
+        salary["ask_basis"] = "published"
+    elif salary["basis"] == "none" and target:
+        salary["ask_basis"] = "configured"
+        salary.setdefault("compensation_basis", "unspecified")
+    elif salary["basis"] == "none":
+        salary["ask_basis"] = "none"
+        salary.setdefault("compensation_basis", "unspecified")
+    elif configured_ask:
+        salary["ask_basis"] = "configured"
     return salary

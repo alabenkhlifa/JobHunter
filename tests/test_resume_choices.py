@@ -81,6 +81,7 @@ def test_callback_apply_opens_picker_then_only_generate_builds_package(profile, 
     profile_path = tmp_path / 'profile.json'
     profile_path.write_text(json.dumps(profile))
     monkeypatch.setattr(handler, 'DB_PATH', path)
+    monkeypatch.setattr(handler, 'get_db', lambda: sqlite3.connect(path))
     monkeypatch.setattr(handler, 'PROFILE_PATH', profile_path)
     monkeypatch.setattr(handler, 'get_job', lambda job_id: {'id': job_id, 'title': 'Senior Engineer', 'company': 'Example'})
     monkeypatch.setattr(handler, 'has_delivered_research', lambda job_id: True)
@@ -123,7 +124,7 @@ def test_interested_delivers_research_then_automatically_asks_flavor(profile, tm
     monkeypatch.setattr(handler, 'get_job', lambda job_id: {'id': job_id, 'title': 'Backend Engineer', 'company': 'Example'})
     monkeypatch.setattr(handler, 'mark_interested', lambda job_id: None)
     monkeypatch.setattr(handler, 'record_research_delivery', lambda job_id: None)
-    monkeypatch.setattr(handler.interest_flow, 'research_job', lambda job: object())
+    monkeypatch.setattr(handler.interest_flow, 'research_job', lambda job, **kwargs: object())
     monkeypatch.setattr(handler.interest_flow, 'build_research_brief_message', lambda job, research: 'Company research')
     sent = []
     monkeypatch.setattr(handler, 'send_message', lambda text, reply_markup=None: sent.append((text, reply_markup)) or True)

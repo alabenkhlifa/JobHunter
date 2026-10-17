@@ -31,7 +31,8 @@ _MANAGER = re.compile(
 _ARCHITECT = re.compile(r"\barchitect\b|\barquitect[oa]\b", _FLAGS)
 _STAFF = re.compile(r"\b(?:staff|principal)\b", _FLAGS)
 _LEAD = re.compile(
-    r"\blead\b|\btech(?:nical)?\s*lead\b|\bteam\s+lead(?:er)?\b|\bl[ií]der\b|\bjefe\s+de\s+equipo\b",
+    r"\blead(?:er)?\b|\btech(?:nical)?\s*lead(?:er)?\b|\bteam\s+lead(?:er)?\b"
+    r"|\bl[ií]der(?:es)?\b|\bjef[ea]s?\s+de\s+equipo\b",
     _FLAGS,
 )
 _SENIOR = re.compile(r"\bs(?:e|é)nior\b|\bsr\.?(?=\s|$)|\bexpert[oa]?\b", _FLAGS)

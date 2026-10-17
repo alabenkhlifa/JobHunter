@@ -135,7 +135,8 @@ def test_levels_page_parser_falls_back_to_visible_figures():
 def test_talent_page_parser_reads_low_median_high():
     data = salary.parse_talent_page(fixture("talent_es_valencia_lead.html"))
 
-    assert data == {"median": 45760, "low": 37500, "high": 63440, "count": 10000}
+    assert data == {"median": 45760, "low": 37500, "high": 63440, "count": 10000,
+                    "role": "Lead software engineer", "location": "valencia"}
 
 
 def test_levels_and_talent_fetchers_build_market_sources():
@@ -156,7 +157,8 @@ def test_levels_and_talent_fetchers_build_market_sources():
     ]
     assert levels["kind"] == "market" and levels["name"] == "Levels.fyi Spain"
     assert salary.summarize_sources([levels], kind="market", currency="EUR", period="year")["low"] == 58582
-    assert talent["name"] == "talent.com Madrid"
+    assert talent["name"] == "talent.com madrid"
+    assert "Senior software engineer, madrid" in talent["snippet"]
     summary = salary.summarize_sources([talent], kind="market", currency="EUR", period="year")
     assert (summary["low"], summary["high"]) == (33000, 46000)
     assert notes == []
@@ -192,9 +194,11 @@ def test_market_sources_from_brave_keep_spanish_euro_senior_results():
     assert all("reddit" not in url and "eurotoptech" not in url for url in urls)  # not salary sites
     assert {source["name"] for source in sources} >= {"PayScale Madrid", "Glassdoor Madrid", "Levels.fyi Madrid"}
     summary = salary.summarize_sources(sources, kind="market", currency="EUR", period="year")
-    assert 55000 <= summary["low"] <= 65000
-    assert 80000 <= summary["high"] <= 97000
-    assert summary["agreeing"] >= 2
+    # Comparable senior total-comp evidence is retained without blending the
+    # Glassdoor single maximum or PayScale's different measurement.
+    assert summary["low"] == 74544
+    assert summary["high"] == 74544
+    assert summary["agreeing"] == 1
 
 
 def test_company_sources_need_the_employer_role_and_location():
@@ -255,7 +259,8 @@ def test_published_board_salary_wins_and_drives_the_ask():
 
     pay = result.to_dict()["salary"]
     assert pay == {"low": 70000, "high": 90000, "currency": "EUR", "period": "year", "basis": "published",
-                   "ask_amount": 85000, "published_text": "€70k–90k / year", "confidence": "high"}
+                   "ask_amount": 85000, "published_text": "€70k–90k / year", "confidence": "high",
+                   "ask_basis": "published", "compensation_basis": "unspecified", "proxy_for_level": None}
     assert result.sources[0]["kind"] == "published" and result.sources[0]["name"] == "Spain Dev Jobs"
 
 
@@ -294,12 +299,12 @@ def test_market_research_combines_direct_pages_and_brave_snippets():
     data = result.to_dict()
     assert len(queries) <= 4
     assert data["salary"]["basis"] == "market"
-    assert data["salary"]["confidence"] == "high"
+    assert data["salary"]["confidence"] == "medium"
     assert data["salary"]["currency"] == "EUR" and data["salary"]["period"] == "year"
     assert data["salary"]["low"] < data["salary"]["ask_amount"] <= data["salary"]["high"]
     assert data["salary"]["ask_amount"] % 1000 == 0
     names = {source["name"] for source in data["sources"]}
-    assert {"Levels.fyi Spain", "talent.com Madrid"} <= names
+    assert {"Levels.fyi Spain", "talent.com madrid"} <= names
     assert "Levels.fyi Madrid" not in names  # direct page replaces Levels snippets
     lines = jobhunter_research.format_salary_lines(result)
     assert lines[0].startswith("Market: €") and "Levels.fyi Spain" in lines[0]
@@ -397,11 +402,16 @@ def test_to_dict_has_exactly_the_contract_shape():
 
     assert set(data) == {"job_id", "version", "researched_at", "salary", "company", "sources", "notes"}
     assert set(data["salary"]) == {"low", "high", "currency", "period", "basis", "ask_amount", "published_text",
-                                   "confidence"}
+                                   "confidence", "ask_basis", "compensation_basis", "proxy_for_level"}
     assert set(data["company"]) == {"name", "website", "summary", "industry", "size", "hq", "sources"}
-    assert all(set(source) == {"kind", "name", "url", "snippet", "retrieved_at"} for source in data["sources"])
+    assert all(set(source) in ({"kind", "name", "url", "snippet", "retrieved_at"},
+                               {"kind", "name", "url", "snippet", "retrieved_at", "evidence"})
+               for source in data["sources"])
+    assert all(set(source["evidence"]) <= {"role_family", "level", "geography", "compensation_basis", "statistic",
+                                            "scope", "proxy_for_level"}
+               for source in data["sources"] if "evidence" in source)
     assert data["researched_at"] == "2026-10-15T12:00:00Z"
-    assert data["version"] == 1
+    assert data["version"] == 2
     json.dumps(data)
 
 
@@ -445,7 +455,7 @@ def test_backend_roles_accept_software_engineer_salary_pages():
     assert sources and sources[0]["url"].startswith("https://www.glassdoor.com/Salary/Cabify-Senior-Software-Engineer")
 
 
-def test_ask_takes_the_higher_of_company_and_market_evidence():
+def test_senior_market_evidence_is_not_mislabeled_as_company_range():
     from types import SimpleNamespace
     ctx = SimpleNamespace(job={"location": "Valencia, Spain"}, currency="EUR", period="year")
     sources = [
@@ -455,10 +465,10 @@ def test_ask_takes_the_higher_of_company_and_market_evidence():
          "snippet": "Senior Software Engineer, Spain: low €58,515 · median €72,877 · high €91,680 per year"},
     ]
     result = salary.decide(ctx, None, sources)
-    # The displayed range stays company-specific; the ask does not undersell against the market.
-    assert result["basis"] == "company" and result["low"] == 37300 and result["high"] == 39900
+    # The broad company aggregate is not a role-specific senior range.
+    assert result["basis"] == "market" and result["low"] == 58515 and result["high"] == 91680
     assert result["ask_amount"] == salary.ask_from_range(58515, 91680)
-    assert result["ask_amount"] > 39000
+    assert result["ask_basis"] == "market"
 
     company_only = salary.decide(ctx, None, sources[:1])
-    assert company_only["ask_amount"] == salary.ask_from_range(37300, 39900)
+    assert company_only["basis"] == "none"

@@ -82,7 +82,10 @@ def test_useful_about_section_needs_no_web_lookup_when_site_is_known():
 
     assert calls == {"search": [], "pages": []}
     assert result.summary_origin == "job_post"
-    assert result.company["summary"].startswith("Revolut is a global financial technology company")
+    assert result.company["summary"] == (
+        "Revolut: Our products include spending, saving, investing, and exchanging for 75+ million customers. "
+        "We have 13,000+ people working around the world."
+    )
     assert result.company["sources"][0] == "job description"
 
 

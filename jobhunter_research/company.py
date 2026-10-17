@@ -103,7 +103,7 @@ def meta_descriptions(html_text: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _fetch_meta(fetch: Callable, website: str, notes: list[str]) -> list[str]:
+def _fetch_meta(fetch: Callable, website: str, company_name: str, notes: list[str]) -> list[str]:
     try:
         response = fetch(website.rstrip("/") + "/")
     except Exception as exc:  # noqa: BLE001 - best-effort
@@ -112,12 +112,21 @@ def _fetch_meta(fetch: Callable, website: str, notes: list[str]) -> list[str]:
     if response is None or getattr(response, "status_code", 200) != 200:
         notes.append("Company site fetch unavailable.")
         return []
+    final_url = str(getattr(response, "url", website) or website)
+    if not _flow()._is_official_company_result(company_name, final_url):
+        notes.append("Company site redirect did not verify the employer domain.")
+        return []
     return meta_descriptions(str(getattr(response, "text", "") or ""))
 
 
 _INDUSTRY = re.compile(
     r"\b(?:is|es)\s+(?:a|an|un|una)\s+(?:(?:leading|global|spanish|european|international|innovative|fast-growing)\s+)*"
     r"((?:[\w-]+\s+){0,3}?)(?:company|platform|provider|consultancy|firm|startup|scale-?up|marketplace|empresa|bank)\b",
+    re.IGNORECASE,
+)
+_BUSINESS_TYPE = re.compile(
+    r"\b(?:a|an|un|una)\s+(?:(?:leading|global|spanish|european|international|innovative|fast-growing)\s+)*"
+    r"((?:[\w-]+\s+){0,2}(?:bank|consultancy|consulting firm|software vendor|marketplace))\b",
     re.IGNORECASE,
 )
 _INDUSTRY_LABEL = re.compile(r"\bIndustry[:\s]+([A-Z][\w &/,-]{2,40}?)(?:[.·|]|\s{2}|$)")
@@ -141,10 +150,13 @@ def facts_from_texts(texts: list[str]) -> dict[str, str]:
         if not industry:
             label = _INDUSTRY_LABEL.search(text)
             match = _INDUSTRY.search(text)
+            business_type = _BUSINESS_TYPE.search(text)
             if label:
                 industry = label.group(1).strip()
             elif match and match.group(1).strip():
                 industry = match.group(1).strip()
+            elif business_type:
+                industry = business_type.group(1).strip()
         if not size:
             match = _SIZE.search(text)
             if match:
@@ -171,6 +183,9 @@ def research_company(ctx, *, search: Callable[[str], list[dict[str, str]]], fetc
     job_summary = flow._company_summary_from_job_description(name, ctx.description)
     useful_job_summary = flow._company_summary_has_useful_detail(name, job_summary)
     website = _root(ctx.company_website)
+    if website and not flow._is_official_company_result(name, website):
+        notes.append("Stored company website did not verify against the employer name.")
+        website = ""
 
     raw: list[dict[str, str]] = []
     matched: list[dict[str, str]] = []
@@ -194,7 +209,7 @@ def research_company(ctx, *, search: Callable[[str], list[dict[str, str]]], fetc
             if pages:
                 website = _root(pages[0].get("url", ""))
         if website:
-            meta = _fetch_meta(fetch, website, notes)
+            meta = _fetch_meta(fetch, website, name, notes)
 
     official_texts = [result.get("snippet", "") for result in official]
     other_texts = [result.get("snippet", "") for result in matched if result not in official]
@@ -207,8 +222,12 @@ def research_company(ctx, *, search: Callable[[str], list[dict[str, str]]], fetc
         origin = "web" if summary else ""
         if not summary and (pages or matched):
             summary = flow._compact_company_summary(name, ctx.location, [*pages, *official, *matched][:3])
-            origin = "web"
-    facts = facts_from_texts([ctx.about_text, *meta, *official_texts, *other_texts, *page_texts])
+            origin = "web" if summary else ""
+    # Job descriptions can contain employer copy, hiring-team copy and role
+    # requirements in one field. Only the extracted employer About section is
+    # eligible here; third-party snippets never establish company facts.
+    job_about = [job_summary] if useful_job_summary else []
+    facts = facts_from_texts([*job_about, *meta, *official_texts, *other_texts, *page_texts])
     source_urls = [url for url in [website, *(page.get("url", "") for page in pages),
                                    *(result.get("url", "") for result in [*official, *matched])] if url]
     if useful_job_summary:

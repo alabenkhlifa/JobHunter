@@ -308,9 +308,10 @@ def firecrawl_search_results(
     base_url = firecrawl_api_url()
     if not base_url:
         return []
+    endpoint = base_url + ("/search" if re.search(r"/v[12]$", base_url) else "/v1/search")
     try:
         response = poster(
-            f"{base_url}/v1/search",
+            endpoint,
             json={"query": query, "limit": 5},
             headers=firecrawl_headers(),
             timeout=timeout,
@@ -326,8 +327,20 @@ def firecrawl_search_results(
     try:
         payload = response.json()
     except ValueError:
+        if notes is not None:
+            notes.append("Firecrawl search returned invalid JSON.")
+        return []
+    if not isinstance(payload, dict) or payload.get("success") is False:
+        if notes is not None:
+            notes.append("Firecrawl search reported failure.")
         return []
     rows = payload.get("data") if isinstance(payload, dict) else []
+    if isinstance(rows, dict):
+        rows = rows.get("web")
+    if not isinstance(rows, list):
+        if notes is not None:
+            notes.append("Firecrawl search returned an unsupported result shape.")
+        return []
     results: list[dict[str, str]] = []
     for row in rows or []:
         if not isinstance(row, dict):
@@ -335,8 +348,10 @@ def firecrawl_search_results(
         title = " ".join(str(row.get("title") or "").split())
         url = str(row.get("url") or "").strip()
         snippet = " ".join(str(row.get("description") or row.get("snippet") or row.get("content") or "").split())
-        if title and url:
+        if title and urlparse(url).scheme in {"http", "https"} and urlparse(url).hostname:
             results.append({"title": title, "url": url, "snippet": snippet})
+    if not results and notes is not None:
+        notes.append("Firecrawl search returned no results.")
     return results
 
 
@@ -556,6 +571,19 @@ COMPANY_GENERIC_WORDS = {
     "cloud", "digital", "global", "group", "holding", "international", "software",
     "solutions", "systems", "technologies", "technology", "web", "services",
 }
+COMPANY_HOST_SUFFIXES = {
+    "global", "group", "technologies", "technology", "services", "systems", "solutions",
+    "international", "holdings", "holding", "consulting", "consultancy", "corporation", "corp",
+}
+
+
+def _host_label_matches_company(label: str, alias_token: str) -> bool:
+    """Match the brand as a whole host-label token, optionally plus a known corporate suffix."""
+    compact_label = re.sub(r"[^a-z0-9]", "", str(label or "").lower())
+    if not alias_token or not compact_label.startswith(alias_token):
+        return False
+    remainder = compact_label[len(alias_token):]
+    return not remainder or remainder in COMPANY_HOST_SUFFIXES
 
 
 def company_identity_aliases(company: str) -> list[str]:
@@ -564,6 +592,10 @@ def company_identity_aliases(company: str) -> list[str]:
     if not raw:
         return []
     parenthetical = re.findall(r"\(([^()]{2,30})\)", raw)
+    # Regional/legal labels often describe a posting entity rather than the
+    # public brand (for example "UST España & Latam"). Keep the distinctive
+    # first brand token as an alias, but do not turn short initials into broad
+    # substring matches.
     base = " ".join(re.sub(r"\([^()]*\)", " ", raw).split()).strip(" ,-–—")
     legal_pattern = "|".join(re.escape(value) for value in sorted(COMPANY_LEGAL_SUFFIXES, key=len, reverse=True))
     base = re.sub(rf"(?:[\s,.-]+(?:{legal_pattern}))+$", "", base, flags=re.IGNORECASE).strip(" ,-–—")
@@ -575,6 +607,8 @@ def company_identity_aliases(company: str) -> list[str]:
         aliases.append(distinctive[0])
     elif words and len(words[0]) >= 4 and words[0].lower() not in COMPANY_GENERIC_WORDS:
         aliases.append(words[0])
+    elif words and len(words[0]) == 3 and words[0].isupper():
+        aliases.append(words[0])
     aliases.extend(value.strip() for value in parenthetical)
     if len(words) >= 2:
         aliases.append("".join(word[0] for word in words).upper())
@@ -583,7 +617,9 @@ def company_identity_aliases(company: str) -> list[str]:
     seen_tokens: set[str] = set()
     for alias in aliases:
         token = re.sub(r"[^a-z0-9]", "", alias.lower())
-        short_public_name = len(token) >= 2 and alias.upper() == alias
+        short_public_name = len(token) >= 2 and alias.upper() == alias and (
+            bool(parenthetical) or len(token) <= 2
+        )
         if (len(token) >= 3 or short_public_name) and token not in seen_tokens:
             seen_tokens.add(token)
             deduped.append(alias)
@@ -594,9 +630,12 @@ def company_search_name(company: str) -> str:
     aliases = company_identity_aliases(company)
     if not aliases:
         return ""
+    first_word = re.findall(r"[A-Za-z0-9]+", aliases[0])[0] if aliases[0] else ""
     single_brand = next(
-        (alias for alias in aliases[1:] if " " not in alias and len(alias) >= 4 and not alias.isupper()),
+        (alias for alias in aliases[1:] if alias.lower() == first_word.lower() and len(alias) >= 3),
         "",
+    ) or next(
+        (alias for alias in aliases[1:] if " " not in alias and len(alias) >= 4 and not alias.isupper()), ""
     )
     explicit_parenthetical = {
         re.sub(r"[^a-z0-9]", "", value.lower())
@@ -616,16 +655,18 @@ def company_search_name(company: str) -> str:
 def _result_matches_company(company: str, result: dict[str, str]) -> bool:
     """Require the employer identity in the title or URL, never only the snippet."""
     aliases = company_identity_aliases(company)
-    title_token = re.sub(r"[^a-z0-9]", "", str(result.get("title") or "").lower())
     parsed = urlparse(str(result.get("url") or ""))
-    url_token = re.sub(r"[^a-z0-9]", "", f"{parsed.netloc}{parsed.path}".lower())
+    title = str(result.get("title") or "")
+    host_labels = {label.lower().removeprefix("www.") for label in parsed.netloc.split(".")}
     boundary_text = f"{result.get('title') or ''} {parsed.netloc} {parsed.path}".lower()
     for alias in aliases:
         alias_token = re.sub(r"[^a-z0-9]", "", alias.lower())
-        if len(alias_token) <= 3:
-            if re.search(rf"(?<![a-z0-9]){re.escape(alias.lower())}(?![a-z0-9])", boundary_text):
+        if any(_host_label_matches_company(label, alias_token) for label in host_labels):
+            return True
+        if len(alias_token) <= 4:
+            if re.search(rf"(?<![a-z0-9]){re.escape(alias.lower())}(?![a-z0-9])", title.lower()):
                 return True
-        elif alias_token in title_token or alias_token in url_token:
+        elif re.search(rf"(?<![a-z0-9]){re.escape(alias.lower())}(?![a-z0-9])", boundary_text):
             return True
     return False
 
@@ -645,17 +686,14 @@ def _result_matches_role(title: str, result: dict[str, str]) -> bool:
 
 def _is_official_company_result(company: str, url: str) -> bool:
     host = urlparse(str(url or "")).netloc.lower().removeprefix("www.")
-    host_token = re.sub(r"[^a-z0-9]", "", host)
-    host_labels = {re.sub(r"[^a-z0-9]", "", label) for label in host.split(".")}
+    host_labels = host.split(".")
     blocked_hosts = ("glassdoor", "indeed", "payscale", "gulftalent", "levels", "linkedin")
-    alias_tokens = [
-        re.sub(r"[^a-z0-9]", "", alias.lower())
-        for alias in company_identity_aliases(company)
-    ]
+    aliases = company_identity_aliases(company)
+    alias_tokens = [re.sub(r"[^a-z0-9]", "", alias.lower()) for alias in aliases]
     return bool(
-        not any(blocked in host_token for blocked in blocked_hosts)
+        not any(blocked in re.sub(r"[^a-z0-9]", "", host) for blocked in blocked_hosts)
         and any(
-            (len(token) >= 3 and token in host_token) or (len(token) == 2 and token in host_labels)
+            any(_host_label_matches_company(label, token) for label in host_labels)
             for token in alias_tokens
         )
     )
@@ -720,115 +758,52 @@ def company_profile_search_queries(company: str, title: str, location: str) -> l
 
 
 def _compact_company_summary(company: str, location: str, results: list[dict[str, str]]) -> str:
-    city = str(location or "").split(",", 1)[0].strip()
-    text = " ".join(f"{item.get('title', '')} {item.get('snippet', '')}" for item in results)
-    lowered = text.lower()
-    financial_product_terms = sum(
-        term in lowered for term in ("spending", "saving", "investing", "exchanging")
-    )
-    if "database platform" in lowered or "database technology" in lowered:
-        company_type = "database technology company"
-    elif any(term in lowered for term in ("cloud services", "cloud provider", "aws cloud", "migrate to the cloud")):
-        company_type = "cloud technology company"
-    elif "fintech" in lowered or "financial technology" in lowered or financial_product_terms >= 3:
-        company_type = "financial technology company"
-    elif any(term in lowered for term in ("technology consultancy", "technology consulting", "tech consultancy")):
-        company_type = "technology consultancy"
-    elif any(term in lowered for term in ("software company", "software development")):
-        company_type = "software company"
-    else:
-        company_type = "technology company"
+    # Snippets can describe the target role rather than the employer. Never
+    # synthesize a company type or focus from nearby technology keywords.
+    from jobhunter_research.company import summary_from_texts
 
-    focus: list[str] = []
-    if "legacy" in lowered and any(term in lowered for term in ("modernisation", "modernization", "modernise", "modernize")):
-        focus.append("legacy-system modernization")
-    if any(term in lowered for term in ("systems integration", "system integration", "apis", "api architecture")):
-        focus.append("systems integration")
-    if any(term in lowered for term in ("software architecture", "solution architecture", "architecture design")):
-        focus.append("software architecture")
-    if "cloud" in lowered and company_type != "cloud technology company":
-        focus.append("cloud platforms")
-    if "artificial intelligence" in lowered or "machine learning" in lowered or re.search(r"\bai\b", lowered):
-        focus.append("AI")
-    if financial_product_terms >= 3:
-        focus.append("digital financial services")
-
-    company_pattern = re.escape(str(company or "").lower())
-    city_pattern = re.escape(city.lower()) if city else ""
-    explicit_city = bool(
-        city_pattern
-        and re.search(
-            rf"\b{company_pattern}\b.{{0,120}}(?:is\s+(?:an?\s+)?{city_pattern}-based|headquartered\s+in\s+{city_pattern}|registered\s+in\s+{city_pattern})",
-            lowered,
-        )
-    )
-    global_scope = any(term in lowered for term in ("global", "worldwide", "around the world"))
-    scope = f"{city}-based " if explicit_city else ("global " if global_scope else "")
-    base = f"{company} is a {scope}{company_type}"
-    if focus:
-        base += f" focused on {', '.join(dict.fromkeys(focus[:3]))}"
-    size_match = re.search(r"\b(\d{1,4})\s*(?:-|–|to)\s*(\d{1,4})\s+employees\b", lowered)
-    facts: list[str] = []
-    if size_match:
-        facts.append(f"{size_match.group(1)}–{size_match.group(2)} employees")
-    else:
-        employee_match = re.search(r"\b(\d{1,3}(?:,\d{3})*\+?)\s+(?:employees|people working)\b", lowered)
-        if employee_match:
-            facts.append(f"{employee_match.group(1)} employees")
-    customer_match = re.search(r"\b(\d+\+?\s+million)\s+customers\b", lowered)
-    if customer_match:
-        facts.append(f"{customer_match.group(1)} customers")
-    else:
-        customer_match = re.search(r"\b(\d{1,3}(?:,\d{3})*\+?)\s+customers\b", lowered)
-        if customer_match:
-            facts.append(f"{customer_match.group(1)} customers")
-    if facts:
-        base += f" ({'; '.join(facts[:2])})"
-    return base + "."
+    official = [str(item.get("snippet") or "") for item in results
+                if _is_official_company_result(company, str(item.get("url") or ""))]
+    other = [str(item.get("snippet") or "") for item in results if str(item.get("snippet") or "") not in official]
+    return summary_from_texts(company, official, other)
 
 
 def _company_summary_from_job_description(company: str, description: str) -> str:
-    """Use the employer's own About section as a labelled fallback."""
+    """Return employer wording from a labelled About section without rewriting it."""
     value = " ".join(str(description or "").split())
     company_pattern = re.escape(str(company or "").strip())
     about_match = re.search(rf"\bAbout\s+{company_pattern}\b", value, flags=re.IGNORECASE) if company_pattern else None
     if not about_match:
-        alias_matches = [
-            match
-            for alias in company_identity_aliases(company)
-            if (match := re.search(rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])", value, flags=re.IGNORECASE))
-        ]
-        if not alias_matches:
-            return ""
-        first_match = min(alias_matches, key=lambda match: match.start())
-        context = value[max(0, first_match.start() - 120):first_match.start() + 900]
-        context = re.split(
-            r"\b(?:Key\s+Job\s+Responsibilities|Key\s+Responsibilities|Responsibilities|Requirements|Qualifications)\b",
-            context,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0]
-        if not any(
-            term in context.lower()
-            for term in ("customers", "platform", "products", "services", "software", "technology", "cloud", "database")
-        ):
-            return ""
-        return _compact_company_summary(company, "", [{"snippet": context}])
+        return ""
     about_tail = value[about_match.start():]
     about_section = re.split(
-        r"\b(?:About\s+(?:The\s+)?Role|What\s+You(?:'|’)ll\s+Be\s+Doing|Responsibilities|Requirements)\b",
+        r"\b(?:About\s+(?:The\s+)?Role|About\s+Who\s*We\s*Are|Who\s*We\s*Are|WhoWeAre|"
+        r"Our\s+Team|The\s+Role|Mission|What\s+You(?:'|’)ll\s+Be\s+Doing|Responsibilities|Requirements)\b",
         about_tail,
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0][:2200]
-    if len(about_section) < 80:
+    about_section = re.sub(rf"^About\s+{company_pattern}\s*[:–—-]?\s*", "", about_section, flags=re.I)
+    from jobhunter_research.company import _sentences
+
+    sentences = _sentences(about_section)
+    if not sentences:
         return ""
-    return _compact_company_summary(company, "", [{"snippet": about_section}])
+    # Keep source wording verbatim (apart from whitespace) and constrain the
+    # brief to two employer-level sentences.
+    excerpt = " ".join(sentences[:2])[:520]
+    # Keep the employer explicit when the source labels the section but starts
+    # with "We" or a product sentence.
+    aliases = company_identity_aliases(company)
+    if aliases and not any(re.search(rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])", excerpt, re.I)
+                           for alias in aliases):
+        excerpt = f"{company}: {excerpt}"
+    return excerpt
 
 
 def _company_summary_has_useful_detail(company: str, summary: str) -> bool:
     normalized = " ".join(str(summary or "").split())
-    return bool(normalized and normalized != f"{company} is a technology company.")
+    return bool(normalized)
 
 
 def _plain_text_from_html(html_text: str, *, limit: int = 6000) -> str:
@@ -1377,6 +1352,20 @@ def _brief_salary_lines(job: dict[str, Any], research: JobResearch) -> list[str]
     if payload is None:
         try:
             payload = jobhunter_research.research(job, search=_offline_search, fetch=_offline_fetch).to_dict()
+            # Older callers pass company observations separately. Normalize
+            # these through the same currency, location and evidence checks.
+            from jobhunter_research import salary as research_salary
+            context = jobhunter_research.build_context(job)
+            rows = [{"title": item.get("title", ""), "url": item.get("url", ""),
+                     "snippet": item.get("snippet", "")}
+                    for item in research.company_salary_sources
+                    if item.get("source") != "Company careers page"
+                    and _looks_like_salary_amount(str(item.get("snippet") or ""))]
+            additional = research_salary.company_sources_from_results(context, rows, payload["researched_at"])
+            if additional:
+                payload["sources"].extend(additional)
+                published, _ = research_salary.published_salary(context, payload["researched_at"])
+                payload["salary"] = research_salary.decide(context, published, payload["sources"])
         except Exception:  # noqa: BLE001 - the card must render without research
             return []
     return jobhunter_research.format_salary_lines(payload)
@@ -1384,38 +1373,37 @@ def _brief_salary_lines(job: dict[str, Any], research: JobResearch) -> list[str]
 
 def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> str:
     company_name = str(research.employer_name or job.get("company") or "company")
-    salary_source_priority = {"Levels.fyi": 0, "Glassdoor": 1, "Indeed": 2, "PayScale": 3, "GulfTalent": 4}
-    numeric_salary = sorted([
-        item for item in research.company_salary_sources
-        if item.get("source") != "Company careers page"
-        and _looks_like_salary_amount(str(item.get("snippet") or ""))
-        and _salary_source_matches_job_location(item, str(job.get("location") or ""))
-    ], key=lambda item: salary_source_priority.get(str(item.get("source") or ""), 99))[:1]
     compensation_notes = [
         item for item in research.company_salary_sources
         if item.get("source") == "Company careers page"
     ]
-
-    # Each line names its basis; aggregator or estimate figures are never
-    # presented as the employer's own pay.
+    # Keep the structured evidence labels, including seniority and compensation
+    # type; a raw search snippet must not replace a verified salary range.
     lines = _brief_salary_lines(job, research)
-    if numeric_salary:
-        company_line = " | ".join(
-            f"{_esc(item.get('source'))}: {_esc(str(item.get('snippet') or '')[:140])}" for item in numeric_salary
-        )
-        lines = [line for line in lines if not line.startswith("Company:")]
-        insert_at = 1 if lines and lines[0].startswith("Published:") else 0
-        lines.insert(insert_at, f"Company: {company_line}")
-    if not any(line.startswith(("Published:", "Company:")) for line in lines):
-        platforms = ", ".join(COMPANY_PAY_PLATFORMS[:-1]) + f" or {COMPANY_PAY_PLATFORMS[-1]}"
-        lines.insert(0, f"No published range; no {_esc(company_name)} pay data on {platforms}.")
+    if not any(line.startswith("Published:") for line in lines):
+        lines.insert(0, "No employer-published range verified.")
+    if not any(line.startswith("Company:") for line in lines):
+        lines.insert(1, "No comparable company salary range verified.")
     pay_block = "\n".join(lines)
 
     benefits_line = _compact_benefits(compensation_notes) if compensation_notes else None
 
     company_line = " ".join(str(research.company_summary or "Company details not verified.").split())
-    if len(company_line) > 220:
-        company_line = company_line[:219].rstrip() + "…"
+    if len(company_line) > 320:
+        company_line = company_line[:319].rstrip() + "…"
+    company_source = ""
+    context = research.research or {}
+    company_sources = (context.get("company") or {}).get("sources") or []
+    if company_sources and company_sources[0] == "job description":
+        company_source = "\n<i>Source: job posting.</i>"
+    elif company_sources:
+        company_source = f'\n<a href="{_esc(company_sources[0])}">Company source</a>'
+    lookup_notes = context.get("notes") or []
+    partial_lookup = any(any(word in str(note).lower() for word in
+                         ("failed", "http ", "unavailable", "no parsable", "no search results", "challenge", "no results"))
+                         for note in lookup_notes)
+    lookup_status = ("\n\n⚠️ Live lookup was incomplete. Missing data is unverified; retry later."
+                     if partial_lookup else "")
     benefits_block = f"\n\n<b>🎁 Benefits:</b> {_esc(benefits_line)}" if benefits_line else ""
     fit_checks = _posting_fit_checks(job)
     fit_block = f"\n\n<b>🧭 Fit checks:</b> {_esc('; '.join(fit_checks))}." if fit_checks else ""
@@ -1427,10 +1415,10 @@ def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> 
 <b>{_esc(job.get('title'))}</b>
 {_esc(company_name)} — {_esc(job.get('location'))}{f" (via {_esc(research.posting_company)})" if research.posting_company else ""}
 
-<b>🏢 Company:</b> {_esc(company_line)}
+<b>🏢 Company:</b> {_esc(company_line)}{company_source}
 
 <b>💰 Pay:</b>
-{pay_block}{benefits_block}{fit_block}{visa_block}
+{pay_block}{benefits_block}{fit_block}{visa_block}{lookup_status}
 
 <b>❓ Questions to Ask:</b> Base salary, currency, pay period and bonus/equity terms.
 
