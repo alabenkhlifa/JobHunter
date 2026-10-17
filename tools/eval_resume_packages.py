@@ -59,9 +59,10 @@ RUBRIC = {
         "1: wrong family, for example a backend-engineer resume for an architect posting."
     ),
     "summary_quality": (
-        "Three to four specific sentences that state the role, the strongest matching scope and "
-        "concrete achievements with figures, without employer names or unsupported claims. "
-        "5: specific and tailored. 1: generic or misleading."
+        "Two sentences, at most 60 words: the headline role with career years and core stack, then "
+        "one connected story from the most relevant project naming its client, with scope, scale and "
+        "concrete achievements, and no unsupported claims. 5: specific and tailored. 1: generic, a "
+        "list of tasks from several projects, or misleading."
     ),
     "page_use": (
         "One page at least 85% filled, or two pages with page two at least half filled and no "

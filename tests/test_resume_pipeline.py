@@ -85,7 +85,7 @@ def test_architect_posting_gets_a_scored_blueprint_package(full_profile, tmp_pat
     assert manifest["evidence_proposal_applied"] is False
     assert manifest["summary_review"]["source"] == "model" and manifest["summary_review"]["review_verdict"] == "ready"
     resume = json.loads(package.resume_json.read_text())
-    assert resume["summary"].startswith("Lead Engineer with ") and resume["headline"] == "Software Architect | Cloud & Backend"
+    assert resume["summary"].startswith("Software architect with ") and resume["headline"] == "Software Architect | Cloud & Backend"
     confirmed = {normalized_text(e["public_text"]) for e in full_profile["evidence_bank"]}
     assert bullets_of(package) and all(normalized_text(b) in confirmed for b in bullets_of(package))
     farm = next(e for r in resume["experience"] for e in r.get("engagements") or [] if e["name"] == "Farm Network")
@@ -105,15 +105,59 @@ def test_model_failure_falls_back_to_the_blueprint_summary_with_a_flag(full_prof
     assert any(flag.startswith("summary: fallback") for flag in manifest["score_flags"])
 
 
-def test_blocked_review_keeps_the_validated_draft_and_records_the_issues(full_profile, tmp_path, monkeypatch):
+def test_blocked_review_falls_back_to_the_confirmed_summary_and_records_the_issues(full_profile, tmp_path, monkeypatch):
     paths = store(tmp_path, monkeypatch, full_profile, java_job(location="Madrid, Spain", url="https://x", source="s"))
-    planner = planner_with([["Selection omission: fact-9 is left out"]])
+    planner = planner_with([["Claim not supported: zero downtime"]])
     package = flow.prepare_application_package("j1", summary_planner=planner, **paths)
     manifest = manifest_of(package)
-    assert manifest["summary_review"]["source"] == "model" and manifest["summary_review"]["review_verdict"] == "blocked"
-    assert manifest["summary_review"]["flags"] == ["Selection omission: fact-9 is left out"]
-    assert json.loads(package.resume_json.read_text())["summary"].startswith("Lead Engineer with ")
+    assert manifest["summary_review"]["source"] == "fallback" and manifest["summary_review"]["review_verdict"] == "blocked"
+    assert manifest["summary_review"]["flags"] == ["Claim not supported: zero downtime"]
+    assert json.loads(package.resume_json.read_text())["summary"] == "Fallback summary."
+    assert manifest["scorecard"]["dimensions"]["summary_quality"] == 3
     assert len(planner.calls) == 2  # one draft, one review; no retry loop
+
+
+def test_summary_opens_with_the_headline_title_and_tells_one_named_project_story(full_profile, tmp_path, monkeypatch):
+    backend = full_profile["resume_blueprints"][0]
+    backend["summary"] = {"default": "Fallback summary.", "senior": "Senior backend engineer approved wording."}
+    backend["summary_stack"] = "Java, Kotlin and Spring Boot"
+    job = java_job(location="Madrid, Spain", url="https://x", source="s")
+    plan_ = pipeline.plan(full_profile, job)
+    context = pipeline.summary_context(full_profile, job, plan_)
+    assert context["career_opening"] == f"Senior backend engineer with {context['career_years']}+ years in Java, Kotlin and Spring Boot"
+    assert context["style_example"] == "Senior backend engineer approved wording."
+    assert "selection_review" not in context
+    assert [p["name"] for p in context["projects"]] == [p.name for p in plan_.selection.projects]
+    assert {i for p in context["projects"] for i in p["evidence_ids"]} == {e["id"] for e in context["evidence"]
+                                                                          if not e["id"].startswith("volunteering:")}
+    project = context["projects"][0]
+    draft = {"text": f"{context['career_opening']}. For {project['name']}, owned backend services and delivered "
+                     "production migrations with zero downtime.",
+             "evidence_ids": project["evidence_ids"][:2], "context_sha256": context["context_sha256"], "review_flags": []}
+    text, info = pipeline.summarize(full_profile, job, plan_, draft=draft)
+    assert text == draft["text"] and info["source"] == "provided_reviewed_draft"
+    four = dict(draft, text=draft["text"] + " Mentored engineers. Ran on-call.")
+    with pytest.raises(quality.ResumeQualityError, match="2 to 3 sentences"):
+        pipeline.summarize(full_profile, job, plan_, draft=four)
+    first_person = dict(draft, text=draft["text"].replace("owned backend", "I've owned backend"))
+    with pytest.raises(quality.ResumeQualityError, match="first-person"):
+        pipeline.summarize(full_profile, job, plan_, draft=first_person)
+    assert "forbidden_names" not in context
+    lead = dict(draft, text=draft["text"].replace("Senior backend engineer", "Lead Engineer"))
+    with pytest.raises(quality.ResumeQualityError, match="career opening"):
+        pipeline.summarize(full_profile, job, plan_, draft=lead)
+    assert pipeline.summarize(full_profile, job, plan_, planner=planner_with(fail=True))[0] == "Senior backend engineer approved wording."
+
+
+def test_a_previous_blueprint_summary_record_can_be_reused_for_a_repackage(full_profile, tmp_path, monkeypatch):
+    job = java_job(location="Madrid, Spain", url="https://x", source="s")
+    plan_ = pipeline.plan(full_profile, job)
+    text, info = pipeline.summarize(full_profile, job, plan_, planner=planner_with())
+    record = {"text": text, **info}
+    assert pipeline.summarize(full_profile, job, plan_, draft=record)[0] == text
+    fallback, info = pipeline.summarize(full_profile, job, plan_, planner=planner_with([["blocked"]]))
+    reused, again = pipeline.summarize(full_profile, job, plan_, draft={"text": fallback, **info})
+    assert reused == fallback == "Fallback summary." and again["source"] == "fallback"
 
 
 def test_oversized_review_flags_are_trimmed_not_refused(full_profile, tmp_path, monkeypatch):

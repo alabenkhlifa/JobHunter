@@ -60,6 +60,26 @@ def test_blueprints_are_validated(full_profile):
     del bad["resume_blueprints"][0]["headline"]
     with pytest.raises(blueprints.BlueprintError, match="headline"):
         blueprints.validate(bad)
+    bad = copy.deepcopy(full_profile)
+    bad["resume_blueprints"][0]["summary"] = {"senior": "Only a senior summary."}
+    with pytest.raises(blueprints.BlueprintError, match="summary"):
+        blueprints.validate(bad)
+    bad = copy.deepcopy(full_profile)
+    bad["resume_blueprints"][0]["summary_stack"] = " "
+    with pytest.raises(blueprints.BlueprintError, match="summary_stack"):
+        blueprints.validate(bad)
+
+
+def test_career_opening_and_fallback_follow_the_headline(full_profile):
+    backend, architect = full_profile["resume_blueprints"][:2]
+    senior, lead = evidence.posting_needs({"title": "Senior Backend Engineer"}), evidence.posting_needs({"title": "Backend Engineer"})
+    assert blueprints.career_opening(backend, senior, 7) == "Senior backend engineer with 7+ years in Java and Kotlin"
+    assert blueprints.career_opening(backend, lead, 7) == "Lead engineer with 7+ years in Java and Kotlin"
+    assert blueprints.career_opening(architect, senior, 7) == "Software architect with 7+ years in Cloud and Backend"
+    backend = dict(backend, summary_stack="Java, Kotlin and Spring Boot",
+                   headline={"default": "Lead AWS Engineer"}, summary={"default": "Lead.", "senior": "Senior."})
+    assert blueprints.career_opening(backend, senior, 7) == "Lead AWS engineer with 7+ years in Java, Kotlin and Spring Boot"
+    assert blueprints.summary_for(backend, senior) == "Senior." and blueprints.summary_for(backend, lead) == "Lead."
 
 
 def test_choose_by_role_family_with_default_fallback_and_no_drafts(full_profile):

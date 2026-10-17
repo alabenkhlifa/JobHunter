@@ -139,8 +139,12 @@ the blueprint's page target (tighter spacing, policy-listed irrelevant
 certifications, the weakest non-opening bullets, whole weak projects; skill
 tags the posting does not name when only the sidebar spills), renders the
 reviewed sidebar (display degree wording, Teaching & Training, mandatory
-languages) and audits the PDF. The summary model is advisory: its draft is
-validated and reviewed, and the blueprint's confirmed summary is the fallback.
+languages) and audits the PDF. The summary model is advisory: it writes two
+sentences in the shape of the blueprint's confirmed summary (the headline title
+with career years and the blueprint's `summary_stack`, then one story from the
+most relevant project naming its client); the draft is validated and reviewed,
+and the blueprint's confirmed summary for the headline is the fallback,
+including when the review blocks the draft.
 A rubric scorer records `resume_score` (0-100), `score_flags` and
 `resume_needs_review` in the private `tailoring_manifest.json` instead of
 refusing. Nothing in this path composes wording: every bullet, headline,

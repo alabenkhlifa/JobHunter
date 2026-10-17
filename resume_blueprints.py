@@ -55,8 +55,15 @@ def validate(profile):
         if (not isinstance(headline, dict) or not isinstance(headline.get("default"), str) or not headline["default"].strip()
                 or set(headline) - set(HEADLINE_KEYS) or any(not isinstance(v, str) or not v.strip() for v in headline.values())):
             raise BlueprintError(f"{path}.headline needs confirmed wording under default")
-        if not isinstance(item.get("summary"), str) or not item["summary"].strip():
+        summary = item.get("summary")
+        if isinstance(summary, dict):
+            if (not isinstance(summary.get("default"), str) or not summary["default"].strip()
+                    or set(summary) - set(HEADLINE_KEYS) or any(not isinstance(v, str) or not v.strip() for v in summary.values())):
+                raise BlueprintError(f"{path}.summary needs confirmed fallback wording under default")
+        elif not isinstance(summary, str) or not summary.strip():
             raise BlueprintError(f"{path}.summary needs confirmed fallback wording")
+        if "summary_stack" in item and (not isinstance(item["summary_stack"], str) or not item["summary_stack"].strip()):
+            raise BlueprintError(f"{path}.summary_stack must be non-empty wording")
         for field in ("summary_focus", "lead_kinds"):
             _string_list(item.get(field, []), f"{path}.{field}")
             if set(item.get(field, [])) - set(evidence.KINDS):
@@ -111,6 +118,27 @@ def headline_for(blueprint, needs):
     return headline.get(needs.seniority) or headline["default"]
 
 
+def summary_for(blueprint, needs):
+    """The confirmed fallback summary for the headline the posting gets."""
+    summary = blueprint["summary"]
+    if isinstance(summary, str):
+        return summary
+    return summary.get(needs.seniority) or summary["default"]
+
+
+def career_opening(blueprint, needs, years):
+    """The summary's first sentence: the headline's title, the career years and the core stack.
+
+    ``summary_stack`` is the candidate's wording for the stack; without it the
+    headline's own stack is used.
+    """
+    title, _, stack = headline_for(blueprint, needs).partition("|")
+    words = title.split()
+    title = " ".join(words[:1] + [w if w.isupper() else w.lower() for w in words[1:]])
+    stack = blueprint.get("summary_stack") or re.sub(r"\s*&\s*", " and ", stack.strip())
+    return f"{title} with {years}+ years in {stack}" if stack else f"{title} with {years}+ years of experience"
+
+
 def focused_keywords(tech, bullets, job_text):
     """Keep only the project keywords the selected bullets or the posting actually name."""
     terms = [t.strip() for t in re.split(r"\s*[·|,]\s*", str(tech or "")) if t.strip()]
@@ -133,7 +161,7 @@ def build(profile, job, blueprint, selection):
     job_text = evidence._text(" ".join(str(job.get(k) or "") for k in ("title", "description", "tech_required")))
     payload = {k: copy.deepcopy(profile[k]) for k in IDENTITY_FIELDS if k in profile}
     payload["headline"] = headline_for(blueprint, selection.needs)
-    payload["summary"] = blueprint["summary"]
+    payload["summary"] = summary_for(blueprint, selection.needs)
     payload["skills"] = copy.deepcopy(blueprint.get("skills") or {})
     known = profile.get("certifications") or []
     payload["certifications"] = [c for c in blueprint.get("certifications") or [] if c in known]

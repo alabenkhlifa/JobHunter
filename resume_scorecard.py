@@ -93,7 +93,7 @@ def _repetition(payload):
     flags.extend(f"duplicate bullet: {b[:60]}" for b in exact)
     summary_figures = set(evidence.figures(payload.get("summary") or ""))
     shared = summary_figures & set(counts)
-    extra = max(0, len(shared) - 2)
+    extra = max(0, len(shared) - 4)
     if extra:
         flags.append("summary repeats bullet figures: " + ", ".join(sorted(shared)))
     score = 5 - 2 * len(repeated) - 2 * len(exact) - extra
@@ -123,7 +123,8 @@ def _summary_quality(payload, needs, summary):
         score = min(score, 3)
         flags.append("summary: fallback wording used" + (f" ({summary.get('reason')})" if summary.get("reason") else ""))
     if summary.get("review_verdict") == "blocked":
-        score = max(1, score - 1)
+        if summary.get("source") != "fallback":
+            score = max(1, score - 1)
         flags.append("summary review blocked: " + "; ".join(str(f)[:120] for f in summary.get("flags") or [])[:300])
     return score, flags
 

@@ -407,15 +407,15 @@ REVIEW_PROMPT += " Also assess the quality of the summary as a synthesis: for ar
 REVIEW_PROMPT += " The omission comparison is limited to the selected projects, matching the permitted evidence-update scope. Never require an additional project or employer. Evaluate responsibilities using equivalent demonstrated evidence; do not demand every alternative example when one already establishes the capability."
 
 
-def validate_summary(draft, context):
+def validate_summary(draft, context, *, sentences=(3, 4), max_words=85, names_allowed=False):
     if not isinstance(draft, dict) or set(draft) != set(SUMMARY_SCHEMA["required"]):
         raise ResumeQualityError("Summary draft has an invalid structure")
     text = draft["text"]
-    if not isinstance(text, str) or not text.strip() or len(text.split()) > 85 or "\n" in text or "**" in text:
+    if not isinstance(text, str) or not text.strip() or len(text.split()) > max_words or "\n" in text or "**" in text:
         raise ResumeQualityError("Summary draft has invalid length or formatting")
-    if not 3 <= len(re.split(r"(?<=[.!?])\s+", text.strip())) <= 4:
-        raise ResumeQualityError("Summary requires three to four sentences")
-    if re.search(r"\bcurrently\b|https?://|@", text, re.I) or any(
+    if not sentences[0] <= len(re.split(r"(?<=[.!?])\s+", text.strip())) <= sentences[1]:
+        raise ResumeQualityError(f"Summary requires {sentences[0]} to {sentences[1]} sentences")
+    if re.search(r"\bcurrently\b|https?://|@", text, re.I) or not names_allowed and any(
         name and name.casefold() in text.casefold() for name in context["forbidden_names"]
     ):
         raise ResumeQualityError("Summary contains prohibited names or wording")
