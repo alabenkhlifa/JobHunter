@@ -11,6 +11,7 @@ import jobhunter_sources
 from jobhunter_sources import base
 import scraper
 
+FRESH_POSTING_DATE = datetime.now(timezone.utc).isoformat()
 
 @pytest.fixture
 def database(monkeypatch, tmp_path):
@@ -25,7 +26,7 @@ def database(monkeypatch, tmp_path):
 def job(**over):
     row = dict(id="sj-abc123", title="Backend Architect", company="Acme", location="Madrid, Spain", score=70,
                url="https://www.spainjobs.io/companies/acme/backend-architect--abc1234567", source="SpainJobs.io",
-               date_posted="2026-09-30T00:00:00+00:00", description="Java Spring Boot microservices on AWS.")
+               date_posted=FRESH_POSTING_DATE, description="Java Spring Boot microservices on AWS.")
     row.update(over)
     return row
 

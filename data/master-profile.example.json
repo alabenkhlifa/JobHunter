@@ -63,7 +63,9 @@
         "resume",
         "cover-letter"
       ],
-      "source": "resume-refiner-interview"
+      "source": "resume-refiner-interview",
+      "achievement_id": "example:production-service",
+      "wording": "full"
     }
   ],
   "resume_variants": [
@@ -139,5 +141,43 @@
     "current_work_location": "City, Country",
     "allow_contact_for_other_vacancies": "yes/no",
     "requires_visa_sponsorship": "ask_user"
-  }
+  },
+  "additional": {
+    "languages": "English (C1)"
+  },
+  "resume_quality": {
+    "enabled": false,
+    "activation_variant_id": "jvm-backend",
+    "preferred_pages": 1,
+    "max_pages": 2,
+    "hide_progression": false,
+    "fill_same_employer_projects": false,
+    "group_bullets_by_client": false,
+    "omittable_certifications": [
+      "Example Certification"
+    ],
+    "protected_certifications": [],
+    "protected_skills": [],
+    "certification_tags": {
+      "Example Certification": [
+        "architecture"
+      ]
+    },
+    "relocation_targets": {},
+    "job_overrides": {}
+  },
+  "volunteering": [
+    {
+      "title": "University Instructor",
+      "organization": "Example University",
+      "dates": "09/2022 - Present",
+      "description": "Microservices and Spring Framework",
+      "confirmation": "draft",
+      "confidentiality": "public",
+      "match_terms": [
+        "microservices",
+        "spring"
+      ]
+    }
+  ]
 }

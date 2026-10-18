@@ -2213,6 +2213,50 @@ def test_grouped_confirmed_variant_uses_client_dates_for_identifiable_work():
     ]
 
 
+@pytest.mark.parametrize("preserve_variant", [False, True])
+@pytest.mark.parametrize("quality", [False, True])
+@pytest.mark.parametrize("job_text,expected", [
+    ("Build Java Kotlin Spring Boot microservices with PostgreSQL and automated tests.", ["JVM Client", "Azure Client"]),
+    ("Build Azure API Management integrations with Terraform and Service Bus.", ["Azure Client", "JVM Client"]),
+])
+def test_maibornwolff_project_order_follows_the_job_without_changing_facts(preserve_variant, quality, job_text, expected):
+    import copy
+    clients = [
+        {"name": "Azure Client", "dates": "March 2025 - Present", "tech": "Azure API Management, Terraform, Service Bus",
+         "bullets": ["Built Azure API Management integrations with Terraform and Service Bus.",
+                     "Designed an Azure API that prevents duplicate production events with automated tests."]},
+        {"name": "JVM Client", "dates": "October 2020 - October 2024", "tech": "Java, Kotlin, Spring Boot, PostgreSQL",
+         "bullets": ["Owned Java Kotlin Spring Boot microservices with PostgreSQL and automated tests."]},
+    ]
+    experiences = [{"company": "MaibornWolff GmbH", "title": "Lead Software Engineer",
+                    "dates": client["dates"], "subtitle": client["name"], "bullets": client["bullets"][:]}
+                   for client in clients]
+    profile = {"name": "Candidate", "employment_groups": [{"company": "MaibornWolff GmbH", "title": "Lead Software Engineer",
+        "dates": "October 2020 - Present", "confirmation": "candidate-reviewed", "engagements": clients}]}
+    before = copy.deepcopy((experiences, profile))
+    grouped = flow._group_company_experiences(experiences, profile, job_text, "Backend Engineer", preserve_variant=preserve_variant, quality=quality)
+    assert [e["name"] for e in grouped[0]["engagements"]] == expected
+    assert grouped[0]["dates"] == "October 2020 - Present"
+    assert {e["name"]: (e["dates"], set(e["bullets"])) for e in grouped[0]["engagements"]} == {
+        e["name"]: (e["dates"], set(e["bullets"])) for e in clients}
+    assert (experiences, profile) == before
+
+
+@pytest.mark.parametrize("company,expected", [
+    ("MaibornWolff GmbH", ["Newer", "Older"]),
+    ("Other Employer", ["Older", "Newer"]),
+])
+def test_project_order_uses_dates_for_ties_and_keeps_other_employers_unchanged(company, expected):
+    clients = [{"name": "Older", "dates": "2020 - 2024", "bullets": ["Built Java services."]},
+               {"name": "Newer", "dates": "2025 - Present", "bullets": ["Built Java services."]}]
+    role = {"company": company, "engagements": clients}
+    # Private notes and draft metadata must not influence public project order.
+    clients[0]["private_notes"] = "Java Spring Boot microservices " * 100
+    clients[0]["summary"] = "Lead architect for Java microservices " * 100
+    flow._order_client_engagements(role, "Java services", "Engineer")
+    assert [e["name"] for e in clients] == expected
+
+
 def test_unconfirmed_employer_group_is_not_rendered_as_public_history():
     experiences = [
         {"title": "Lead Engineer", "company": "Example GmbH", "dates": "2024 - Present"},

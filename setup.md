@@ -255,6 +255,29 @@ The user logs in manually and handles any 2FA/CAPTCHA. Automation later reuses t
 
 ## 7. Job recommendation flow
 
+### Owner resume quality rollout
+
+Install the updated `requirements.txt` in the owner's existing virtual environment. `PyMuPDF` and `pypdf` are mandatory for PDF verification; a missing verifier blocks quality generation. Existing profiles and invited candidates retain their current behavior unless their private profile explicitly opts in.
+
+Back up the private profile before adding approved evidence and a new draft variant. Separate factual employer/client dates from presentation preferences. `resume_quality.enabled` stays false until the candidate reviews the complete public snapshot, omissions, role terms and matching terms for `activation_variant_id`. Never mark a draft confirmed just to test it. The review-only CLI works with a stored draft and does not change the application database, send Telegram messages, upload documents or submit an application:
+
+```bash
+python resume_refiner.py validate data/master-profile.json
+python resume_quality.py --profile data/master-profile.json \
+  --variant <pending_variant_id> --job-json data/resume-drafts/job.json \
+  --output data/resume-drafts/preview.pdf
+```
+
+The model draft and independent evidence review reuse `SharedOwnerPlanner`, the existing owner-auth socket and the configured provider. Defaults are `/opt/jobhunter-hermes`, its `venv/bin/python`, and `/run/jobhunter-auth/auth.sock`; deployments can set `JOBHUNTER_HERMES_SOURCE`, `JOBHUNTER_HERMES_PYTHON` and `JOBHUNTER_OWNER_AUTH_SOCKET`. Do not create another Telegram listener or copy credentials. The model receives only selected public evidence and job data, with tools disabled.
+
+Inspect every generated page image and the actual PDF. The private manifest records selected evidence, review flags, explicit or overflow omissions, page count and actual audit results. One-page fitting measures both columns and tries to use 92% of the main column's available height with approved full wording. Set `resume_quality.fill_same_employer_projects: true` only after the candidate explicitly permits additional relevant projects under included employers; candidates come from candidate-reviewed employment groups, and each trial must remain one page. Unrelated work and excluded employers are never added to fill space. Review the `one_page_fill` manifest entry for accepted additions and the reason unused space remains. Replay the same reviewed summary and fixture on local/Pi installations to compare text, links, emphasis and layout. For an owner Apply text reply, an explicitly reviewed summary can be supplied using `callback_handler.py --apply <job_id> --resume-summary-draft data/resume-drafts/summary.json`; context mismatch blocks it.
+
+After candidate approval, confirm only that new variant and set the policy enabled through a backed-up, validated update. Keep previous variants and private supporting facts. Deployment rollback restores only the backed-up task files and profile, after checking for intervening changes; it never rewinds application records. A generation failure keeps the previous package and stage.
+
+Use `resume_quality.group_bullets_by_client: true` when the candidate requires all project achievements under customer headings. This removes employer-level highlights in selection, preview and fitting; ranking remains within customer sections. Order MaibornWolff client projects by job relevance with newest-first client dates for ties and no project-order caption. Apply it before measuring available space. Keep the variant draft until the corrected customer layout has been reviewed. All resume paths use text-only employer and education headings without logos.
+
+To preserve a reviewed project's opening, add `opening_evidence_ids` to its private `employment_groups[].engagements[]` record, containing one to three evidence-bank IDs in the candidate's approved order. Every referenced record must be candidate-confirmed, public, resume-visible and present verbatim in that project's bullet list. The fill pass tries the opening before feature details, with a two-point fallback for a three-point opening that does not fit. It leaves out the project if its opening cannot fit. This preference never adds omitted facts to an existing variant snapshot.
+
 Typical flow:
 
 1. `scraper.py --collect-only` collects candidates into local SQLite.

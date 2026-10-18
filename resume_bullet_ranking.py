@@ -2,10 +2,11 @@
 
 from dataclasses import dataclass
 import re
+from resume_inline import plain_text
 
 
 def _text(value):
-    return " ".join(re.sub(r"[^a-z0-9+#./-]+", " ", str(value or "").lower()).split())
+    return " ".join(re.sub(r"[^a-z0-9+#./-]+", " ", plain_text(value).lower()).split())
 
 
 def _has(text, pattern):
@@ -18,29 +19,39 @@ class BulletMatch:
     facets: frozenset[str]
 
 
-def responsibility_weights(job_text, job_title=""):
+def responsibility_weights(job_text, job_title="", *, quality=False):
     job, title = _text(job_text), _text(job_title)
     leading = _has(title, r"\b(lead|manager|head|chief|cto)\b")
     owning = leading or _has(title, r"\b(architect|principal)\b")
     backend = _has(job, r"\b(backend|back-end|services|microservices|jvm|api)\b")
-    quality = _has(job, r"\b(test\w*|quality|code review|review code|ci|validator\w*)\b")
-    return {
+    quality_required = _has(job, r"\b(test\w*|quality|code review|review code|ci|validator\w*)\b")
+    weights = {
         "leadership": 140 if leading else 65 if _has(job, r"\b(lead|manag\w*|mentor\w*|grow)\b.{0,40}\b(team|engineer\w*)\b") else 0,
         "ownership": 70 if owning else 35 if _has(job, r"\b(own\w*|end.to.end|accountab\w*)\b") else 0,
         "backend": 80 if backend else 0,
         "production": 25 if _has(job, r"\b(production|live|cloud|operat\w*|reliab\w*)\b") else 0,
         "integrations": 110 if _has(job, r"\b(idempot\w*|reconcil\w*|eventual consistency|unreliable delivery|duplicates|two.way)\b") else 80 if _has(job, r"\b(sync|integrat\w*|messag\w*|notification\w*|upstream)\b") else 0,
         "migrations": 95 if _has(job, r"\b(migrat\w*|backfill\w*|dual writes|staged rollouts)\b") else 0,
-        "quality": (105 if leading else 55) if quality else 0,
+        "quality": (105 if leading else 55) if quality_required else 0,
         "ai_workflow": 45 if _has(job, r"llm.generated code|language models.{0,60}(write code|writing code)|llm.{0,30}(code|coding)|ai.assisted|agentic development") else 0,
         "reliability": 60 if _has(job, r"\b(reliab\w*|correctness|incident\w*|availability|resilien\w*|on-call)\b") else 0,
     }
+    if quality:
+        if backend and _has(job, r"\b(aws|azure|gcp|kubernetes)\b"):
+            weights["production"] = max(weights["production"], 25)
+        weights["performance"] = 75 if _has(job, r"\b(performance|scalab\w*|efficient\w*|latency|throughput|optimi\w*)\b") else 0
+        weights["infrastructure"] = 90 if _has(job, r"\b(cloud|aws|azure|gcp|infrastructure|terraform|kubernetes|devops|deploy\w*)\b") else 0
+        if _has(job, r"\b(mentor\w*|onboard\w*|coach\w*)\b"):
+            weights["leadership"] = max(weights["leadership"], 65)
+    return weights
 
 
-def bullet_match(bullet, job_text, job_title=""):
+def bullet_match(bullet, job_text, job_title="", *, quality=False):
     candidate, job = _text(bullet), _text(job_text)
-    weights = responsibility_weights(job, job_title)
+    weights = responsibility_weights(job, job_title, quality=quality)
     delivered = _has(candidate, r"\b(built|build|maintain\w*|operat\w*|develop\w*|designed|deployed|delivered|rewrote|owned|architected)\b")
+    if quality:
+        delivered = delivered or _has(candidate, r"\b(migrated|upgraded|integrated)\b")
     backend = _has(candidate, r"\b(backend|back-end|services|microservices|platform|api)\b")
     facets = set()
     if delivered and backend:
@@ -53,6 +64,19 @@ def bullet_match(bullet, job_text, job_title=""):
         facets.add("production")
     if _has(candidate, r"\b(webhook\w*|idempot\w*|reconcil\w*|retry|retries|sync\w*|duplicate\w*)\b"):
         facets.add("integrations")
+    if quality:
+        if _has(candidate, r"\b(set up|built|designed|architected|configured|provisioned|deployed)\b") and _has(candidate, r"\b(aws|azure|gcp|cloud|terraform)\b") and _has(candidate, r"\b(infrastructure|environments?|terraform|provision\w*)\b"):
+            facets.add("infrastructure")
+        if _has(candidate, r"\b(integrat\w*|crm|mqtt|wsdl)\b"):
+            facets.add("integrations")
+        if _has(candidate, r"\b(mentored|onboarded|coached)\b") and _has(candidate, r"\b(colleagues|juniors|seniors|leads|engineers|developers)\b"):
+            facets.add("leadership")
+        if _has(candidate, r"\btrained\s+(?:the\s+)?(?:development team|engineers|developers|colleagues)\b"):
+            facets.add("leadership")
+        if _has(candidate, r"\b(sped up|faster|reduc\w*|optimi\w*|batch\w*)\b") and _has(candidate, r"\b(database|memory|notification\w*|latency|load|timeout\w*)\b"):
+            facets.add("performance")
+        if _has(candidate, r"\b(tdd|sonarqube|vulnerabilit\w*|code smells)\b"):
+            facets.add("quality")
     if _has(candidate, r"\b(migrat\w*|upgrad\w*|backfill\w*)\b") and _has(candidate, r"\b(production|downtime|live|services|microservices|schema|database)\b"):
         facets.add("migrations")
     if _has(candidate, r"\b(test\w*|validator\w*|code review|pr review|ci gates|automated tests)\b"):
@@ -87,10 +111,10 @@ def bullet_match(bullet, job_text, job_title=""):
     return BulletMatch(score, frozenset(facets))
 
 
-def order_bullet_indexes(bullets, job_text, job_title=""):
+def order_bullet_indexes(bullets, job_text, job_title="", *, quality=False):
     """Cover distinct responsibilities in the opening three, with stable ties."""
-    matches = [bullet_match(bullet, job_text, job_title) for bullet in bullets]
-    weights = responsibility_weights(job_text, job_title)
+    matches = [bullet_match(bullet, job_text, job_title, quality=quality) for bullet in bullets]
+    weights = responsibility_weights(job_text, job_title, quality=quality)
     pending = list(range(len(bullets)))
     ordered, covered = [], set()
     while pending:
