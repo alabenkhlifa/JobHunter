@@ -591,8 +591,11 @@ what happens next.
    It does not start filling or submitting a browser application. A request
    for more research or clarification stays in the research step.
 3. Wait for a separate Proceed to apply choice after reviewing the package.
-   The button records apply-preparation approval; for a text reply run
-   `python3 callback_handler.py --proceed-apply <job_id>`. Only then inspect
+   The native Telegram button records apply-preparation approval and starts
+   an owner Hermes turn for that exact job after the handler succeeds. A failed
+   handoff restores the button for retry. For a text reply inside Hermes, run
+   `python3 callback_handler.py --proceed-apply <job_id>` and continue the same
+   agent turn; that standalone CLI command only records approval. Only then inspect
    and fill the exact application path. Final submission requires its own
    explicit approval for that application, followed by portal confirmation and
    tracker verification. A failed or unconfirmed submit is not `submitted`.
