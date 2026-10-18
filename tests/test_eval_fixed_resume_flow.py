@@ -1,6 +1,7 @@
 """The fixed resume evaluator uses a private SQLite backup and fake transport."""
 
 import json
+import copy
 import sqlite3
 import sys
 from pathlib import Path
@@ -118,3 +119,28 @@ def test_source_db_is_rejected_when_only_ineligible_jobs_exist(tmp_path, monkeyp
     connection.close()
     with pytest.raises(evaluator.EvaluationError, match="No eligible unsubmitted"):
         evaluator.run_evaluation(source_db, profile_path, tmp_path / "none.json", sample_size=1)
+
+
+def test_evaluator_covers_every_approved_flavor_variant_and_keeps_default_projects(tmp_path, monkeypatch):
+    source_db, profile_path = _inputs(tmp_path, monkeypatch)
+    profile = json.loads(profile_path.read_text())
+    catalog = profile['resume_blocks']
+    architect = copy.deepcopy(catalog['flavors'][0])
+    architect.update(id='architect', label='Architect', headline='Software Architect')
+    catalog['flavors'].append(architect)
+    catalog['variants'] = catalog['variants'][:1]
+    for pages in (1, 2):
+        variant = copy.deepcopy(catalog['variants'][0])
+        variant.update(id=f'architect-{pages}', flavor_id='architect', max_pages=pages,
+                       base_overrides={'skills': {'Leadership': ['Mentoring']}},
+                       project_overrides={'project-one': copy.deepcopy(catalog['projects'][0])})
+        variant['project_overrides']['project-one']['entry']['bullets'] = ['Designed the reviewed architecture.']
+        catalog['variants'].append(variant)
+    profile_path.write_text(json.dumps(profile))
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', 'test-disabled')
+    monkeypatch.setenv('TELEGRAM_CHAT_ID', 'test-disabled')
+    report = evaluator.run_evaluation(source_db, profile_path, tmp_path / 'all-variants.json', sample_size=3)
+    assert [r['selection']['variant_id'] for r in report['results']] == ['software-engineer-one-page', 'architect-1', 'architect-2']
+    assert all(r['selection']['project_ids'] == ['project-one', 'project-two'] for r in report['results'])
+    assert all(r['fixed_summary_and_bullets_exact'] for r in report['results'])
+    assert report['all_stopped_before_submission'] is True

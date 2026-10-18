@@ -74,6 +74,8 @@ cp data/master-profile.example.json data/master-profile.json
 
 ### Resume Refiner onboarding
 
+After the candidate approves every final fixed-catalog PDF, use `tools/apply_approved_resume_catalog.py --profile <private-profile.json> --catalog <approved-catalog.json> --expected-catalog-sha256 <reviewed-checksum>` to inspect activation. Add `--apply --expected-profile-sha256 <inspected-profile-checksum>` to write it. The tool validates the confirmed default selections, backs up the profile privately and replaces only `resume_blocks`; other profile fields and reviewed PDFs remain intact.
+
 Place an existing resume in an ignored path under `data/`, then ask Hermes to run **Resume Refiner** before enabling application-package generation. Do not place personal documents in a tracked directory.
 
 Resume Refiner uses the uploaded resume as a baseline and then interviews the user one experience at a time. It covers:

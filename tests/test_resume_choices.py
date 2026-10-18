@@ -74,6 +74,32 @@ def test_changed_catalog_and_expired_token_cannot_generate(profile):
         choices.choose(conn, selected, profile)
 
 
+def test_picker_uses_approved_variant_override_and_preserves_default_project_order(profile):
+    catalog = profile['resume_blocks']
+    shared = next(p for p in catalog['projects'] if p['id'] == 'startup')
+    override = copy.deepcopy(shared)
+    override['confirmation'] = 'candidate-confirmed'
+    override['label'] = 'Reviewed startup'
+    override['role']['bullets'] = ['Approved architecture wording.']
+    variant = catalog['variants'][0]
+    variant.update(project_ids=['cars', 'farm', 'startup'], default_project_ids=['startup', 'cars'],
+                   project_overrides={'startup': override})
+    conn = sqlite3.connect(':memory:')
+    _, keyboard = choices.start(conn, 'scoped', profile)
+    choices.choose(conn, token(keyboard, 'Software Engineer'), profile)
+    _, keyboard = choices.card(conn, 'scoped', profile)
+    choices.choose(conn, token(keyboard, 'Core projects'), profile)
+    _, keyboard = choices.card(conn, 'scoped', profile)
+    assert keyboard['inline_keyboard'][0][0]['text'] == '✅ Reviewed startup'
+    choices.choose(conn, token(keyboard, 'Cars'), profile)
+    _, keyboard = choices.card(conn, 'scoped', profile)
+    choices.choose(conn, token(keyboard, 'Cars'), profile)
+    _, keyboard = choices.card(conn, 'scoped', profile)
+    _, selection = choices.choose(conn, token(keyboard, 'Generate'), profile)
+    assert selection['project_ids'] == ['startup', 'cars']
+    assert shared['confirmation'] == 'draft'
+
+
 def test_callback_apply_opens_picker_then_only_generate_builds_package(profile, tmp_path, monkeypatch):
     from test_callback_handler import load_callback_handler
     handler = load_callback_handler(monkeypatch)

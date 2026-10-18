@@ -87,8 +87,11 @@ def card(conn, job_id, profile):
                    "The summary and bullet wording stay fixed.\n\n"
                    f"<b>{len(chosen)} selected</b> · {html.escape(variant['label'])}\n"
                    "I’ll measure page two after rendering and flag it if it is mostly empty.")
-        for project in catalog["projects"]:
-            if project["id"] in variant["project_ids"] and project["confirmation"] == "candidate-confirmed":
+        ordered = variant["default_project_ids"] + [identifier for identifier in variant["project_ids"]
+                                                    if identifier not in variant["default_project_ids"]]
+        for identifier in ordered:
+            project = resume_blocks.project_for_variant(catalog, variant, identifier)
+            if project["confirmation"] == "candidate-confirmed":
                 button(("✅ " if project["id"] in chosen else "⬜ ") + project["label"], "toggle", project["id"])
         if chosen:
             button("📄 Generate resume", "generate")
@@ -128,9 +131,13 @@ def choose(conn, token, profile):
             variant = next(v for v in catalog["variants"] if v["id"] == selection["variant_id"])
             if value not in variant["project_ids"]:
                 raise ChoiceError("This project is unavailable. Choose Apply again.")
+            if resume_blocks.project_for_variant(catalog, variant, value)["confirmation"] != "candidate-confirmed":
+                raise ChoiceError("This project is awaiting approval. Choose Apply again.")
             picked = set(selection["project_ids"])
             picked.symmetric_difference_update({value})
-            selection["project_ids"] = [p for p in variant["project_ids"] if p in picked]
+            ordered = variant["default_project_ids"] + [identifier for identifier in variant["project_ids"]
+                                                        if identifier not in variant["default_project_ids"]]
+            selection["project_ids"] = [p for p in ordered if p in picked]
         elif action == "back" and step == "variant":
             selection, step = {}, "flavor"
         elif action == "length" and step == "projects":

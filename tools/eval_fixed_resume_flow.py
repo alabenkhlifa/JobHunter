@@ -193,17 +193,11 @@ def _evaluate_one_active(callback, profile, job, index, package_calls, package_d
 
     catalog = resume_blocks.catalog(profile)
     confirmed_flavors = [item for item in catalog["flavors"] if item["confirmation"] == "candidate-confirmed"]
-    flavor = next((item for item in confirmed_flavors if item["id"] == "software-engineer"), None)
-    if flavor is None:
-        if not confirmed_flavors:
-            raise EvaluationError("The fixed catalog has no candidate-confirmed flavor")
-        flavor = confirmed_flavors[0]
-    variant_index = index % 2
-    available_variants = [item for item in catalog["variants"] if item["confirmation"] == "candidate-confirmed"
-                          and item["flavor_id"] == flavor["id"]]
-    if not available_variants:
-        raise EvaluationError("The selected flavor has no candidate-confirmed variant")
-    variant = available_variants[variant_index % len(available_variants)]
+    combinations = [(flavor, variant) for flavor in confirmed_flavors for variant in catalog["variants"]
+                    if variant["flavor_id"] == flavor["id"] and variant["confirmation"] == "candidate-confirmed"]
+    if not combinations:
+        raise EvaluationError("The fixed catalog has no candidate-confirmed flavor and variant")
+    flavor, variant = combinations[index % len(combinations)]
 
     def latest_tokens(action: str | None = None) -> list[str]:
         for message in reversed(messages):
@@ -248,7 +242,7 @@ def _evaluate_one_active(callback, profile, job, index, package_calls, package_d
     if index > 0 and len(selection_ids) > 1:
         toggled_id = selection_ids[0]
         click("toggle", toggled_id)
-        selection_ids.remove(toggled_id)
+        click("toggle", toggled_id)
     if not selection_ids:
         raise EvaluationError("The selected project variant left no project selected")
     selection = {"flavor_id": flavor["id"], "variant_id": variant["id"], "project_ids": selection_ids}

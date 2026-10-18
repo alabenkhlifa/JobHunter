@@ -135,7 +135,13 @@ variants. Its Software Engineer flavor covers Senior Backend Engineer and
 Senior Software Engineer. The catalog stores exact approved headlines,
 summaries and complete project blocks. Never draft a replacement summary,
 rank or trim bullets, add projects, or infer a flavor from the job title.
-Draft flavors such as Architect stay unavailable until their wording is approved.
+Draft flavors stay unavailable until their wording is approved. Read the active
+catalog for the approved Software Engineer and Architect variants; do not hardcode
+page choices or infer a selection. Variant-specific `base_overrides` and
+`project_overrides` apply only within their containing flavor and variant. Use
+the effective approved project block and preserve the variant default project
+order when projects are toggled. A draft shared project does not authorize its
+wording; only its separately confirmed variant override may be used.
 
 After company research, Interested automatically opens the Telegram picker:
 flavor, page limit, then projects. Apply reopens the picker when needed. Each project button toggles its entire fixed block. Generate
@@ -155,7 +161,11 @@ before Proceed. A two-page limit can produce a single page. Never add filler.
 Add later approvals to the private catalog without changing existing approved
 wording. `tools/import_resume_blocks.py` can seed a catalog from a reviewed
 renderer JSON and its matching PDF (dry-run by default, backup on `--apply`).
-It verifies text, font, geometry and link parity before importing.
+It verifies text, font, geometry and link parity before importing. After the
+owner approves every final PDF, `tools/apply_approved_resume_catalog.py` applies
+the reviewed private catalog with explicit catalog/profile checksums, a private
+backup and an atomic write. Its default is dry-run. Preserve all non-catalog
+profile fields and existing approved PDF artifacts.
 
 For profiles without an enabled fixed catalog, the following earlier paths apply.
 
