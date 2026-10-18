@@ -596,7 +596,15 @@ what happens next.
    handoff restores the button for retry. For a text reply inside Hermes, run
    `python3 callback_handler.py --proceed-apply <job_id>` and continue the same
    agent turn; that standalone CLI command only records approval. Only then inspect
-   and fill the exact application path. Final submission requires its own
+   and fill the exact application path. A job-details page or application-method
+   chooser is a navigation step, not a verified application form. Follow its
+   visible Apply or Upload CV control to open the chosen method, then inspect
+   the revealed form before uploading. A CV-first form may contain only the CV
+   field and Continue. An adjacent existing-user login panel belongs to a
+   separate method. Continue advances the current step; it is not final submission.
+   A hidden file input is eligible only through its visible associated
+   label. Never unhide inactive panels or bypass the rendered-form check.
+   Final submission requires its own
    explicit approval for that application, followed by portal confirmation and
    tracker verification. A failed or unconfirmed submit is not `submitted`.
    Before asking for final approval, inspect every required field and browser

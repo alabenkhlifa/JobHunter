@@ -124,6 +124,37 @@ def test_source_apply_control_and_search_form_are_not_an_application_form():
     assert not search.verifies_application_for("Staff Software Engineer (UAE)")
 
 
+def _cv_first_form():
+    return {"url": "https://careers.example.test/application/tech-leader",
+            "title": "Applying to Tech Leader | BNP Paribas", "text": "Select your resume",
+            "headings": ["BNP Paribas", "TECH LEADER", "CHOOSE YOUR APPLICATION METHOD"],
+            "inputs": [{"tag": "input", "type": "text", "label": "EMAIL", "form": "login"},
+                       {"tag": "input", "type": "password", "label": "PASSWORD", "form": "login"},
+                       {"tag": "input", "type": "file", "label": "Please upload your CV", "id": "resumeFile",
+                        "form": "cv", "required": True, "value_present": False}],
+            "buttons": [{"text": "LOG IN", "type": "submit", "form": "login"},
+                        {"text": "Continue", "type": "submit", "form": "cv"}]}
+
+
+def test_cv_only_step_verifies_exact_role_and_company_without_login_fields():
+    page = inspect_page(FakeClient(_cv_first_form()))
+    assert page.verifies_application_for("Tech Leader", "BNP Paribas")
+    assert not page.verifies_application_for("Other Role", "BNP Paribas")
+    assert not page.verifies_application_for("Tech Leader", "Another Bank")
+    assert page.missing_required == ["Please upload your CV"]
+    assert not page.safe_to_continue
+
+
+@pytest.mark.parametrize("change", ["no_cv_control", "disabled_cv", "login_submit_only", "unrelated_file"])
+def test_cv_method_chooser_and_login_cannot_verify_an_upload_form(change):
+    payload = _cv_first_form()
+    if change == "no_cv_control": payload['inputs'].pop()
+    if change == "disabled_cv": payload['inputs'][-1]['disabled'] = True
+    if change == "login_submit_only": payload['buttons'].pop()
+    if change == "unrelated_file": payload['inputs'][-1].update(label='Portfolio attachment', id='attachment')
+    assert not inspect_page(FakeClient(payload)).verifies_application_for("Tech Leader", "BNP Paribas")
+
+
 def test_wrong_role_redirect_cannot_be_recorded_as_draft_inspected(tmp_path):
     db = tmp_path / "jobs.db"
     _job_db(db)
