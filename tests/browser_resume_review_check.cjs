@@ -10,12 +10,15 @@ catch { playwright = require('playwright-core'); }
     page.setDefaultTimeout(10000);
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
+    const scoped = process.argv[3] === 'scoped';
+    const basePath = scoped ? ['variants', 1, 'base_overrides'] : ['base'];
     const detail = path => page.locator(`details[data-details-key='${JSON.stringify(path)}']`);
-    const skills = detail(['base', 'skills']);
-    const backend = detail(['base', 'skills', 0]);
-    const delivery = detail(['base', 'skills', 1]);
+    const skills = detail([...basePath, 'skills']);
+    const backend = detail([...basePath, 'skills', 0]);
+    const delivery = detail([...basePath, 'skills', 1]);
     const saved = () => page.waitForFunction(() => document.querySelector('#save-status').textContent === 'All changes saved ✓');
     const read = () => page.evaluate(async () => (await fetch('/api/state')).json());
+    const readSkills = async () => {const state = await read(); return scoped ? state.catalog.variants[1].base_overrides.skills : state.catalog.base.skills;};
     const open = async (element, expected) => assert.equal(await element.evaluate(node => node.open), expected);
     const items = () => backend.locator('textarea[data-path]').evaluateAll(nodes => nodes.map(node => node.value));
 
@@ -43,7 +46,7 @@ catch { playwright = require('playwright-core'); }
     await heading.pressSequentially(' & "Architecture"');
     await saved();
     assert.equal(await heading.inputValue(), 'Platform & "Architecture"');
-    assert.deepEqual(Object.keys((await read()).catalog.base.skills), ['Platform & "Architecture"', 'Delivery']);
+    assert.deepEqual(Object.keys(await readSkills()), ['Platform & "Architecture"', 'Delivery']);
     assert.equal(await backend.locator(':scope > summary').textContent(), 'Platform & "Architecture"');
     await open(skills, true);
     await open(backend, true);
@@ -53,7 +56,7 @@ catch { playwright = require('playwright-core'); }
     await saved();
     await backend.getByRole('button', {name: 'Move Skill 1 down', exact: true}).click();
     await saved();
-    assert.deepEqual((await read()).catalog.base.skills['Platform & "Architecture"'], ['PostgreSQL', 'Kotlin']);
+    assert.deepEqual((await readSkills())['Platform & "Architecture"'], ['PostgreSQL', 'Kotlin']);
     await open(skills, true);
     await open(backend, true);
     await open(delivery, false);
@@ -64,7 +67,7 @@ catch { playwright = require('playwright-core'); }
     await backend.locator('[data-remove]').last().click();
     await saved();
     await open(skills, true);
-    assert.deepEqual((await read()).catalog.base.skills['Platform & "Architecture"'], ['PostgreSQL', 'Kotlin']);
+    assert.deepEqual((await readSkills())['Platform & "Architecture"'], ['PostgreSQL', 'Kotlin']);
 
     await backend.locator('[data-request]').first().click();
     assert.ok((await page.locator('#request-target').textContent()).includes('Platform & "Architecture"'));
@@ -76,7 +79,7 @@ catch { playwright = require('playwright-core'); }
     await heading.fill('Delivery');
     await heading.press('Tab');
     assert.equal(await backend.locator('[data-heading-error]').textContent(), 'A skill group already uses this heading.');
-    assert.deepEqual(Object.keys((await read()).catalog.base.skills), ['Platform & "Architecture"', 'Delivery']);
+    assert.deepEqual(Object.keys(await readSkills()), ['Platform & "Architecture"', 'Delivery']);
     await heading.fill('Platform & "Architecture"');
     await heading.press('Tab');
     assert.equal(await backend.locator('[data-heading-error]').isVisible(), false);
@@ -94,6 +97,14 @@ catch { playwright = require('playwright-core'); }
     await skills.locator(':scope > summary').click();
     assert.equal(await heading.inputValue(), 'Platform & "Architecture"');
     assert.deepEqual(await items(), ['PostgreSQL', 'Kotlin']);
+    if (scoped) {
+      await page.locator('[data-section="projects"]').click();
+      await page.getByRole('textbox', {name: 'Bullet 1', exact: true}).fill('Designed a version-specific Java service.');
+      await saved();
+      const state = await read();
+      assert.equal(state.catalog.projects[0].entry.bullets[0], 'Owned five **Java services**.');
+      assert.equal(state.catalog.variants[1].project_overrides.services.entry.bullets[0], 'Designed a version-specific Java service.');
+    }
     assert.deepEqual(errors, []);
     console.log('Skills heading edits, validation, reorder, disclosure state, autosave and reload passed');
   } finally {

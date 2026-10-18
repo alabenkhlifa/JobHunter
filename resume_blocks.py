@@ -16,7 +16,8 @@ RENDERER_BASE_FIELDS = {
     "name", "email", "phone", "website", "linkedin", "location", "skills", "certifications",
     "certification_links", "education", "additional", "volunteering", "layout",
 }
-LAYOUT_FIELDS = {"volunteering_section_title", "teaching_certification_spacing", "compact_spacing", "education_dates_inline"}
+LAYOUT_FIELDS = {"volunteering_section_title", "teaching_certification_spacing", "compact_spacing", "education_dates_inline",
+                 "personal_details_page_two", "page_break_before_engagement"}
 EDUCATION_FIELDS = {"degree", "school", "location", "dates", "display_degree", "display_school"}
 VOLUNTEERING_FIELDS = {"id", "title", "organization", "dates", "description", "url", "align", "vertical_inset"}
 
@@ -94,10 +95,12 @@ def _validate_base(base: dict) -> None:
         if not isinstance(layout, dict) or set(layout) - LAYOUT_FIELDS:
             raise ResumeBlocksError("resume_blocks.base.layout has invalid renderer fields")
         if any(not isinstance(layout[key], bool) for key in
-               ("teaching_certification_spacing", "compact_spacing", "education_dates_inline") if key in layout):
+               ("teaching_certification_spacing", "compact_spacing", "education_dates_inline", "personal_details_page_two") if key in layout):
             raise ResumeBlocksError("resume_blocks.base.layout flags must be booleans")
         if "volunteering_section_title" in layout and not isinstance(layout["volunteering_section_title"], str):
             raise ResumeBlocksError("resume_blocks.base.layout.volunteering_section_title must be text")
+        if "page_break_before_engagement" in layout and not isinstance(layout["page_break_before_engagement"], str):
+            raise ResumeBlocksError("resume_blocks.base.layout.page_break_before_engagement must be text")
 
 
 def _known_id_list(value: Any, known: set[str], path: str, *, nonempty: bool) -> None:
@@ -105,6 +108,47 @@ def _known_id_list(value: Any, known: set[str], path: str, *, nonempty: bool) ->
             or any(not isinstance(identifier, str) or identifier not in known for identifier in value)
             or len(value) != len(set(value))):
         raise ResumeBlocksError(f"{path} must name unique known projects")
+
+
+def _validate_project(project: dict, path: str) -> None:
+    employer_fields = {"title", "dates", "location", "company_url"}
+    entry_fields = {"name", "dates", "role", "tech", "bullets"}
+    _confirmed(project, path)
+    if set(project) - {"id", "label", "confirmation", "company", "role", "entry"}:
+        raise ResumeBlocksError(f"{path} has invalid fields")
+    _required_text(project.get("label"), f"{path}.label")
+    _required_text(project.get("company"), f"{path}.company")
+    role = project.get("role")
+    role_fields = employer_fields | {"subtitle", "tech", "bullets"}
+    if not isinstance(role, dict) or set(role) - role_fields:
+        raise ResumeBlocksError(f"{path}.role has invalid employer fields")
+    _required_text(role.get("title"), f"{path}.role.title")
+    _required_text(role.get("dates"), f"{path}.role.dates")
+    if any(not isinstance(value, str) for key, value in role.items() if key != "bullets"):
+        raise ResumeBlocksError(f"{path}.role fields must be text")
+    if "bullets" in role and (not isinstance(role["bullets"], list)
+                               or any(not isinstance(bullet, str) or not bullet.strip() for bullet in role["bullets"])):
+        raise ResumeBlocksError(f"{path}.role.bullets must be non-empty text")
+    entry = project.get("entry")
+    if entry is None:
+        bullets = role.get("bullets")
+        if not isinstance(bullets, list) or not bullets:
+            raise ResumeBlocksError(f"{path}.role.bullets must be a non-empty list for standalone projects")
+    else:
+        if not isinstance(entry, dict) or set(entry) - entry_fields:
+            raise ResumeBlocksError(f"{path}.entry has invalid fields")
+        _required_text(entry.get("name"), f"{path}.entry.name")
+        _required_text(entry.get("dates"), f"{path}.entry.dates")
+        if any(not isinstance(entry.get(field, ""), str) for field in ("role", "tech")):
+            raise ResumeBlocksError(f"{path}.entry role and tech must be text")
+        bullets = entry.get("bullets")
+        if not isinstance(bullets, list) or not bullets:
+            raise ResumeBlocksError(f"{path}.entry.bullets must be a non-empty list")
+    if any(not isinstance(bullet, str) or not bullet.strip() for bullet in bullets):
+        raise ResumeBlocksError(f"{path} bullets must be non-empty text")
+    for field in ("location", "company_url"):
+        if field in role and not isinstance(role[field], str):
+            raise ResumeBlocksError(f"{path}.role.{field} must be text")
 
 
 def _validate_catalog(profile: dict) -> dict:
@@ -150,51 +194,14 @@ def _validate_catalog(profile: dict) -> dict:
         elif any(key in flavor and not isinstance(flavor[key], str) for key in ("headline", "summary")):
             raise ResumeBlocksError(f"{path} draft wording must be text")
 
-    employer_fields = {"title", "dates", "location", "company_url"}
-    entry_fields = {"name", "dates", "role", "tech", "bullets"}
     for index, project in enumerate(projects):
-        path = f"resume_blocks.projects[{index}]"
-        _confirmed(project, path)
-        if set(project) - {"id", "label", "confirmation", "company", "role", "entry"}:
-            raise ResumeBlocksError(f"{path} has invalid fields")
-        _required_text(project.get("label"), f"{path}.label")
-        _required_text(project.get("company"), f"{path}.company")
-        role = project.get("role")
-        role_fields = employer_fields | {"subtitle", "tech", "bullets"}
-        if not isinstance(role, dict) or set(role) - role_fields:
-            raise ResumeBlocksError(f"{path}.role has invalid employer fields")
-        _required_text(role.get("title"), f"{path}.role.title")
-        _required_text(role.get("dates"), f"{path}.role.dates")
-        if any(not isinstance(value, str) for key, value in role.items() if key != "bullets"):
-            raise ResumeBlocksError(f"{path}.role fields must be text")
-        if "bullets" in role and (not isinstance(role["bullets"], list)
-                                   or any(not isinstance(bullet, str) or not bullet.strip() for bullet in role["bullets"])):
-            raise ResumeBlocksError(f"{path}.role.bullets must be non-empty text")
-        entry = project.get("entry")
-        if entry is None:
-            bullets = role.get("bullets")
-            if not isinstance(bullets, list) or not bullets:
-                raise ResumeBlocksError(f"{path}.role.bullets must be a non-empty list for standalone projects")
-        else:
-            if not isinstance(entry, dict) or set(entry) - entry_fields:
-                raise ResumeBlocksError(f"{path}.entry has invalid fields")
-            _required_text(entry.get("name"), f"{path}.entry.name")
-            _required_text(entry.get("dates"), f"{path}.entry.dates")
-            if any(not isinstance(entry.get(field, ""), str) for field in ("role", "tech")):
-                raise ResumeBlocksError(f"{path}.entry role and tech must be text")
-            bullets = entry.get("bullets")
-            if not isinstance(bullets, list) or not bullets:
-                raise ResumeBlocksError(f"{path}.entry.bullets must be a non-empty list")
-        if any(not isinstance(bullet, str) or not bullet.strip() for bullet in bullets):
-            raise ResumeBlocksError(f"{path} bullets must be non-empty text")
-        for field in ("location", "company_url"):
-            if field in role and not isinstance(role[field], str):
-                raise ResumeBlocksError(f"{path}.role.{field} must be text")
+        _validate_project(project, f"resume_blocks.projects[{index}]")
 
     for index, variant in enumerate(variants):
         path = f"resume_blocks.variants[{index}]"
         _confirmed(variant, path)
-        if set(variant) - {"id", "label", "flavor_id", "confirmation", "max_pages", "project_ids", "default_project_ids"}:
+        if set(variant) - {"id", "label", "flavor_id", "confirmation", "max_pages", "project_ids", "default_project_ids",
+                           "base_overrides", "project_overrides"}:
             raise ResumeBlocksError(f"{path} has invalid fields")
         _required_text(variant.get("label"), f"{path}.label")
         if variant.get("flavor_id") not in flavor_ids:
@@ -207,6 +214,19 @@ def _validate_catalog(profile: dict) -> dict:
         _known_id_list(defaults, set(allowed), f"{path}.default_project_ids", nonempty=True)
         if not isinstance(defaults, list):
             raise ResumeBlocksError(f"{path}.default_project_ids must name allowed projects")
+        if "base_overrides" in variant:
+            base_overrides = variant["base_overrides"]
+            if not isinstance(base_overrides, dict) or set(base_overrides) - RENDERER_BASE_FIELDS:
+                raise ResumeBlocksError(f"{path}.base_overrides must contain public renderer fields")
+            _validate_base(base_overrides)
+        if "project_overrides" in variant:
+            overrides = variant["project_overrides"]
+            if not isinstance(overrides, dict) or set(overrides) - set(allowed):
+                raise ResumeBlocksError(f"{path}.project_overrides must name allowed projects")
+            for identifier, project in overrides.items():
+                if not isinstance(project, dict) or project.get("id") != identifier:
+                    raise ResumeBlocksError(f"{path}.project_overrides must preserve project IDs")
+                _validate_project(project, f"{path}.project_overrides[{identifier}]")
     return catalog
 
 
@@ -224,6 +244,21 @@ def catalog(profile: dict) -> dict:
     return _validate_catalog(profile)
 
 
+def base_for_variant(data: dict, variant: dict) -> dict:
+    result = copy.deepcopy(data["base"])
+    overrides = variant.get("base_overrides", {})
+    result.update(copy.deepcopy(overrides))
+    if "layout" in overrides:
+        result["layout"] = {**copy.deepcopy(data["base"].get("layout", {})), **result["layout"]}
+    return result
+
+
+def project_for_variant(data: dict, variant: dict, identifier: str) -> dict:
+    if identifier in variant.get("project_overrides", {}):
+        return variant["project_overrides"][identifier]
+    return next(project for project in data["projects"] if project["id"] == identifier)
+
+
 def build(profile: dict, selection: dict) -> dict:
     """Build a renderer payload from the exact candidate-confirmed blocks."""
     data = catalog(profile)
@@ -231,7 +266,7 @@ def build(profile: dict, selection: dict) -> dict:
         raise ResumeBlocksError("A flavor, variant and project selection is required")
     flavors = {item["id"]: item for item in data["flavors"] if item["confirmation"] == "candidate-confirmed"}
     variants = {item["id"]: item for item in data["variants"] if item["confirmation"] == "candidate-confirmed"}
-    projects = {item["id"]: item for item in data["projects"] if item["confirmation"] == "candidate-confirmed"}
+    projects = {item["id"]: item for item in data["projects"]}
     flavor_id, variant_id, project_ids = (selection.get("flavor_id"), selection.get("variant_id"), selection.get("project_ids"))
     if flavor_id not in flavors:
         raise ResumeBlocksError("Choose a candidate-confirmed resume flavor")
@@ -250,12 +285,15 @@ def build(profile: dict, selection: dict) -> dict:
     if set(project_ids) - projects.keys():
         raise ResumeBlocksError("A selected project is not candidate-confirmed")
 
-    payload = copy.deepcopy(data["base"])
+    payload = base_for_variant(data, variant)
     flavor = flavors[flavor_id]
     payload["headline"], payload["summary"] = flavor["headline"], flavor["summary"]
     by_company: dict[str, dict] = {}
     for project_id in project_ids:
-        project = projects[project_id]
+        project = project_for_variant(data, variant, project_id)
+        if project["confirmation"] != "candidate-confirmed":
+            kind = "project override" if project_id in variant.get("project_overrides", {}) else "project"
+            raise ResumeBlocksError(f"A selected {kind} is not candidate-confirmed")
         role_data = project["role"]
         company = project["company"]
         role = by_company.get(company)

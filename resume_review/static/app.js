@@ -28,8 +28,12 @@ function clearError(){if(!conflict) $('#error').hidden=true;}
 function toast(message){$('#toast').textContent=message;$('#toast').hidden=false;setTimeout(()=>$('#toast').hidden=true,3500);}
 function flavor(){return state.catalog.flavors.find(x=>x.id===state.selection.flavor_id);}
 function variant(){return state.catalog.variants.find(x=>x.id===state.selection.variant_id);}
+function basePath(){return variant()?.base_overrides?['variants',state.catalog.variants.indexOf(variant()),'base_overrides']:['base'];}
+function projectPath(id){return Object.hasOwn(variant()?.project_overrides||{},id)?['variants',state.catalog.variants.indexOf(variant()),'project_overrides',id]:['projects',state.catalog.projects.findIndex(x=>x.id===id)];}
+function currentProject(id){return at(state.catalog,projectPath(id));}
 function field(path,title,{multiline=false,rows=3,hint='',className=''}={}) {
-  const idPath=path[0]==='base'&&path[1]==='skills'?[...path.slice(0,2),Object.keys(state.catalog.base.skills).indexOf(path[2]),...path.slice(3)]:path;
+  const skillIndex=path.indexOf('skills');
+  const idPath=skillIndex>=0&&path.length>skillIndex+1?[...path.slice(0,skillIndex+1),Object.keys(at(state.catalog,path.slice(0,skillIndex+1))).indexOf(path[skillIndex+1]),...path.slice(skillIndex+2)]:path;
   const value=at(state.catalog,path), id='f-'+idPath.join('-').replace(/[^a-z0-9-]/gi,'');
   const input = multiline ? `<textarea id="${id}" aria-label="${esc(title)}" data-path="${pathAttr(path)}" rows="${rows}" class="${className}">${esc(value)}</textarea>` : `<input id="${id}" aria-label="${esc(title)}" data-path="${pathAttr(path)}" value="${esc(value)}">`;
   return `<div class="field"><div class="field-top"><label for="${id}">${esc(title)}</label><button class="request-text" data-request="${pathAttr(path)}" title="Request a change to this text">↗ Request change</button></div>${input}${hint?`<div class="field-footer"><span>${esc(hint)}</span><span data-count-for="${id}">${String(value).length} characters</span></div>`:''}</div>`;
@@ -98,7 +102,7 @@ function variantEditor(){
   const i=state.catalog.variants.indexOf(current),p=['variants',i];
   const ordered=[...current.default_project_ids,...current.project_ids.filter(id=>!current.default_project_ids.includes(id))];
   const list=ordered.map(id=>{
-    const project=state.catalog.projects.find(x=>x.id===id),included=state.selection.project_ids.includes(id);
+    const project=currentProject(id),included=state.selection.project_ids.includes(id);
     return `<div class="project-check"><input type="checkbox" id="project-${esc(id)}" data-project-toggle="${esc(id)}" ${included?'checked':''}><label for="project-${esc(id)}">${esc(project.label)}<small>${esc(project.company)} · ${(project.entry?.bullets||project.role.bullets||[]).length} bullets</small></label><div class="order-controls"><button class="icon-button" data-project-order="${esc(id)}" data-direction="-1" aria-label="Move ${esc(project.label)} up">↑</button><button class="icon-button" data-project-order="${esc(id)}" data-direction="1" aria-label="Move ${esc(project.label)} down">↓</button></div></div>`;
   }).join('');
   return `<p class="intro">Choose the full project blocks in this version and their order. The renderer preserves every selected bullet.</p>`+
@@ -106,13 +110,14 @@ function variantEditor(){
     `<div class="field"><div class="field-top"><label for="page-limit">Page limit</label></div><select id="page-limit" data-path="${pathAttr([...p,'max_pages'])}" data-number><option value="1" ${current.max_pages===1?'selected':''}>1 page</option><option value="2" ${current.max_pages===2?'selected':''}>Up to 2 pages</option></select></div>`+
     `<div class="subheading"><h3>Included projects</h3><span class="tag">${state.selection.project_ids.length} selected</span></div><div class="card">${list}</div>`+
     info('A page limit is a ceiling','A two-page variant can render as one page. Overflow stays visible with a warning, so you can shorten wording or change the selection yourself.')+
+    (current.base_overrides||current.project_overrides?info('Content for this variant','Sidebar content and project wording are customized for this flavor and variant. Edit them in Contact & sidebar and Project wording.'): '')+
     `<div class="stack-buttons"><button class="button small" data-duplicate="variant">Duplicate variant</button>${state.catalog.variants.length>1?'<button class="button small danger" data-delete="variant">Delete variant</button>':''}</div>`;
 }
 function projectEditor(){
   if(!state.catalog.projects.some(x=>x.id===projectId)) projectId=state.selection.project_ids[0]||state.catalog.projects[0].id;
-  const project=state.catalog.projects.find(x=>x.id===projectId),i=state.catalog.projects.indexOf(project),p=['projects',i];
+  const project=currentProject(projectId),p=projectPath(projectId),scoped=p[0]==='variants';
   const entry=project.entry, bullets=entry?['entry','bullets']:['role','bullets'];
-  let html=`<p class="intro">Edit the complete, reusable project block. Changes appear in every variant that includes this project.</p><label for="project-picker">Project</label><select id="project-picker" class="small-select">${state.catalog.projects.map(x=>`<option value="${esc(x.id)}" ${x.id===projectId?'selected':''}>${esc(x.label)} — ${esc(x.company)}</option>`).join('')}</select>`;
+  let html=`<p class="intro">${scoped?'Edit the project wording for this flavor and variant. These changes stay within this version.':'Edit the complete, reusable project block. Changes appear in every variant that includes this project.'}</p><label for="project-picker">Project</label><select id="project-picker" class="small-select">${state.catalog.projects.map(x=>{const item=currentProject(x.id);return `<option value="${esc(x.id)}" ${x.id===projectId?'selected':''}>${esc(item.label)} — ${esc(item.company)}</option>`;}).join('')}</select>`;
   html+=field([...p,'label'],'Project label')+`<details><summary>Employer & role details</summary><div class="detail-body">`+
     field([...p,'company'],'Employer')+Object.keys(project.role).filter(k=>k!=='bullets').map(k=>field([...p,'role',k],label(k))).join('')+
     '<p class="hint">Projects grouped under the same employer must share employer details. Use “Update employer across projects” after editing them.</p><button class="button small" id="sync-employer">Update employer across projects</button></div></details>';
@@ -126,7 +131,7 @@ function arrayEditor(path,items,title){
   return items.map((value,i)=>`<div class="list-item">${typeof value==='string'?field([...path,i],`${title} ${i+1}`,{multiline:true,rows:3}):genericEditor([...path,i],value)}<div class="list-tools"><button data-move="${pathAttr([...path,i])}" data-direction="-1" aria-label="Move ${title} ${i+1} up">↑ Move up</button><button data-move="${pathAttr([...path,i])}" data-direction="1" aria-label="Move ${title} ${i+1} down">↓ Move down</button><button data-remove="${pathAttr([...path,i])}" ${items.length===1?'disabled':''}>Remove</button></div></div>`).join('')+`<button class="button small" data-add="${pathAttr(path)}">＋ Add ${esc(title.toLowerCase())}</button>`;
 }
 function genericEditor(path,value){
-  if(path.length===2&&path[0]==='base'&&path[1]==='skills')return skillsEditor(value);
+  if(path.at(-1)==='skills')return skillsEditor(path,value);
   if(typeof value==='string')return field(path,label(path.at(-1)),{multiline:value.length>100,rows:3});
   if(typeof value==='boolean')return `<div class="project-check"><input type="checkbox" data-path="${pathAttr(path)}" ${value?'checked':''} id="flag-${esc(path.join('-'))}"><label for="flag-${esc(path.join('-'))}">${esc(label(path.at(-1)))}</label></div>`;
   if(typeof value==='number')return `<div class="field"><label>${esc(label(path.at(-1)))}<input type="number" data-number data-path="${pathAttr(path)}" value="${value}"></label></div>`;
@@ -137,33 +142,33 @@ function genericEditor(path,value){
   }).join('');
   return '';
 }
-function skillsEditor(skills){
-  return Object.entries(skills).map(([heading,items],i)=>`<details open data-details-key="${pathAttr(['base','skills',i])}"><summary>${esc(heading)}</summary><div class="detail-body"><div class="field"><div class="field-top"><label for="skill-heading-${i}">Skill group heading</label></div><input id="skill-heading-${i}" aria-label="Skill group heading ${i+1}" data-skill-heading="${i}" value="${esc(heading)}" required><p class="raw-error" data-heading-error role="alert" hidden></p></div>${arrayEditor(['base','skills',heading],items,'Skill')}</div></details>`).join('');
+function skillsEditor(path,skills){
+  return Object.entries(skills).map(([heading,items],i)=>`<details open data-details-key="${pathAttr([...path,i])}"><summary>${esc(heading)}</summary><div class="detail-body"><div class="field"><div class="field-top"><label for="skill-heading-${i}">Skill group heading</label></div><input id="skill-heading-${i}" aria-label="Skill group heading ${i+1}" data-skill-heading="${i}" data-skill-path="${pathAttr(path)}" value="${esc(heading)}" required><p class="raw-error" data-heading-error role="alert" hidden></p></div>${arrayEditor([...path,heading],items,'Skill')}</div></details>`).join('');
 }
 function renameSkillGroup(target){
-  const skills=state.catalog.base.skills,entries=Object.entries(skills),i=Number(target.dataset.skillHeading);
+  const prefix=JSON.parse(target.dataset.skillPath),skills=at(state.catalog,prefix),entries=Object.entries(skills),i=Number(target.dataset.skillHeading);
   const before=entries[i][0],heading=target.value.trim(),details=target.closest('details'),error=details.querySelector('[data-heading-error]');
   const message=!heading?'Enter a skill group heading.':heading!==before&&Object.hasOwn(skills,heading)?'A skill group already uses this heading.':'';
   target.setCustomValidity(message);error.textContent=message;error.hidden=!message;
   if(message){target.setAttribute('aria-invalid','true');$('#save-status').textContent='Skill group heading not saved';return;}
   target.removeAttribute('aria-invalid');
   if(heading===before){$('#save-status').textContent=dirty?'Saving changes…':'All changes saved ✓';return;}
-  state.catalog.base.skills=Object.fromEntries(entries.map(([key,items],index)=>[index===i?heading:key,items]));
+  set(state.catalog,prefix,Object.fromEntries(entries.map(([key,items],index)=>[index===i?heading:key,items])));
   details.querySelector('summary').textContent=heading;
   const attributes=['data-path','data-request','data-move','data-add','data-remove'];
   details.querySelectorAll(attributes.map(attribute=>`[${attribute}]`).join(',')).forEach(element=>{
     for(const attribute of attributes){
       if(!element.hasAttribute(attribute))continue;
       const path=JSON.parse(element.getAttribute(attribute));
-      if(path[0]==='base'&&path[1]==='skills'&&path[2]===before){path[2]=heading;element.setAttribute(attribute,JSON.stringify(path));}
+      if(prefix.every((key,index)=>path[index]===key)&&path[prefix.length]===before){path[prefix.length]=heading;element.setAttribute(attribute,JSON.stringify(path));}
     }
   });
   markDirty();
 }
 function sidebarEditor(){
-  const base=state.catalog.base;
-  return `<p class="intro">Shared content across every flavor and variant. All contact fields, skills, certifications, links, education and teaching entries are editable here.</p>`+
-    Object.entries(base).map(([key,value])=>`<details data-details-key="${pathAttr(['base',key])}" ${['name','email','phone','location'].includes(key)?'open':''}><summary>${esc(label(key))}</summary><div class="detail-body">${genericEditor(['base',key],value)}</div></details>`).join('')+
+  const path=basePath(),base=at(state.catalog,path),scoped=path[0]==='variants';
+  return `<p class="intro">${scoped?'Content for this flavor and variant. Changes here stay within this version.':'Shared content across every flavor and variant.'} All contact fields, skills, certifications, links, education and teaching entries are editable here.</p>`+
+    Object.entries(base).map(([key,value])=>`<details data-details-key="${pathAttr([...path,key])}" ${['name','email','phone','location'].includes(key)?'open':''}><summary>${esc(label(key))}</summary><div class="detail-body">${genericEditor([...path,key],value)}</div></details>`).join('')+
     `<details data-details-key="sidebar-raw"><summary>Advanced: complete shared content</summary><div class="detail-body"><p class="hint">Add categories, optional fields or entries using the renderer's public JSON structure. Apply explicitly after editing.</p><textarea id="sidebar-raw" aria-label="Shared sidebar JSON">${esc(JSON.stringify(base,null,2))}</textarea><div class="stack-buttons"><button class="button small" id="apply-sidebar-json">Apply shared content</button></div></div></details>`;
 }
 function differences(oldValue,newValue,path=[]){
@@ -249,8 +254,9 @@ function duplicate(kind){
   }else if(kind==='variant'){
     const item=clone(variant());item.label+=' (copy)';item.id=uniqueId(item.label,state.catalog.variants);item.confirmation='draft';state.catalog.variants.push(item);state.selection.variant_id=item.id;markDirty();render();
   }else{
-    const item=clone(state.catalog.projects.find(x=>x.id===projectId));item.label+=' (copy)';item.id=uniqueId(item.label,state.catalog.projects);item.confirmation='draft';state.catalog.projects.push(item);
+    const item=clone(currentProject(projectId));item.label+=' (copy)';item.id=uniqueId(item.label,state.catalog.projects);item.confirmation='draft';state.catalog.projects.push(item);
     for(const v of state.catalog.variants)v.project_ids.push(item.id);
+    if(variant()?.project_overrides)variant().project_overrides[item.id]=clone(item);
     projectId=item.id;markDirty();render();
   }
 }
@@ -302,10 +308,10 @@ document.addEventListener('click',async event=>{
     if(button.id==='add-flavor')openCreate('flavor');if(button.id==='add-variant')openCreate('variant');
     if(button.id==='zoom-in'){zoom=Math.min(170,(zoom||100)+15);applyZoom();}
     if(button.id==='zoom-out'){zoom=Math.max(55,(zoom||100)-15);applyZoom();}
-    if(button.id==='apply-sidebar-json'){const base=JSON.parse($('#sidebar-raw').value);state.catalog.base=base;markDirty();await save();render();toast('Shared content updated.');}
+    if(button.id==='apply-sidebar-json'){const base=JSON.parse($('#sidebar-raw').value);set(state.catalog,basePath(),base);markDirty();await save();render();toast('Sidebar content updated.');}
     if(button.id==='sync-employer'){
-      const project=state.catalog.projects.find(x=>x.id===projectId);
-      for(const other of state.catalog.projects.filter(x=>x.company===project.company)){const bullets=other.role.bullets;other.role=clone(project.role);if(bullets)other.role.bullets=bullets;else delete other.role.bullets;}
+      const project=currentProject(projectId);
+      for(const other of state.catalog.projects.map(x=>currentProject(x.id)).filter(x=>x.company===project.company)){const bullets=other.role.bullets;other.role=clone(project.role);if(bullets)other.role.bullets=bullets;else delete other.role.bullets;}
       markDirty();render();toast('Employer details updated across matching projects.');
     }
     if(button.id==='approve'){

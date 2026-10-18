@@ -380,6 +380,8 @@ class StyledResumePDF(FPDF):
             y += 1 if (self.profile.get("layout") or {}).get("compact_spacing") else 5
         languages = self._parse_languages()
         education = self.profile.get("education") or []
+        if (self.profile.get("layout") or {}).get("personal_details_page_two") and (languages or education) and page < 2:
+            page, y = 2, self.PAGE_TOP
         if languages:
             page, y = self._side_next(page, y, self.LANGUAGE_CONTENT_GAP + self.LANGUAGE_ROW_STEP)
             self._side_add(page, "section", y, title="Languages")
@@ -506,7 +508,8 @@ class StyledResumePDF(FPDF):
             personal_details, details_end_page = self._plan_language_education(page, y + gap)
             y = self._personal_details_final_y
             page = details_end_page
-        if (not linear_sidebar and personal_details and page == 1 and details_end_page == 2
+        if (not (self.profile.get("layout") or {}).get("personal_details_page_two")
+                and not linear_sidebar and personal_details and page == 1 and details_end_page == 2
                 and self._experience_fits_first_page()):
             details_end_y = self._page_two_sidebar_after - 18
             shift = y + 14 - 30
@@ -598,7 +601,7 @@ class StyledResumePDF(FPDF):
     def _second_page_only_has_personal_details(self):
         # Linear sidebars may have already drawn some personal details on page
         # one. Relocating the complete block afterwards would duplicate them.
-        if self.profile.get("volunteering"):
+        if self.profile.get("volunteering") or (self.profile.get("layout") or {}).get("personal_details_page_two"):
             return False
         if self._sidebar_page_count != 2:
             return False
@@ -904,6 +907,9 @@ class StyledResumePDF(FPDF):
         if highlights and engagements:
             y += 4
         for index, engagement in enumerate(engagements):
+            if (index and self.page_no() == 1 and engagement.get("name")
+                    == (self.profile.get("layout") or {}).get("page_break_before_engagement")):
+                y = self._group_continuation(role)
             divided = index < len(engagements) - 1
             height = self._engagement_height(engagement)
             if y + height > self.BOTTOM and height + 15 <= fresh_capacity:

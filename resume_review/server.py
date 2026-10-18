@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from resume_blocks import catalog as validate_catalog, fit
+from resume_blocks import base_for_variant, catalog as validate_catalog, fit, project_for_variant
 
 STATIC = Path(__file__).parent / "static"
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,11 +78,11 @@ def compose(catalog, selection):
         raise ReviewError("Select at least one unique project.")
     if set(ids) - set(variant["project_ids"]):
         raise ReviewError("A selected project is not allowed by this variant.")
-    result = copy.deepcopy(catalog["base"])
+    result = base_for_variant(catalog, variant)
     result.update(headline=flavor.get("headline", ""), summary=flavor.get("summary", ""))
     employers = {}
     for identifier in ids:
-        project = find(catalog["projects"], identifier)
+        project = project_for_variant(catalog, variant, identifier)
         fields = {k: copy.deepcopy(v) for k, v in project["role"].items() if k != "bullets"}
         company = project["company"]
         if company not in employers:

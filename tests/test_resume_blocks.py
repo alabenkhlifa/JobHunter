@@ -145,3 +145,58 @@ def test_fit_rejects_overflow_after_spacing_compaction():
     with pytest.raises(resume_blocks.ResumeBlocksError, match="above the selected 2-page limit"):
         resume_blocks.fit({"experience": [{"bullets": ["Fixed"]}]}, render, 2)
     assert len(calls) == 2
+
+
+def test_variant_overrides_preserve_other_variants_and_source_blocks(profile):
+    selection = {"flavor_id": "software-engineer", "variant_id": "software-engineer-core", "project_ids": ["cars"]}
+    original = copy.deepcopy(profile)
+    before = resume_blocks.build(profile, selection)
+    scoped = copy.deepcopy(profile["resume_blocks"]["variants"][0])
+    scoped.update(id="detailed", base_overrides={"skills": {"Leadership": ["Mentoring"]},
+                                               "layout": {"personal_details_page_two": True}},
+                  project_overrides={"cars": copy.deepcopy(profile["resume_blocks"]["projects"][0])})
+    scoped["project_overrides"]["cars"]["entry"]["bullets"] = ["Designed the scoped service architecture."]
+    profile["resume_blocks"]["variants"].append(scoped)
+    result = resume_blocks.build(profile, {**selection, "variant_id": "detailed"})
+    assert result["skills"] == {"Leadership": ["Mentoring"]}
+    assert result["layout"]["personal_details_page_two"] is True
+    assert result["experience"][0]["bullets"] == ["Designed the scoped service architecture."]
+    assert resume_blocks.build(profile, selection) == before
+    assert profile["resume_blocks"]["base"] == original["resume_blocks"]["base"]
+    assert profile["resume_blocks"]["projects"] == original["resume_blocks"]["projects"]
+    result["experience"][0]["engagements"][0]["bullets"].clear()
+    assert scoped["project_overrides"]["cars"]["entry"]["bullets"]
+
+
+@pytest.mark.parametrize("overrides", [
+    {"base_overrides": {"private_notes": "Private"}},
+    {"base_overrides": {"layout": {"personal_details_page_two": "yes"}}},
+    {"base_overrides": {"layout": {"page_break_before_engagement": 2}}},
+    {"project_overrides": {"unknown": {"id": "unknown"}}},
+    {"project_overrides": {"cars": {"id": "other"}}},
+])
+def test_variant_overrides_reject_private_invalid_and_disallowed_data(profile, overrides):
+    profile["resume_blocks"]["variants"][0].update(overrides)
+    with pytest.raises(resume_blocks.ResumeBlocksError):
+        resume_blocks.catalog(profile)
+
+
+def test_production_rejects_unconfirmed_project_override(profile):
+    override = copy.deepcopy(profile["resume_blocks"]["projects"][0])
+    override["confirmation"] = "draft"
+    profile["resume_blocks"]["variants"][0]["project_overrides"] = {"cars": override}
+    with pytest.raises(resume_blocks.ResumeBlocksError, match="override is not candidate-confirmed"):
+        resume_blocks.build(profile, {"flavor_id": "software-engineer", "variant_id": "software-engineer-core",
+                                      "project_ids": ["cars"]})
+
+
+def test_confirmed_variant_project_does_not_require_confirming_its_shared_original(profile):
+    shared = profile['resume_blocks']['projects'][0]
+    scoped = copy.deepcopy(shared)
+    scoped['entry']['bullets'] = ['Approved variant-specific wording.']
+    shared['confirmation'] = 'draft'
+    variant = profile['resume_blocks']['variants'][0]
+    variant['project_overrides'] = {'cars': scoped}
+    result = resume_blocks.build(profile, {'flavor_id': variant['flavor_id'], 'variant_id': variant['id'], 'project_ids': ['cars']})
+    assert result['experience'][0]['bullets'] == scoped['entry']['bullets']
+    assert shared['confirmation'] == 'draft' and shared['entry']['bullets'] != scoped['entry']['bullets']

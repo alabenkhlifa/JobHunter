@@ -55,6 +55,23 @@ def test_preview_composition_matches_production_without_promoting_drafts(store):
     assert state == before
 
 
+def test_preview_scoped_content_matches_production_and_preserves_other_versions(store):
+    state = store.read()
+    before = compose(state['catalog'], state['selection'])[0]
+    variant = copy.deepcopy(state['catalog']['variants'][0])
+    variant.update(id='detailed', max_pages=2, base_overrides=copy.deepcopy(state['catalog']['base']),
+                   project_overrides={'services': copy.deepcopy(state['catalog']['projects'][0])})
+    variant['base_overrides']['skills']['Leadership'] = ['Mentoring']
+    variant['project_overrides']['services']['entry']['bullets'] = ['Designed the scoped platform.']
+    state['catalog']['variants'].append(variant)
+    selection = {**state['selection'], 'variant_id': 'detailed'}
+    expected = build({'resume_blocks': state['catalog']}, selection)
+    assert compose(state['catalog'], selection)[0] == expected
+    assert compose(state['catalog'], state['selection'])[0] == before
+    variant['confirmation'] = 'draft'
+    assert compose(state['catalog'], selection)[0] == expected
+
+
 def test_autosave_resumes_undoes_and_never_updates_source_or_confirms_wording(store, source):
     original = source.read_bytes()
     state = store.read()
@@ -225,19 +242,31 @@ def test_failed_catalog_validation_is_atomic(store):
 
 @pytest.mark.skipif(os.environ.get("JOBHUNTER_BROWSER_TESTS") != "1",
                     reason="requires opt-in JOBHUNTER_BROWSER_TESTS=1, Node Playwright and Chromium")
-def test_browser_skills_headings_and_reordering_preserve_open_sections(http_server, store, source):
+@pytest.mark.parametrize('scoped', [False, True])
+def test_browser_skills_headings_and_reordering_preserve_open_sections(http_server, store, source, scoped):
     original = source.read_bytes()
     state = store.read()
     state["catalog"]["base"]["skills"]["Delivery"] = ["CI/CD", "Docker"]
+    original_catalog = copy.deepcopy(state['catalog'])
+    if scoped:
+        variant = copy.deepcopy(state['catalog']['variants'][0])
+        variant.update(id='scoped', base_overrides=copy.deepcopy(state['catalog']['base']),
+                       project_overrides={'services': copy.deepcopy(state['catalog']['projects'][0])})
+        state['catalog']['variants'].append(variant)
+        state['selection']['variant_id'] = variant['id']
     saved = store.save(save_body(state))
     preview = store.preview()
     approved = store.approval({"revision": saved["revision"], "content_digest": preview["content_digest"]})
     driver = Path(__file__).with_name("browser_resume_review_check.cjs")
-    result = subprocess.run(["node", str(driver), f"http://127.0.0.1:{http_server.server_port}"],
+    result = subprocess.run(["node", str(driver), f"http://127.0.0.1:{http_server.server_port}", 'scoped' if scoped else 'shared'],
                             capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
     state = store.read()
     assert state["approvals"] == approved["approvals"]
+    if scoped:
+        assert state['catalog']['base'] == original_catalog['base']
+        assert state['catalog']['projects'] == original_catalog['projects']
+        assert state['catalog']['variants'][0] == original_catalog['variants'][0]
     assert source.read_bytes() == original
     preview = store.preview()
     assert preview["audit_ok"] and not preview["warnings"]
