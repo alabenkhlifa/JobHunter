@@ -625,6 +625,10 @@ employers or locations, or override its retry policy after failed lookups.
    the revealed form before uploading. A CV-first form may contain only the CV
    field and Continue. An adjacent existing-user login panel belongs to a
    separate method. Continue advances the current step; it is not final submission.
+   A CV upload can post and reload the form while parsing the document. Wait
+   for parsing to finish, then inspect again before filling fields so that
+   prefill cannot overwrite confirmed answers. A cleared file input does not
+   mean upload failed when the form displays its stored current filename.
    A hidden file input is eligible only through its visible associated
    label. Never unhide inactive panels or bypass the rendered-form check.
    A final review step may have no editable fields. The verifier accepts it

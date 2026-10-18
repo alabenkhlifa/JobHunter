@@ -483,11 +483,31 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     return widget && widget.getAttribute('role') === 'combobox' &&
       widget.closest('form') === el.form && visible(widget) ? widget : null;
   };
+  const uploadedFileFor = (el) => {
+    if (el.type !== 'file' || !el.id.endsWith('_File')) return '';
+    const base = el.id.slice(0, -5), stored = document.getElementById(base);
+    const name = document.getElementById(base + '_FileName');
+    const current = document.getElementById(base + '_CurrentFile');
+    const label = document.getElementById(base + '_FileNameLabel');
+    return stored?.type === 'hidden' && stored.form === el.form && stored.value &&
+      name?.type === 'hidden' && name.form === el.form && name.value &&
+      current && current.closest('form') === el.form && visible(current) && label && current.contains(label) &&
+      label.textContent.trim() === name.value ? name.value : '';
+  };
+  const unavailableChild = (el) => {
+    const parentName = el.getAttribute('data-ddd-parent-link');
+    if (el.tagName !== 'SELECT' || !parentName || el.options.length !== 1) return false;
+    const name = el.name.replace(/^-?\d+_/, ''), prefix = el.id.slice(0, -name.length);
+    const parent = document.getElementById(prefix + parentName);
+    return parent?.form === el.form && parent.value && !['-1', '-999'].includes(parent.value) &&
+      parent.getAttribute('data-ddd-child-link') === name &&
+      parent.getAttribute('data-ddd-no-children') === el.selectedOptions[0]?.text.trim();
+  };
   const presented = (el) => visible(el) || (
     el.type === 'file' && !el.matches(':disabled') && [...(el.labels || [])].some(visible)
   ) || (
     !el.matches(':disabled') && !!widgetFor(el)
-  );
+  ) || !!uploadedFileFor(el);
   const formFor = (el) => el.form ? (el.form.id || `form-${[...document.forms].indexOf(el.form)}`) : '';
   const questionFor = (el) => { try {
     const group = el.closest('fieldset, [role=radiogroup], [role=group]');
@@ -507,6 +527,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     return '';
   } catch (e) { return ''; } };
   const valuePresent = (el) => {
+    if (uploadedFileFor(el)) return true;
     if (el.type === 'radio') {
       return [...document.querySelectorAll('input[type=radio]')].some(other => other.name === el.name && other.checked);
     }
@@ -538,9 +559,10 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       autocomplete: el.getAttribute('autocomplete') || '',
       value: (el.type === 'radio' || el.type === 'checkbox') ? (el.value || '') : '',
       disabled: !!el.disabled || el.matches(':disabled'),
-      required: !!el.required || el.getAttribute('aria-required') === 'true' ||
-        (!!widgetFor(el) && (widgetFor(el).getAttribute('aria-required') === 'true' || el.getAttribute('i_required') === 'true')),
+      required: !unavailableChild(el) && (!!el.required || el.getAttribute('aria-required') === 'true' ||
+        (!!widgetFor(el) && (widgetFor(el).getAttribute('aria-required') === 'true' || el.getAttribute('i_required') === 'true'))),
       widget_id: widgetFor(el)?.id || '',
+      uploaded_file_name: uploadedFileFor(el),
       value_present: valuePresent(el),
       invalid: el.getAttribute('aria-invalid') === 'true' || !el.checkValidity(),
       options: el.tagName === 'SELECT' ? [...el.options].slice(0, 25).map(o => o.text.trim()).filter(Boolean) : []
