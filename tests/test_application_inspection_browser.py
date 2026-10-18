@@ -50,3 +50,38 @@ def test_cv_step_requires_presented_file_control_and_its_own_continue(reveal, di
         assert not inspection.verifies_application_for('Tech Leader', 'Another Bank')
     if not reveal:
         assert not any(item['type'] == 'file' for item in inspection.inputs)
+
+
+@pytest.mark.parametrize('change,expected', [
+    ('none', True), ('hidden_form', False), ('hidden_submit', False), ('disabled_fieldset', False),
+    ('notice_outside_form', False), ('continue_only', False), ('login_form', False),
+])
+def test_input_free_final_review_requires_presented_notice_and_final_control(change, expected):
+    notice = 'By clicking below you will submit your application, please make any changes before clicking submit.'
+    html = f'''<!doctype html><title>Register | BNP Paribas</title>
+    <h1>BNP Paribas</h1><h2>TECH LEADER</h2>
+    <form><fieldset><p>{notice}</p><button type="submit" name="previous">Previous</button>
+      <button type="submit" id="final">Submit Application</button></fieldset></form>'''
+    if change == 'hidden_form': html = html.replace('<form>', '<form hidden>')
+    if change == 'hidden_submit': html = html.replace('id="final"', 'id="final" hidden')
+    if change == 'disabled_fieldset': html = html.replace('<fieldset>', '<fieldset disabled>')
+    if change == 'notice_outside_form':
+        html = html.replace(f'<p>{notice}</p>', '').replace('<form>', f'<p>{notice}</p><form>')
+    if change == 'continue_only': html = html.replace('Submit Application', 'Continue')
+    if change == 'login_form': html = html.replace('<fieldset>', '<fieldset><input type="password">')
+
+    def evaluate(expression):
+        result = subprocess.run(['node', str(Path(__file__).with_name('browser_application_inspection.cjs'))],
+                                input=json.dumps({'html': html, 'expression': expression}),
+                                text=True, capture_output=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    client = Mock()
+    client.evaluate.side_effect = evaluate
+    inspection = inspect_page(client)
+    assert inspection.verifies_application_for('Tech Leader', 'BNP Paribas') is expected
+    if expected:
+        assert inspection.inputs == [] and inspection.forms[0]['id'] == 'form-0'
+        assert not inspection.verifies_application_for('Other Role', 'BNP Paribas')
+        assert not inspection.verifies_application_for('Tech Leader', 'Another Employer')

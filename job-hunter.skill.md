@@ -604,6 +604,12 @@ what happens next.
    separate method. Continue advances the current step; it is not final submission.
    A hidden file input is eligible only through its visible associated
    label. Never unhide inactive panels or bypass the rendered-form check.
+   A final review step may have no editable fields. The verifier accepts it
+   only with an explicit final-submit notice and enabled Submit Application
+   control in the same visible form, plus the exact role and employer identity.
+   Use the normal approved submit helper for this step. If it rejects a valid
+   review step, report the verifier error for repair; do not ask the owner to
+   submit manually merely because the page has no inputs.
    Final submission requires its own
    explicit approval for that application, followed by portal confirmation and
    tracker verification. A failed or unconfirmed submit is not `submitted`.

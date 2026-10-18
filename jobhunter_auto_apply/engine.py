@@ -175,7 +175,22 @@ class PageInspection:
             and any(button.get("form") == item["form"] and submit_control(button) for button in self.buttons)
             for item in applicant_fields
         )
-        return bool(editable or resume_first)
+        # Some ATS flows end with an input-free confirmation step. Require an
+        # explicit final-submit notice and enabled final control in that same
+        # rendered form; a source Apply link or a login button is insufficient.
+        final_review = any(
+            form.get("id") and _FINAL_REVIEW_RX.search(str(form.get("text") or ""))
+            and not any(item.get("form") == form["id"]
+                        and not item.get("disabled")
+                        and str(item.get("type") or "").casefold() not in
+                        {"hidden", "submit", "button", "reset", "image"}
+                        for item in self.inputs)
+            and any(button.get("form") == form["id"] and not button.get("disabled")
+                    and _FINAL_SUBMIT_LABEL_RX.fullmatch(" ".join(str(button.get("text") or "").split()))
+                    for button in self.buttons)
+            for form in getattr(self, "forms", [])
+        )
+        return bool(editable or resume_first or final_review)
 
     def verifies_application_for(self, job_title: str, job_company: str | None = None,
                                  job_location: str | None = None) -> bool:
@@ -196,6 +211,14 @@ _SUBMIT_LABEL_RX = re.compile(
     r"|enviar(?: (?:mi |la |tu )?(?:solicitud|candidatura|cv|curr[ií]culum))?|aplicar(?: ahora| a (?:esta )?oferta)?"
     r"|postular(?:me|se)?(?: ahora)?|post[uú]late(?: ahora)?|inscribirme|inscribirse|inscr[ií]bete"
     r"|solicitar(?: empleo)?|presentar candidatura|continuar|siguiente)", re.I)
+
+_FINAL_SUBMIT_LABEL_RX = re.compile(
+    r"(?:submit|send) (?:my |your )?application|enviar (?:mi |la |tu )?(?:solicitud|candidatura)"
+    r"|presentar candidatura", re.I)
+_FINAL_REVIEW_RX = re.compile(
+    r"\bby clicking (?:below|submit) you will submit your application\b"
+    r"|\breview (?:your|the) application before (?:submitting|submission)\b"
+    r"|\brevisa (?:tu|la) (?:solicitud|candidatura) antes de enviarla\b", re.I)
 
 _APPLICATION_HEADING_PREFIXES = (
     ("apply", "for"), ("application", "for"), ("job", "application", "for"),
@@ -481,6 +504,10 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       .filter(el => visible(el) && !el.closest('aside, nav, [class*="recommend" i], [class*="similar" i], [class*="related" i]'))
       .slice(0, 20)
       .map(el => (el.innerText || '').trim().slice(0, 200)).filter(Boolean),
+    forms: [...document.forms].filter(visible).slice(0, 20).map(el => ({
+      id: el.id || `form-${[...document.forms].indexOf(el)}`,
+      text: (el.innerText || '').trim().slice(0, 4000)
+    })),
     inputs: [...document.querySelectorAll('input, select, textarea')].filter(presented).slice(0, 80).map((el) => ({
       tag: el.tagName.toLowerCase(),
       type: el.type || '',
@@ -503,7 +530,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       id: el.id || '',
       name: el.name || '',
       form: formFor(el),
-      disabled: !!el.disabled
+      disabled: !!el.disabled || el.matches(':disabled')
     })),
     links: [...document.querySelectorAll('a[href]')].filter(visible).slice(0, 80).map((el) => ({
       text: (el.innerText || el.getAttribute('aria-label') || '').trim().slice(0, 120),
@@ -564,6 +591,9 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     # Full text for per-field classification; deliberately not a dataclass field
     # so asdict()/JSON output of existing callers is unchanged.
     inspection.page_text = text
+    # Form-local text verifies an input-free final step without expanding the
+    # CLI's public inspection schema or exposing duplicate applicant details.
+    inspection.forms = data.get("forms") or []
     return inspection
 
 
