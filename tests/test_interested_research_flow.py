@@ -219,15 +219,16 @@ def test_research_job_adds_labelled_market_salary_evidence(monkeypatch):
     research = flow.research_job(sample_job())
 
     assert len(calls) <= 4
-    assert research.company_summary == "AGAPI is a technology company."
+    assert "is a technology company" not in research.company_summary
     assert not research.company_salary_sources
     assert research.research["salary"]["basis"] == "market"
     assert [source["name"] for source in research.research["sources"]] == ["Glassdoor Dubai"]  # salary.example is not a salary site
     assert "No company-specific salary range found." in research.missing_signals
     assert any("scam/fraud/fake/complaint" in warning for warning in research.warnings)
     message = flow.build_research_brief_message(sample_job(), research)
-    assert "No published range; no AGAPI pay data" in message
-    assert "Market: AED 21k/month (Glassdoor Dubai)" in message
+    assert "No employer-published range verified." in message
+    assert "No comparable company salary range verified." in message
+    assert "Market: AED 21k/month (Glassdoor Dubai; reported average)" in message
     assert "Ask: AED 30,000/month (configured target)" in message
 
 
@@ -494,10 +495,7 @@ def test_compact_company_summary_keeps_useful_verified_details():
         ],
     )
 
-    assert summary == (
-        "TrueForge is a Dubai-based technology consultancy focused on legacy-system modernization, "
-        "systems integration, software architecture (2–10 employees)."
-    )
+    assert summary == "TrueForge is a Dubai-based technology consultancy. 2-10 employees."
 
 
 def test_compact_company_summary_does_not_use_role_location_as_headquarters():
@@ -507,7 +505,7 @@ def test_compact_company_summary_does_not_use_role_location_as_headquarters():
         [{"title": "About Google", "snippet": "Google is a global technology company working on cloud platforms and AI."}],
     )
 
-    assert summary == "Google is a global technology company focused on cloud platforms, AI."
+    assert summary == "Google is a global technology company working on cloud platforms and AI."
     assert "Dubai-based" not in summary
 
 
@@ -522,8 +520,8 @@ def test_company_summary_uses_only_late_about_section_not_role_requirements():
     summary = flow._company_summary_from_job_description("MongoDB", description)
 
     assert summary == (
-        "MongoDB is a global database technology company focused on cloud platforms, AI "
-        "(60,000 customers)."
+        "MongoDB provides a globally distributed database platform for the AI era. "
+        "Its cloud-native platform serves 60,000 customers worldwide."
     )
     assert "legacy-system modernization" not in summary
     assert "systems integration" not in summary
@@ -539,7 +537,7 @@ def test_company_summary_uses_bounded_company_context_without_about_heading():
 
     summary = flow._company_summary_from_job_description("Nimbus Cloud Services (NCS)", description)
 
-    assert summary == "Nimbus Cloud Services (NCS) is a cloud technology company."
+    assert summary == ""
     assert "compliance" not in summary
 
 
@@ -552,7 +550,7 @@ def test_company_summary_recognizes_company_alias_in_job_context():
 
     summary = flow._company_summary_from_job_description("Amazon Web Services (AWS)", description)
 
-    assert summary == "Amazon Web Services (AWS) is a cloud technology company."
+    assert summary == ""
 
 
 def test_research_resolves_aggregator_employer_and_keeps_posting_company(monkeypatch):
@@ -574,9 +572,10 @@ def test_research_resolves_aggregator_employer_and_keeps_posting_company(monkeyp
     assert research.employer_name == "Revolut"
     assert research.posting_company == "TALENTMATE"
     assert "Revolut — Dubai, United Arab Emirates (via TALENTMATE)" in message
-    assert "Job post: Revolut is a global financial technology company focused on digital financial services" in message
-    assert "13,000+ employees; 75+ million customers" in message
-    assert "no Revolut pay data" in message
+    assert "Job post: Revolut: People deserve more from their money. Our products include spending" in message
+    assert "global financial technology company" not in message
+    assert "75+ million customers" in message
+    assert "No comparable company salary range verified." in message
 
 
 def test_research_skips_redundant_company_lookup_when_job_about_section_is_useful(monkeypatch):
@@ -601,7 +600,7 @@ def test_research_skips_redundant_company_lookup_when_job_about_section_is_usefu
 
     research = flow.research_job(job)
 
-    assert research.company_summary.startswith("Job post: Revolut is a global financial technology company")
+    assert research.company_summary.startswith("Job post: Revolut: Our products include spending, saving, investing")
     assert not any("official site" in query for query in queries)
     assert len(queries) <= 2
 
@@ -658,7 +657,8 @@ def test_legacy_salary_for_another_country_is_not_displayed():
     message = flow.build_research_brief_message(job, research)
 
     assert "€88000" not in message
-    assert "No published range; no Google pay data" in message
+    assert "No employer-published range verified." in message
+    assert "No comparable company salary range verified." in message
 
 
 def test_annual_flight_allowance_is_not_reported_as_published_salary():
@@ -672,7 +672,8 @@ def test_annual_flight_allowance_is_not_reported_as_published_salary():
     assert flow.validated_job_salary(job) == ""
     assert "AED 2,500" not in flow.estimate_salary_range(job)
     message = flow.build_research_brief_message(job, research)
-    assert "No published range" in message
+    assert "No employer-published range verified." in message
+    assert "No comparable company salary range verified." in message
     assert "AED 2,500" not in message
 
 
@@ -789,8 +790,9 @@ def test_build_research_brief_is_concise_and_company_salary_first(monkeypatch):
     assert "Research" in message
     assert "AGAPI appears to be a Dubai software/data/security consultancy." in message
     assert "Pay:" in message
-    assert "No published range; no AGAPI pay data" in message
-    assert "Glassdoor, Indeed, PayScale, GulfTalent or Levels.fyi" in message
+    assert "No employer-published range verified." in message
+    assert "No comparable company salary range verified." in message
+    assert "Glassdoor, Indeed, PayScale, GulfTalent or Levels.fyi" not in message
     # Without live research the card still shows the labelled estimate and ask.
     assert "Estimate: AED 15k–22k/month (Configured target band; estimate, not employer data)" in message
     assert "Ask: AED 30,000/month (configured target)" in message
@@ -866,15 +868,36 @@ def test_research_brief_shows_company_salary_when_found():
             {
                 "source": "Glassdoor",
                 "snippet": "AGAPI Solutions Architect in Dubai AED 35k–45k/month.",
-                "url": "https://glassdoor.example/agapi",
+                "url": "https://www.glassdoor.com/Salary/AGAPI-Solutions-Architect-Dubai",
             }
         ],
     )
 
-    message = flow.build_research_brief_message(sample_job(), research)
+    message = flow.build_research_brief_message(sample_job(title="Solutions Architect"), research)
 
-    assert "Glassdoor: AGAPI Solutions Architect in Dubai AED 35k–45k/month." in message
-    assert "No AGAPI pay data" not in message
+    assert "Company:" in message
+    assert "AED 35k–45k/month" in message
+    assert "Glassdoor" in message
+    assert "AGAPI Solutions Architect in Dubai AED 35k–45k/month." not in message
+    assert "No comparable company salary range verified." not in message
+
+
+def test_company_salary_for_different_role_is_not_shown():
+    research = flow.JobResearch(
+        company_summary="Official company page found.",
+        legitimacy="No obvious warning.",
+        company_salary_sources=[{
+            "source": "Glassdoor",
+            "title": "AGAPI Solutions Architect salary in Dubai",
+            "snippet": "AGAPI Solutions Architect in Dubai AED 35k–45k/month.",
+            "url": "https://www.glassdoor.com/Salary/AGAPI-Solutions-Architect-Dubai",
+        }],
+    )
+
+    message = flow.build_research_brief_message(sample_job(title="Full Stack Developer"), research)
+
+    assert "AED 35k" not in message
+    assert "No comparable company salary range verified." in message
 
 
 def test_research_brief_prefers_one_validated_salary_source():
@@ -893,7 +916,7 @@ def test_research_brief_prefers_one_validated_salary_source():
                 "source": "Levels.fyi",
                 "title": "ByteDance Software Engineer salary in Dubai",
                 "snippet": "Dubai total compensation ranges from AED 409K to AED 481K per year.",
-                "url": "https://levels.example/bytedance",
+                "url": "https://www.levels.fyi/companies/bytedance/salaries/software-engineer/locations/dubai",
             },
         ],
     )
@@ -905,7 +928,11 @@ def test_research_brief_prefers_one_validated_salary_source():
 
     message = flow.build_research_brief_message(job, research)
 
-    assert "Levels.fyi: Dubai total compensation ranges from AED 409K to AED 481K per year." in message
+    assert "Company:" in message
+    assert "AED 34k–40k/month" in message
+    assert "total compensation" in message
+    assert "Levels.fyi" in message
+    assert "AED 409K to AED 481K" not in message
     assert "$192,501" not in message
 
 
@@ -928,7 +955,8 @@ def test_company_salary_for_another_location_is_not_displayed():
     message = flow.build_research_brief_message(job, research)
 
     assert "€88,000" not in message
-    assert "No published range; no Google pay data" in message
+    assert "No employer-published range verified." in message
+    assert "No comparable company salary range verified." in message
 
 
 def test_salary_page_title_does_not_turn_allowance_into_pay():
@@ -944,7 +972,8 @@ def test_salary_page_title_does_not_turn_allowance_into_pay():
     )
     message = flow.build_research_brief_message(sample_job(company="Hantec Trader"), research)
 
-    assert "No published range" in message
+    assert "No employer-published range verified." in message
+    assert "No comparable company salary range verified." in message
     assert "AED 2,500" not in message
 
 
@@ -963,7 +992,8 @@ def test_madrid_research_rejects_aed_default_locale_pay():
         sample_job(company="Huspy", location="Madrid, Spain"), research
     )
 
-    assert "No published range" in message
+    assert "No employer-published range verified." in message
+    assert "No comparable company salary range verified." in message
     assert "AED 250K" not in message
 
 
@@ -982,7 +1012,9 @@ def test_madrid_research_accepts_local_euro_pay_evidence():
         sample_job(company="Huspy", location="Madrid, Spain"), research
     )
 
-    assert "Glassdoor: Madrid average base salary €65,000 per year." in message
+    assert "Company:" in message
+    assert "€65k/year" in message
+    assert "Glassdoor" in message
 
 
 def test_official_compensation_note_is_shown_as_benefits_not_salary():
@@ -1001,7 +1033,8 @@ def test_official_compensation_note_is_shown_as_benefits_not_salary():
 
     message = flow.build_research_brief_message(sample_job(company="TrueForge"), research)
 
-    assert "No published range; no TrueForge pay data" in message
+    assert "No employer-published range verified." in message
+    assert "No comparable company salary range verified." in message
     assert "Benefits:</b> bonus, equity mentioned; no figures." in message
     assert "AED 340k" not in message
 
@@ -1023,7 +1056,8 @@ def test_low_confidence_research_is_actionable_not_generic(monkeypatch):
     assert research.confidence == "Low"
     assert "quick public web/company-page check" not in message
     assert "No independent company evidence" in message
-    assert "No published range; no TrueForge pay data" in message
+    assert "No employer-published range verified." in message
+    assert "No comparable company salary range verified." in message
     assert "Base salary, currency, pay period and bonus/equity terms" in message
 
 
@@ -2785,7 +2819,8 @@ def test_research_dry_run_reads_job_without_creating_state_tables(tmp_path, monk
 
     message = flow.render_research_dry_run("li-1", db_path=db)
 
-    assert "No published range; no TrueForge pay data" in message
+    assert "No employer-published range verified." in message
+    assert "No comparable company salary range verified." in message
     conn = sqlite3.connect(db)
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
@@ -2847,9 +2882,10 @@ def test_spain_research_card_labels_published_market_and_ask(monkeypatch):
     assert research.research["salary"]["basis"] == "published"
     assert research.research["salary"]["ask_amount"] == 68000
     assert "Published: €60,000 - €70,000 a year (SpainJobs.io)" in message
-    assert "Market: €46k–€55k/year (Glassdoor Valencia, talent.com Valencia)" in message
+    assert "Market: €52k/year (Glassdoor Valencia; reported average)" in message
+    assert "Market: €40k–€58k/year (talent.com Valencia)" in message
     assert "Ask: €68,000/year (75th pct of published range)" in message
-    assert "No published range" not in message
+    assert "No employer-published range verified." not in message
     assert len(message) < 900
 
 

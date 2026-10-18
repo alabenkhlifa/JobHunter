@@ -407,7 +407,11 @@ def handle_interested(job_id, callback_query_id=None):
 
     mark_interested(job_id)
     try:
-        research = interest_flow.research_job(job)
+        research_conn = get_db()
+        try:
+            research = interest_flow.research_job(job, conn=research_conn)
+        finally:
+            research_conn.close()
         message = interest_flow.build_research_brief_message(job, research)
     except Exception as exc:
         report_action_failure(callback_query_id, "Research unavailable", "⚠️ The research brief could not be prepared. Retry Interested before Apply.")

@@ -560,6 +560,16 @@ a command while its receipt says it is processing; use the new card when it
 arrives. Keep facts and failures specific; decorative text must not obscure
 what happens next.
 
+Company and salary research must use the structured research result. Keep
+employer wording separate from team/client descriptions, and include the
+posting or official source. Never infer a technology company from role keywords.
+Keep base salary, total compensation and seniority-unspecified company data
+separate. A senior-market proxy for a lead role must be labelled as a proxy;
+the suggested ask is distinct from an employer-published range. Provider
+failures mean lookup incomplete, not that the company has no salary data.
+The cache is bound to the job context; do not reuse results for changed roles,
+employers or locations, or override its retry policy after failed lookups.
+
 1. When the user says they are interested in one or more jobs, resolve each job
    ID from the digest or named posting. For each job run
    `python3 callback_handler.py --interested <job_id>`. This marks interest and
