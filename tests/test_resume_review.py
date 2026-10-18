@@ -1,6 +1,9 @@
 import copy
 import http.client
 import json
+import os
+from pathlib import Path
+import subprocess
 import threading
 from http.server import ThreadingHTTPServer
 
@@ -218,3 +221,25 @@ def test_failed_catalog_validation_is_atomic(store):
     with pytest.raises(ValueError):
         store.save(save_body(changed))
     assert store.read() == original
+
+
+@pytest.mark.skipif(os.environ.get("JOBHUNTER_BROWSER_TESTS") != "1",
+                    reason="requires opt-in JOBHUNTER_BROWSER_TESTS=1, Node Playwright and Chromium")
+def test_browser_skills_headings_and_reordering_preserve_open_sections(http_server, store, source):
+    original = source.read_bytes()
+    state = store.read()
+    state["catalog"]["base"]["skills"]["Delivery"] = ["CI/CD", "Docker"]
+    saved = store.save(save_body(state))
+    preview = store.preview()
+    approved = store.approval({"revision": saved["revision"], "content_digest": preview["content_digest"]})
+    driver = Path(__file__).with_name("browser_resume_review_check.cjs")
+    result = subprocess.run(["node", str(driver), f"http://127.0.0.1:{http_server.server_port}"],
+                            capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    state = store.read()
+    assert state["approvals"] == approved["approvals"]
+    assert source.read_bytes() == original
+    preview = store.preview()
+    assert preview["audit_ok"] and not preview["warnings"]
+    assert 'Platform & "Architecture"' in preview["text"]
+    assert preview["content_digest"] != approved["approvals"][-1]["digest"]

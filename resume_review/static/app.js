@@ -10,6 +10,7 @@ const set = (object,path,value) => {at(object,path.slice(0,-1))[path.at(-1)]=val
 const fieldName = path => path.map(label).join(' / ');
 let state, section='flavor', projectId, preview, requestPath=null, createKind, zoom=0;
 let dirty=false, generation=0, saveTimer, saving=null, rendering=0, conflict=false, localAction=false;
+const detailStates=new Map();
 
 async function api(path, body) {
   const options = body === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-Review-Client':'studio'},body:JSON.stringify(body)};
@@ -28,7 +29,8 @@ function toast(message){$('#toast').textContent=message;$('#toast').hidden=false
 function flavor(){return state.catalog.flavors.find(x=>x.id===state.selection.flavor_id);}
 function variant(){return state.catalog.variants.find(x=>x.id===state.selection.variant_id);}
 function field(path,title,{multiline=false,rows=3,hint='',className=''}={}) {
-  const value=at(state.catalog,path), id='f-'+path.join('-').replace(/[^a-z0-9-]/gi,'');
+  const idPath=path[0]==='base'&&path[1]==='skills'?[...path.slice(0,2),Object.keys(state.catalog.base.skills).indexOf(path[2]),...path.slice(3)]:path;
+  const value=at(state.catalog,path), id='f-'+idPath.join('-').replace(/[^a-z0-9-]/gi,'');
   const input = multiline ? `<textarea id="${id}" aria-label="${esc(title)}" data-path="${pathAttr(path)}" rows="${rows}" class="${className}">${esc(value)}</textarea>` : `<input id="${id}" aria-label="${esc(title)}" data-path="${pathAttr(path)}" value="${esc(value)}">`;
   return `<div class="field"><div class="field-top"><label for="${id}">${esc(title)}</label><button class="request-text" data-request="${pathAttr(path)}" title="Request a change to this text">↗ Request change</button></div>${input}${hint?`<div class="field-footer"><span>${esc(hint)}</span><span data-count-for="${id}">${String(value).length} characters</span></div>`:''}</div>`;
 }
@@ -72,11 +74,15 @@ function renderNav(){
   if(preview && state.approvals.some(x=>x.digest===preview.content_digest)&&!dirty){badge.textContent='Approved';badge.className='badge approved';}
 }
 function render(){
+  document.querySelectorAll('#editor-content details[data-details-key]').forEach(details=>detailStates.set(details.dataset.detailsKey,details.open));
+  const scroll=$('.editor').scrollTop;
   renderNav();
   const titles={flavor:'Headline & summary',variant:'Projects & page limit',projects:'Project wording',sidebar:'Contact & sidebar',changes:'Changes & requests'};
   $('#editor-title').textContent=titles[section];
   $('#editor-content').innerHTML=({flavor:flavorEditor,variant:variantEditor,projects:projectEditor,sidebar:sidebarEditor,changes:changesEditor}[section])();
+  document.querySelectorAll('#editor-content details[data-details-key]').forEach(details=>{if(detailStates.has(details.dataset.detailsKey))details.open=detailStates.get(details.dataset.detailsKey);});
   document.querySelectorAll('textarea[data-path]').forEach(textarea=>{if(!textarea.classList.contains('summary')){textarea.style.height='auto';textarea.style.height=Math.min(350,Math.max(76,textarea.scrollHeight+3))+'px';}});
+  $('.editor').scrollTop=scroll;
 }
 function flavorEditor(){
   const current=flavor();if(!current)return '';
@@ -120,21 +126,45 @@ function arrayEditor(path,items,title){
   return items.map((value,i)=>`<div class="list-item">${typeof value==='string'?field([...path,i],`${title} ${i+1}`,{multiline:true,rows:3}):genericEditor([...path,i],value)}<div class="list-tools"><button data-move="${pathAttr([...path,i])}" data-direction="-1" aria-label="Move ${title} ${i+1} up">↑ Move up</button><button data-move="${pathAttr([...path,i])}" data-direction="1" aria-label="Move ${title} ${i+1} down">↓ Move down</button><button data-remove="${pathAttr([...path,i])}" ${items.length===1?'disabled':''}>Remove</button></div></div>`).join('')+`<button class="button small" data-add="${pathAttr(path)}">＋ Add ${esc(title.toLowerCase())}</button>`;
 }
 function genericEditor(path,value){
+  if(path.length===2&&path[0]==='base'&&path[1]==='skills')return skillsEditor(value);
   if(typeof value==='string')return field(path,label(path.at(-1)),{multiline:value.length>100,rows:3});
   if(typeof value==='boolean')return `<div class="project-check"><input type="checkbox" data-path="${pathAttr(path)}" ${value?'checked':''} id="flag-${esc(path.join('-'))}"><label for="flag-${esc(path.join('-'))}">${esc(label(path.at(-1)))}</label></div>`;
   if(typeof value==='number')return `<div class="field"><label>${esc(label(path.at(-1)))}<input type="number" data-number data-path="${pathAttr(path)}" value="${value}"></label></div>`;
   if(Array.isArray(value))return arrayEditor(path,value,'Entry');
   if(value&&typeof value==='object')return Object.entries(value).map(([key,item])=>{
     if(typeof item==='string'||typeof item==='number'||typeof item==='boolean')return genericEditor([...path,key],item);
-    return `<details open><summary>${esc(label(key))}</summary><div class="detail-body">${genericEditor([...path,key],item)}</div></details>`;
+    return `<details open data-details-key="${pathAttr([...path,key])}"><summary>${esc(label(key))}</summary><div class="detail-body">${genericEditor([...path,key],item)}</div></details>`;
   }).join('');
   return '';
+}
+function skillsEditor(skills){
+  return Object.entries(skills).map(([heading,items],i)=>`<details open data-details-key="${pathAttr(['base','skills',i])}"><summary>${esc(heading)}</summary><div class="detail-body"><div class="field"><div class="field-top"><label for="skill-heading-${i}">Skill group heading</label></div><input id="skill-heading-${i}" aria-label="Skill group heading ${i+1}" data-skill-heading="${i}" value="${esc(heading)}" required><p class="raw-error" data-heading-error role="alert" hidden></p></div>${arrayEditor(['base','skills',heading],items,'Skill')}</div></details>`).join('');
+}
+function renameSkillGroup(target){
+  const skills=state.catalog.base.skills,entries=Object.entries(skills),i=Number(target.dataset.skillHeading);
+  const before=entries[i][0],heading=target.value.trim(),details=target.closest('details'),error=details.querySelector('[data-heading-error]');
+  const message=!heading?'Enter a skill group heading.':heading!==before&&Object.hasOwn(skills,heading)?'A skill group already uses this heading.':'';
+  target.setCustomValidity(message);error.textContent=message;error.hidden=!message;
+  if(message){target.setAttribute('aria-invalid','true');$('#save-status').textContent='Skill group heading not saved';return;}
+  target.removeAttribute('aria-invalid');
+  if(heading===before){$('#save-status').textContent=dirty?'Saving changes…':'All changes saved ✓';return;}
+  state.catalog.base.skills=Object.fromEntries(entries.map(([key,items],index)=>[index===i?heading:key,items]));
+  details.querySelector('summary').textContent=heading;
+  const attributes=['data-path','data-request','data-move','data-add','data-remove'];
+  details.querySelectorAll(attributes.map(attribute=>`[${attribute}]`).join(',')).forEach(element=>{
+    for(const attribute of attributes){
+      if(!element.hasAttribute(attribute))continue;
+      const path=JSON.parse(element.getAttribute(attribute));
+      if(path[0]==='base'&&path[1]==='skills'&&path[2]===before){path[2]=heading;element.setAttribute(attribute,JSON.stringify(path));}
+    }
+  });
+  markDirty();
 }
 function sidebarEditor(){
   const base=state.catalog.base;
   return `<p class="intro">Shared content across every flavor and variant. All contact fields, skills, certifications, links, education and teaching entries are editable here.</p>`+
-    Object.entries(base).map(([key,value])=>`<details ${['name','email','phone','location'].includes(key)?'open':''}><summary>${esc(label(key))}</summary><div class="detail-body">${genericEditor(['base',key],value)}</div></details>`).join('')+
-    `<details><summary>Advanced: complete shared content</summary><div class="detail-body"><p class="hint">Add categories, optional fields or entries using the renderer's public JSON structure. Apply explicitly after editing.</p><textarea id="sidebar-raw" aria-label="Shared sidebar JSON">${esc(JSON.stringify(base,null,2))}</textarea><div class="stack-buttons"><button class="button small" id="apply-sidebar-json">Apply shared content</button></div></div></details>`;
+    Object.entries(base).map(([key,value])=>`<details data-details-key="${pathAttr(['base',key])}" ${['name','email','phone','location'].includes(key)?'open':''}><summary>${esc(label(key))}</summary><div class="detail-body">${genericEditor(['base',key],value)}</div></details>`).join('')+
+    `<details data-details-key="sidebar-raw"><summary>Advanced: complete shared content</summary><div class="detail-body"><p class="hint">Add categories, optional fields or entries using the renderer's public JSON structure. Apply explicitly after editing.</p><textarea id="sidebar-raw" aria-label="Shared sidebar JSON">${esc(JSON.stringify(base,null,2))}</textarea><div class="stack-buttons"><button class="button small" id="apply-sidebar-json">Apply shared content</button></div></div></details>`;
 }
 function differences(oldValue,newValue,path=[]){
   if(JSON.stringify(oldValue)===JSON.stringify(newValue))return [];
@@ -226,7 +256,9 @@ function duplicate(kind){
 }
 
 document.addEventListener('input',event=>{
-  const target=event.target;if(!target.dataset.path)return;
+  const target=event.target;
+  if(target.hasAttribute('data-skill-heading')){renameSkillGroup(target);return;}
+  if(!target.dataset.path)return;
   const path=JSON.parse(target.dataset.path);
   set(state.catalog,path,target.type==='checkbox'?target.checked:target.hasAttribute('data-number')?Number(target.value):target.value);
   const counter=document.querySelector(`[data-count-for="${target.id}"]`);if(counter)counter.textContent=target.value.length+' characters';
@@ -234,6 +266,7 @@ document.addEventListener('input',event=>{
 });
 document.addEventListener('change',event=>{
   const target=event.target;
+  if(target.hasAttribute('data-skill-heading')){target.value=target.value.trim();renameSkillGroup(target);}
   if(target.id==='project-picker'){projectId=target.value;render();}
   if(target.dataset.projectToggle){
     const id=target.dataset.projectToggle;
