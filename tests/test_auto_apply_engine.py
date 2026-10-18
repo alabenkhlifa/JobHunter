@@ -134,6 +134,87 @@ def test_source_apply_control_and_search_form_are_not_an_application_form():
     assert not search.verifies_application_for("Staff Software Engineer (UAE)")
 
 
+def _final_review_form():
+    return {
+        **_rendered_form(), "inputs": [],
+        "forms": [{"id": "form-0", "text": "By clicking below you will submit your application, "
+                   "please make any changes before clicking submit."}],
+        "buttons": [{"text": "PREVIOUS", "type": "submit", "form": "form-0"},
+                    {"text": "SUBMIT APPLICATION", "type": "submit", "form": "form-0", "disabled": False}],
+    }
+
+
+def test_input_free_final_review_verifies_exact_role_and_employer():
+    page = inspect_page(FakeClient(_final_review_form()))
+    assert page.safe_to_continue
+    assert page.verifies_application_for("Staff Software Engineer (UAE)", "Ode with Anthropic")
+    assert not page.verifies_application_for("Other Role", "Ode with Anthropic")
+    assert not page.verifies_application_for("Staff Software Engineer (UAE)", "Another Employer")
+
+
+@pytest.mark.parametrize("change", ["no_notice", "no_form", "different_form", "disabled_submit",
+                                  "continue_only", "login_fields", "challenge"])
+def test_final_review_requires_notice_and_final_control_in_input_free_form(change):
+    payload = _final_review_form()
+    if change == "no_notice": payload["forms"][0]["text"] = "Apply for this job"
+    if change == "no_form": payload["forms"] = []
+    if change == "different_form": payload["buttons"][-1]["form"] = "another"
+    if change == "disabled_submit": payload["buttons"][-1]["disabled"] = True
+    if change == "continue_only": payload["buttons"][-1]["text"] = "Continue"
+    if change == "login_fields":
+        payload["inputs"] = [{"tag": "input", "type": "password", "form": "form-0"}]
+    if change == "challenge": payload["challenge_visible"] = True
+    page = inspect_page(FakeClient(payload))
+    assert not page.safe_to_continue
+    if change != "challenge":
+        assert not page.verifies_application_for("Staff Software Engineer (UAE)", "Ode with Anthropic")
+
+
+def test_approved_final_review_submit_records_attempt(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    _job_db(db)
+    payload = _final_review_form()
+    client = FakeClient(payload)
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), tracker_sync=False, evidence_enabled=False,
+                                        expected_page_url=payload["url"]), client)
+    monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
+    engine.click_submit("li-4472734248", '[id="submit"]', approved=True)
+    assert len(client.clicked) == 1
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage FROM applications").fetchone()[0] == "submission_attempted"
+
+
+def _cv_first_form():
+    return {"url": "https://careers.example.test/application/tech-leader",
+            "title": "Applying to Tech Leader | BNP Paribas", "text": "Select your resume",
+            "headings": ["BNP Paribas", "TECH LEADER", "CHOOSE YOUR APPLICATION METHOD"],
+            "inputs": [{"tag": "input", "type": "text", "label": "EMAIL", "form": "login"},
+                       {"tag": "input", "type": "password", "label": "PASSWORD", "form": "login"},
+                       {"tag": "input", "type": "file", "label": "Please upload your CV", "id": "resumeFile",
+                        "form": "cv", "required": True, "value_present": False}],
+            "buttons": [{"text": "LOG IN", "type": "submit", "form": "login"},
+                        {"text": "Continue", "type": "submit", "form": "cv"}]}
+
+
+def test_cv_only_step_verifies_exact_role_and_company_without_login_fields():
+    page = inspect_page(FakeClient(_cv_first_form()))
+    assert page.verifies_application_for("Tech Leader", "BNP Paribas")
+    assert not page.verifies_application_for("Other Role", "BNP Paribas")
+    assert not page.verifies_application_for("Tech Leader", "Another Bank")
+    assert page.missing_required == ["Please upload your CV"]
+    assert not page.safe_to_continue
+
+
+@pytest.mark.parametrize("change", ["no_cv_control", "disabled_cv", "login_submit_only", "unrelated_file"])
+def test_cv_method_chooser_and_login_cannot_verify_an_upload_form(change):
+    payload = _cv_first_form()
+    if change == "no_cv_control": payload['inputs'].pop()
+    if change == "disabled_cv": payload['inputs'][-1]['disabled'] = True
+    if change == "login_submit_only": payload['buttons'].pop()
+    if change == "unrelated_file": payload['inputs'][-1].update(label='Portfolio attachment', id='attachment')
+    assert not inspect_page(FakeClient(payload)).verifies_application_for("Tech Leader", "BNP Paribas")
+
+
 def test_wrong_role_redirect_cannot_be_recorded_as_draft_inspected(tmp_path):
     db = tmp_path / "jobs.db"
     _job_db(db)

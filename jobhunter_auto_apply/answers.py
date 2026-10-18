@@ -37,6 +37,7 @@ ANSWER_KEYS = (
     "location", "city", "country", "salary_expectation", "salary_currency", "notice_period",
     "work_authorization", "requires_visa_sponsorship", "citizenship",
     "allow_contact_for_other_vacancies", "languages", "english_level", "years_experience",
+    "gender", "preferred_language", "data_sharing_scope",
     "willing_to_relocate", "current_company", "current_title", "referral_source",
     "consent", "decline_to_answer",
 )
@@ -97,8 +98,14 @@ _SENSITIVE_RX = _rx(r"criminal|convict|felon|offen[cs]e|background (check|screen
                     r"|antecedentes|delito|medical|medic[oa]|health condition|enfermedad|drug (test|screen)"
                     r"|\bsalud\b")
 _EEO_RX = _rx(r"\b(gender|sex|sexual orientation|pronouns?|ethnic\w*|race|racial|veteran|disabilit\w*|disabled"
-              r"|lgbt\w*|transgender|genero|sexo|etnia|origen etnico|raza|discapacidad|minusvalia"
+              r"|lgbt\w*|transgender|genero|genre|sexo|etnia|origen etnico|raza|discapacidad|minusvalia"
               r"|orientacion sexual|diversity|diversidad)\b")
+_GENDER_RX = _rx(r"\b(gender|genero|genre)\b")
+_OTHER_EEO_RX = _rx(r"\b(sex|sexual|pronouns?|ethnic\w*|race|racial|veteran|disabilit\w*|disabled"
+                     r"|lgbt\w*|transgender|sexo|etnia|raza|discapacidad|minusvalia|diversity|diversidad)\b")
+_DATA_SHARING_RX = _rx(r"\b(shar(?:e|ing)\b.{0,40}\b(data|profile|information)"
+                       r"|(data|profile|information)\b.{0,40}\b(sharing|shared)"
+                       r"|compartir\b.{0,40}\b(datos|perfil)|partag\w*\b.{0,40}\b(donnees|profil))\b")
 _DECLINE_RX = _rx(r"prefer not|decline|do not wish|don'?t wish|rather not|not (to )?(say|disclose|answer)"
                   r"|prefiero no|no deseo|no quiero (responder|decir|contestar)|sin especificar|no especificar")
 _NO_AI_RX = _rx(r"without (the )?(use of |using |help of )?(ai|a\.i\.|artificial intelligence|chat ?gpt|llms?|generative ai)\b"
@@ -132,6 +139,10 @@ _YES_NO_KEYS = {"allow_contact_for_other_vacancies", "requires_visa_sponsorship"
 
 # Ordered: earlier patterns win. Keys refer to `build_answers` output.
 _KEY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("preferred_language", _rx(
+        r"preferred (communication |contact |correspondence )?language|language preference"
+        r"|language (for|of) (communication|correspondence)|idioma preferido|lengua preferida"
+        r"|langue preferee|langue de (communication|correspondance)")),
     ("allow_contact_for_other_vacancies", _rx(
         r"(other|future|similar) (vacanc|position|opportunit|role|opening|job)|talent (pool|community|network)"
         r"|otras (ofertas|vacantes|posiciones|oportunidades)|futur[ao]s? (procesos|ofertas|vacantes|oportunidades)"
@@ -175,6 +186,7 @@ _KEY_KINDS = {
     "work_authorization": "yes_no", "requires_visa_sponsorship": "yes_no",
     "allow_contact_for_other_vacancies": "yes_no", "willing_to_relocate": "yes_no",
     "consent": "checkbox", "decline_to_answer": "choice", "salary_currency": "choice",
+    "gender": "choice", "preferred_language": "choice", "data_sharing_scope": "choice",
 }
 
 
@@ -331,6 +343,10 @@ def build_answers(profile: dict[str, Any] | None, *, research: dict[str, Any] | 
     put("citizenship", defaults.get("citizenship"), "application_defaults")
     put("allow_contact_for_other_vacancies", _yes_no(defaults.get("allow_contact_for_other_vacancies")),
         "application_defaults")
+    # Explicit private preferences only: never derive these from a name, CV,
+    # spoken-language proficiency, or consent to contact about future jobs.
+    for key in ("gender", "preferred_language", "data_sharing_scope"):
+        put(key, defaults.get(key), "application_defaults")
 
     languages = _languages_text(profile)
     put("languages", languages, "profile")
@@ -438,6 +454,14 @@ def classify_field(field: dict[str, Any], page_text: str = "") -> dict[str, Any]
         return _result("free_text", required, hard_stop=NO_AI_ANSWER if required else None)
     if _COVER_RX.search(text):
         return _result("cover_letter", required, "cover_letter", COVER_LETTER_REQUIRED if required else None)
+    if _DATA_SHARING_RX.search(text):
+        # A yes/no checkbox does not describe the scope of data sharing.
+        # Do not turn an opening-only preference into broader consent.
+        if ftype == "checkbox" and len(options) < 2:
+            return _result("privacy", required, hard_stop=unanswerable(label) if required else None)
+        if not options and tag != "select" and ftype != "radio":
+            return _result("privacy", required, hard_stop=unanswerable(label) if required else None)
+        return _result("privacy", required, "data_sharing_scope")
     if _CURRENCY_RX.search(text) and (not _SALARY_RX.search(text)
                                       or (options and not any(_numbers(option) for option in options))):
         if tag == "select" or options:
@@ -469,7 +493,7 @@ def classify_field(field: dict[str, Any], page_text: str = "") -> dict[str, Any]
         if key in {"first_name", "last_name", "full_name", "city", "country", "location"} \
                 and _COMPANYISH_RX.search(text):
             continue
-        if key == "languages" and re.search(r"programming|programacion|framework", text):
+        if key in {"languages", "preferred_language"} and re.search(r"programming|programacion|framework", text):
             continue
         if key == "country" and re.search(r"country code|codigo (de )?pais|prefijo", text):
             continue
@@ -550,6 +574,27 @@ def _choose_numeric(options: list[str], value: float) -> str | None:
     return None
 
 
+_CURRENT_OPENING_RX = _rx(
+    r"only (?:for )?(?:the |this |my )?(?:current )?(?:opening|position|role|job|vacancy|application)"
+    r"(?: i am applying (?:to|for))?"
+    r"|(?:this|the current) (?:opening|position|role|job|vacancy|application) only"
+    r"|solo para (?:esta|la actual) (?:vacante|oferta|solicitud|posicion)"
+    r"|seulement pour (?:ce poste|cette offre|cette candidature)"
+)
+
+
+def _english_locale(value: Any) -> str | None:
+    """Recognize English US and generic English, without choosing another locale."""
+    text = re.sub(r"[^a-z0-9]+", " ", _norm(value)).strip()
+    if text in {"english", "en", "ingles", "anglais"}:
+        return ""
+    if text in {"en us", "american english"} or re.fullmatch(
+        r"(?:english|ingles|anglais) (?:us|usa|united states|eeuu|estados unidos|etats unis)(?: en us)?", text
+    ):
+        return "us"
+    return None
+
+
 def _choose_option(options: list[str], value: Any, answer_key: str | None) -> str | None:
     if not options:
         return None
@@ -564,6 +609,27 @@ def _choose_option(options: list[str], value: Any, answer_key: str | None) -> st
     for norm, raw in usable:
         if norm == target:
             return raw
+    if answer_key == "gender":
+        aliases = (
+            {"male", "man", "masculino", "hombre", "masculin", "homme"},
+            {"female", "woman", "femenino", "mujer", "feminin", "femme"},
+        )
+        matches = next((group for group in aliases if target in group), {target})
+        # Never use substring matching here: "male" is contained in "female".
+        return next((raw for norm, raw in usable if norm in matches), None)
+    if answer_key == "preferred_language":
+        locale = _english_locale(value)
+        if locale is None:
+            return None
+        for candidate in (["us", ""] if locale == "us" else [""]):
+            match = next((raw for _, raw in usable if _english_locale(raw) == candidate), None)
+            if match is not None:
+                return match
+        return None
+    if answer_key == "data_sharing_scope":
+        if target != "current_opening":
+            return None
+        return next((raw for norm, raw in usable if _CURRENT_OPENING_RX.fullmatch(norm)), None)
     if target in {"yes", "no"}:
         words = _YES if target == "yes" else _NO
         for norm, raw in usable:
@@ -710,6 +776,12 @@ def plan_fields(inspection: Any, answers: dict[str, dict[str, Any]] | None) -> d
         if str(field.get("type") or "").casefold() in {"hidden", "submit", "button", "reset", "image", "search"}:
             continue
         result = classify_field(field, page_text)
+        if (result["kind"] == "eeo" and _GENDER_RX.search(_field_text(field))
+                and not _OTHER_EEO_RX.search(_field_text(field))
+                and _real((answers.get("gender") or {}).get("value")) is not None):
+            # A confirmed preference overrides the default EEO decline/skip
+            # only for the same attribute, never for other diversity questions.
+            result = _result("eeo", result["required"], "gender")
         label = _label(field)
         required = result["required"]
         key = result["answer_key"]

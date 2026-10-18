@@ -150,18 +150,47 @@ class PageInspection:
                              " ".join(str(item.get(key) or "") for key in ("label", "name", "id")), re.I)
             )
         )]
-        editable = len(applicant_fields) >= 2 and any(
-            str(item.get("type") or "").casefold() in {"tel", "file"}
-            or re.search(r"\b(?:name|phone|resume|curriculum vitae|cv)\b",
-                         " ".join(str(item.get(key) or "") for key in ("label", "name", "id")), re.I)
+        def submit_control(item):
+            return (str(item.get("type") or "").casefold() == "submit"
+                    or _SUBMIT_LABEL_RX.fullmatch(" ".join(str(item.get("text") or "").split())))
+
+        forms: dict[str, list[dict]] = {}
+        for item in applicant_fields:
+            forms.setdefault(item.get("form") or "", []).append(item)
+        editable = any(
+            len(fields) >= 2
+            and any(str(item.get("type") or "").casefold() in {"tel", "file"}
+                    or re.search(r"\b(?:name|phone|resume|curriculum vitae|cv)\b",
+                                 " ".join(str(item.get(key) or "") for key in ("label", "name", "id")), re.I)
+                    for item in fields)
+            and any((button.get("form") or "") == form and submit_control(button) for button in self.buttons)
+            for form, fields in forms.items()
+        )
+        # Some ATS flows collect just a CV before showing personal details.
+        # Its continuation must belong to that form, not an adjacent login form.
+        resume_first = any(
+            str(item.get("type") or "").casefold() == "file"
+            and re.search(r"\b(?:resume|curriculum vitae|cv)\b", str(item.get("label") or ""), re.I)
+            and item.get("form")
+            and any(button.get("form") == item["form"] and submit_control(button) for button in self.buttons)
             for item in applicant_fields
         )
-        submit = any(
-            str(item.get("type") or "").casefold() == "submit"
-                or _SUBMIT_LABEL_RX.fullmatch(" ".join(str(item.get("text") or "").split()))
-            for item in self.buttons
+        # Some ATS flows end with an input-free confirmation step. Require an
+        # explicit final-submit notice and enabled final control in that same
+        # rendered form; a source Apply link or a login button is insufficient.
+        final_review = any(
+            form.get("id") and _FINAL_REVIEW_RX.search(str(form.get("text") or ""))
+            and not any(item.get("form") == form["id"]
+                        and not item.get("disabled")
+                        and str(item.get("type") or "").casefold() not in
+                        {"hidden", "submit", "button", "reset", "image"}
+                        for item in self.inputs)
+            and any(button.get("form") == form["id"] and not button.get("disabled")
+                    and _FINAL_SUBMIT_LABEL_RX.fullmatch(" ".join(str(button.get("text") or "").split()))
+                    for button in self.buttons)
+            for form in getattr(self, "forms", [])
         )
-        return editable and submit
+        return bool(editable or resume_first or final_review)
 
     def verifies_application_for(self, job_title: str, job_company: str | None = None,
                                  job_location: str | None = None) -> bool:
@@ -182,6 +211,14 @@ _SUBMIT_LABEL_RX = re.compile(
     r"|enviar(?: (?:mi |la |tu )?(?:solicitud|candidatura|cv|curr[ií]culum))?|aplicar(?: ahora| a (?:esta )?oferta)?"
     r"|postular(?:me|se)?(?: ahora)?|post[uú]late(?: ahora)?|inscribirme|inscribirse|inscr[ií]bete"
     r"|solicitar(?: empleo)?|presentar candidatura|continuar|siguiente)", re.I)
+
+_FINAL_SUBMIT_LABEL_RX = re.compile(
+    r"(?:submit|send) (?:my |your )?application|enviar (?:mi |la |tu )?(?:solicitud|candidatura)"
+    r"|presentar candidatura", re.I)
+_FINAL_REVIEW_RX = re.compile(
+    r"\bby clicking (?:below|submit) you will submit your application\b"
+    r"|\breview (?:your|the) application before (?:submitting|submission)\b"
+    r"|\brevisa (?:tu|la) (?:solicitud|candidatura) antes de enviarla\b", re.I)
 
 _APPLICATION_HEADING_PREFIXES = (
     ("apply", "for"), ("application", "for"), ("job", "application", "for"),
@@ -431,6 +468,10 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     const aria = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || el.id || '';
     return aria.trim();
   };
+  const presented = (el) => visible(el) || (
+    el.type === 'file' && !el.matches(':disabled') && [...(el.labels || [])].some(visible)
+  );
+  const formFor = (el) => el.form ? (el.form.id || `form-${[...document.forms].indexOf(el.form)}`) : '';
   const questionFor = (el) => { try {
     const group = el.closest('fieldset, [role=radiogroup], [role=group]');
     if (group) {
@@ -463,17 +504,22 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       .filter(el => visible(el) && !el.closest('aside, nav, [class*="recommend" i], [class*="similar" i], [class*="related" i]'))
       .slice(0, 20)
       .map(el => (el.innerText || '').trim().slice(0, 200)).filter(Boolean),
-    inputs: [...document.querySelectorAll('input, select, textarea')].filter(visible).slice(0, 80).map((el) => ({
+    forms: [...document.forms].filter(visible).slice(0, 20).map(el => ({
+      id: el.id || `form-${[...document.forms].indexOf(el)}`,
+      text: (el.innerText || '').trim().slice(0, 4000)
+    })),
+    inputs: [...document.querySelectorAll('input, select, textarea')].filter(presented).slice(0, 80).map((el) => ({
       tag: el.tagName.toLowerCase(),
       type: el.type || '',
       id: el.id || '',
       name: el.name || '',
       label: labelFor(el),
+      form: formFor(el),
       question: questionFor(el),
       autocomplete: el.getAttribute('autocomplete') || '',
       value: (el.type === 'radio' || el.type === 'checkbox') ? (el.value || '') : '',
-      disabled: !!el.disabled,
-      required: !!el.required,
+      disabled: !!el.disabled || el.matches(':disabled'),
+      required: !!el.required || el.getAttribute('aria-required') === 'true',
       value_present: valuePresent(el),
       invalid: el.getAttribute('aria-invalid') === 'true' || !el.checkValidity(),
       options: el.tagName === 'SELECT' ? [...el.options].slice(0, 25).map(o => o.text.trim()).filter(Boolean) : []
@@ -483,7 +529,8 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       type: el.type || '',
       id: el.id || '',
       name: el.name || '',
-      disabled: !!el.disabled
+      form: formFor(el),
+      disabled: !!el.disabled || el.matches(':disabled')
     })),
     links: [...document.querySelectorAll('a[href]')].filter(visible).slice(0, 80).map((el) => ({
       text: (el.innerText || el.getAttribute('aria-label') || '').trim().slice(0, 120),
@@ -544,6 +591,9 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     # Full text for per-field classification; deliberately not a dataclass field
     # so asdict()/JSON output of existing callers is unchanged.
     inspection.page_text = text
+    # Form-local text verifies an input-free final step without expanding the
+    # CLI's public inspection schema or exposing duplicate applicant details.
+    inspection.forms = data.get("forms") or []
     return inspection
 
 

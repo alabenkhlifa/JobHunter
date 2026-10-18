@@ -178,7 +178,7 @@ CONFIG = {
     "sponsored_score_threshold": 35,
     # Stamped on every verdict. Bump it when the review rules in the skill
     # change: a hold judged under an older rubric competes again as unseen.
-    "review_rubric": "2026-10-01",
+    "review_rubric": "2026-10-18-language-uncertainty",
     # Sources are chosen per profile from its configured locations: each
     # one searches only the countries it covers (source_countries), so
     # removing Spain from the markets stops the Spain boards and adding Dubai
@@ -189,6 +189,9 @@ CONFIG = {
     # text for the model; the code never parses it.
     "review_preferences": {
         "languages": ["French", "English", "Arabic"],
+        "language_uncertainty_policy": "An unclear or unstated Spanish-language requirement is informational "
+                                       "only. Do not hold or reject on that uncertainty alone; assess the "
+                                       "role against the other criteria.",
         "target_roles": ["Software Architect", "Application/Cloud Solutions Architect (hands-on)",
                          "Tech Lead", "Senior Backend Engineer"],
         "primary_stacks": ["Java", "Spring Boot", "Node.js/NestJS", "TypeScript"],

@@ -39,6 +39,9 @@ before selecting the jobs actually sent.
 - **Notifications**: Telegram Bot API (HTML parse mode)
 - **Designed for**: local/Hermes operation with optional cron and Chromium CDP for browser apply flows
 
+- Reuse confirmed private `application_defaults` before asking repeated form questions. The answer planner supports `gender` (explicit choice only), `preferred_language` (for example `en_US`, separate from spoken-language proficiency), and `data_sharing_scope` (`current_opening` means only the opening being applied to). Match the question's meaning and available choices; never infer a demographic answer or broaden sharing when the narrow option is absent. Contact about future vacancies is a separate preference.
+- When the owner confirms reusable answers or asks to remember answers from a reviewed form, merge stable preferences with `resume_refiner.atomic_update_profile` (backup, preserve other fields), and cache the exact reusable question with `scraper.cache_application_answer(..., confirmed=True)`. Keep provenance and application-specific answers in ignored `data/application-answers/<job_id>.json`. Referral sources, employer-specific prose and acceptance of that site's terms stay scoped to that application; never turn them into global defaults. Passwords, verification codes and tokens never belong in the profile or answer cache; ATS passwords stay in the encrypted credential vault.
+
 ## Dedicated application mailbox
 
 - Use `jobhunter_integrations.gmail_auth check --refresh` to verify the configured jobs mailbox and offline access. Do not infer authorization from a browser login or the presence of a token file. Setup and recovery are documented in `setup.md`; no Himalaya is required.
@@ -129,6 +132,45 @@ Each refined experience has a stable `id`. Each `evidence_bank` item references 
 Do not change confirmation or visibility flags to make a fact eligible. Ask the user instead.
 
 ### Resume generation
+
+An enabled `resume_blocks` catalog takes priority over blueprints and legacy
+variants. Its Software Engineer flavor covers Senior Backend Engineer and
+Senior Software Engineer. The catalog stores exact approved headlines,
+summaries and complete project blocks. Never draft a replacement summary,
+rank or trim bullets, add projects, or infer a flavor from the job title.
+Draft flavors stay unavailable until their wording is approved. Read the active
+catalog for the approved Software Engineer and Architect variants; do not hardcode
+page choices or infer a selection. Variant-specific `base_overrides` and
+`project_overrides` apply only within their containing flavor and variant. Use
+the effective approved project block and preserve the variant default project
+order when projects are toggled. A draft shared project does not authorize its
+wording; only its separately confirmed variant override may be used.
+
+After company research, Interested automatically opens the Telegram picker:
+flavor, page limit, then projects. Apply reopens the picker when needed. Each project button toggles its entire fixed block. Generate
+runs only after the owner confirms that selection. `resume_choice` controls
+are job-bound, expire and become invalid after use or a newer card. Use the
+latest card; never manufacture callbacks or bypass the picker with inferred IDs.
+`python callback_handler.py --apply <job_id>` opens the same picker for text
+requests. An unattended run without an explicit selection must hand the job
+back for the owner's choice. Submission approval remains a separate step.
+
+The renderer preserves all selected wording. It may compact spacing; an
+oversize selection asks for fewer projects or another page limit. It records
+actual page count, `layout.main_fills` and `layout.page_two_sparse` in the
+manifest. If page two is below half full, tell the owner and show every page
+before Proceed. A two-page limit can produce a single page. Never add filler.
+
+Add later approvals to the private catalog without changing existing approved
+wording. `tools/import_resume_blocks.py` can seed a catalog from a reviewed
+renderer JSON and its matching PDF (dry-run by default, backup on `--apply`).
+It verifies text, font, geometry and link parity before importing. After the
+owner approves every final PDF, `tools/apply_approved_resume_catalog.py` applies
+the reviewed private catalog with explicit catalog/profile checksums, a private
+backup and an atomic write. Its default is dry-run. Preserve all non-catalog
+profile fields and existing approved PDF artifacts.
+
+For profiles without an enabled fixed catalog, the following earlier paths apply.
 
 When the profile holds candidate-confirmed `resume_blueprints`, the code builds
 every resume (`resume_pipeline.py`): it picks the blueprint for the posting's
@@ -272,7 +314,9 @@ employer 12, freshness 8.
    Spanish`, the same rule as German and Italian. "No Spanish required",
    "Spanish is a plus", "English or Spanish" and "Spanish market/company/
    payroll" are not barriers; a bare "Spanish required" without a speaking
-   or level context is left to the reviewer. A board's own note is read the
+   or level context is not a fluency barrier. An unclear or unstated Spanish
+   requirement is informational only and cannot alone cause a hold or rejection.
+   A board's own note is read the
    same way: "board: fluent Spanish required", "board: ad written in Spanish"
    (SpainJobs.io shows Spanish ads translated into English, so the body rule
    cannot see them) or "board: Turkish required" knock the posting out.
@@ -356,8 +400,10 @@ For each candidate job, the scraper fetches the full description and extracts:
    English-speaking board, or a board's `language_requirement` note such as
    "no Spanish required" is a claim, not evidence that Spanish is optional;
    SpainJobs.io translates Spanish ads into English. Reject a
-   posting that requires fluent Spanish for the job; hold one where the
-   requirement is unclear and say so in the reason. Salary: only an
+   posting that explicitly requires fluent Spanish for the job. An unclear or
+   unstated Spanish requirement is informational only: note it when useful,
+   but do not hold, reject, or defer a role on that uncertainty alone. Continue
+   assessing the other criteria. Salary: only an
    employer-published figure counts. The boards' estimates are never stored,
    and an aggregator's estimate must never be reported as the employer's.
    The same job often appears on several boards and on LinkedIn; collection
@@ -506,20 +552,30 @@ For each candidate job, the scraper fetches the full description and extracts:
 
 ### Interested, Apply, and Proceed are separate decisions
 
+Use short Telegram messages with a clear emoji heading, blank lines between
+sections and bold labels. Acknowledge received commands immediately (for
+example, “✅ Received” followed by the action being processed). The gateway
+removes accepted CTA keyboards and sends a persistent receipt. Do not repeat
+a command while its receipt says it is processing; use the new card when it
+arrives. Keep facts and failures specific; decorative text must not obscure
+what happens next.
+
 1. When the user says they are interested in one or more jobs, resolve each job
    ID from the digest or named posting. For each job run
    `python3 callback_handler.py --interested <job_id>`. This marks interest and
    sends the same research card as the Telegram Interested button, including
    company and salary context plus Apply, Ignore, and Details buttons. The
-   research card is a brief, not an application package. If delivery fails,
+   research card is a brief, not an application package. With fixed blocks,
+   it is followed immediately by the flavor picker. If delivery fails,
    report that failure and retry the card before moving forward. Do not
    generate documents or open the application yet.
-2. Wait for a separate Apply choice for each job. The card's Apply button
-   generates the package through `callback_handler.py`. If the user replies in
-   text instead, run `python3 callback_handler.py --apply <job_id>` for each
-   selected job. This checks tailoring readiness, generates the resume by
-   default, records `package_generated`, sends its PDF, and sends the Proceed
-   card only after Telegram confirms delivery. Generate a cover letter with
+2. With fixed blocks, continue through the flavor, length and project picker
+   shown after research; Apply can reopen it. Wait for the owner's Generate
+   choice before making documents. For text requests, run
+   `python3 callback_handler.py --apply <job_id>` to open the same picker.
+   Without an enabled fixed catalog, this command generates through the earlier
+   blueprint or variant path. Generation records `package_generated`, sends
+   the PDF, then shows Proceed only after Telegram confirms delivery. Generate a cover letter with
    `--apply <job_id> --cover-letter` only when the user asks for one or the
    specific posting/application explicitly requires one. First run
    `python3 jobhunter_interest_flow.py --job-id <job_id> --cover-context` to
@@ -546,9 +602,26 @@ For each candidate job, the scraper fetches the full description and extracts:
    It does not start filling or submitting a browser application. A request
    for more research or clarification stays in the research step.
 3. Wait for a separate Proceed to apply choice after reviewing the package.
-   The button records apply-preparation approval; for a text reply run
-   `python3 callback_handler.py --proceed-apply <job_id>`. Only then inspect
-   and fill the exact application path. Final submission requires its own
+   The native Telegram button records apply-preparation approval and starts
+   an owner Hermes turn for that exact job after the handler succeeds. A failed
+   handoff restores the button for retry. For a text reply inside Hermes, run
+   `python3 callback_handler.py --proceed-apply <job_id>` and continue the same
+   agent turn; that standalone CLI command only records approval. Only then inspect
+   and fill the exact application path. A job-details page or application-method
+   chooser is a navigation step, not a verified application form. Follow its
+   visible Apply or Upload CV control to open the chosen method, then inspect
+   the revealed form before uploading. A CV-first form may contain only the CV
+   field and Continue. An adjacent existing-user login panel belongs to a
+   separate method. Continue advances the current step; it is not final submission.
+   A hidden file input is eligible only through its visible associated
+   label. Never unhide inactive panels or bypass the rendered-form check.
+   A final review step may have no editable fields. The verifier accepts it
+   only with an explicit final-submit notice and enabled Submit Application
+   control in the same visible form, plus the exact role and employer identity.
+   Use the normal approved submit helper for this step. If it rejects a valid
+   review step, report the verifier error for repair; do not ask the owner to
+   submit manually merely because the page has no inputs.
+   Final submission requires its own
    explicit approval for that application, followed by portal confirmation and
    tracker verification. A failed or unconfirmed submit is not `submitted`.
    Before asking for final approval, inspect every required field and browser
@@ -585,7 +658,12 @@ them.
 
 ### Package review after Apply
 
-The Apply route generates the permanent package. With confirmed blueprints the
+For fixed blocks, the Generate choice creates the permanent package. Read
+`resume_selection`, `resume_blocks_sha256`, `resume_pages`, `summary_review.source`
+(`fixed`), `layout.page_two_sparse` and the PDF audit flags. Compare the selected
+blocks with the output and inspect all page images before Proceed.
+
+For profiles without fixed blocks, the Apply route generates the permanent package. With confirmed blueprints the
 code enforces the resume rules (confirmed wording only, employer order, page
 target, sidebar, languages, links, PDF audit) and records what it did in the
 private `tailoring_manifest.json`. If generation fails, report the failure and

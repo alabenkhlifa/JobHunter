@@ -74,6 +74,8 @@ cp data/master-profile.example.json data/master-profile.json
 
 ### Resume Refiner onboarding
 
+After the candidate approves every final fixed-catalog PDF, use `tools/apply_approved_resume_catalog.py --profile <private-profile.json> --catalog <approved-catalog.json> --expected-catalog-sha256 <reviewed-checksum>` to inspect activation. Add `--apply --expected-profile-sha256 <inspected-profile-checksum>` to write it. The tool validates the confirmed default selections, backs up the profile privately and replaces only `resume_blocks`; other profile fields and reviewed PDFs remain intact.
+
 Place an existing resume in an ignored path under `data/`, then ask Hermes to run **Resume Refiner** before enabling application-package generation. Do not place personal documents in a tracked directory.
 
 Resume Refiner uses the uploaded resume as a baseline and then interviews the user one experience at a time. It covers:
@@ -97,6 +99,8 @@ Validate the result before tailoring:
 ```bash
 python resume_refiner.py validate data/master-profile.json
 ```
+
+To review an enabled fixed `resume_blocks` catalog in the browser, run `python -m resume_review --profile data/master-profile.json --state-dir data/resume-review --port 8766` and open `http://127.0.0.1:8766`. The server binds only to loopback and uses the existing PDF dependencies and bundled fonts. It reads the source profile only when initializing a new workspace; subsequent runs resume the saved private review. The editor autosaves into `data/resume-review/review.json`, keeps undo snapshots and records approvals against exact rendered content. It can preview unapproved draft wording without making it selectable for applications. Preview overflow is shown in full with warnings. No profile, Telegram, application or Pi state is modified. Keep the process running while reviewing. Use `python -m resume_review.bridge status` to read requests, or `python -m resume_review.bridge propose --path '["flavors",0,"summary"]' --replacement-file <private_text_file> --rationale 'Reason for this wording'` to send a proposal; the open page receives it automatically and waits for acceptance. Applying an approved catalog is a separate reviewed deployment.
 
 Only evidence marked `candidate-confirmed`, `public`, and visible to `resume` or `cover-letter` is eligible for generated documents. Private, draft, rejected, or interview-only notes are excluded from the public application package.
 
