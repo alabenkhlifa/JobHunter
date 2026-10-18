@@ -102,6 +102,7 @@ class CDPClient:
         if b"101" not in resp.split(b"\r\n", 1)[0]:
             raise CDPError(f"websocket upgrade failed: {resp[:200]!r}")
         self._next_id = 0
+        self.frame_path: tuple[str, ...] = ()
 
     def close(self) -> None:
         try:
@@ -123,6 +124,24 @@ class CDPClient:
                 return message
 
     def evaluate(self, expression: str, *, return_by_value: bool = True) -> Any:
+        if self.frame_path:
+            # Scope DOM operations to the inspected, visible same-origin form.
+            # Approval checks still compare the exact top-level browser URL.
+            expression = """(() => {
+              let target = window;
+              for (const selector of FRAME_PATH) {
+                const frame = target.document.querySelector(selector);
+                if (!frame) throw new Error('Inspected application frame disappeared');
+                const style = target.getComputedStyle(frame), rect = frame.getBoundingClientRect();
+                if (style.display === 'none' || style.visibility === 'hidden' ||
+                    rect.width <= 0 || rect.height <= 0 || !frame.contentDocument ||
+                    frame.contentWindow.location.origin !== window.location.origin)
+                  throw new Error('Inspected application frame is no longer accessible');
+                target = frame.contentWindow;
+              }
+              return ((document, window, location) => (EXPRESSION))(
+                target.document, target, window.location);
+            })()""".replace("FRAME_PATH", json.dumps(self.frame_path)).replace("EXPRESSION", expression)
         result = self.call(
             "Runtime.evaluate",
             {
@@ -138,6 +157,17 @@ class CDPClient:
 
     def upload_file(self, selector: str, file_path: str) -> None:
         self.call("DOM.enable")
+        if self.frame_path:
+            element = self.evaluate(f"document.querySelector({json.dumps(selector)})", return_by_value=False)
+            object_id = element.get("objectId")
+            if not object_id:
+                raise CDPError(f"file input not found in application frame: {selector}")
+            try:
+                node = self.call("DOM.describeNode", {"objectId": object_id})["result"]["node"]
+                self.call("DOM.setFileInputFiles", {"backendNodeId": node["backendNodeId"], "files": [file_path]})
+            finally:
+                self.call("Runtime.releaseObject", {"objectId": object_id})
+            return
         root = self.call("DOM.getDocument", {"depth": -1, "pierce": True})["result"]["root"]["nodeId"]
         node = self.call("DOM.querySelector", {"nodeId": root, "selector": selector})["result"].get("nodeId")
         if not node:

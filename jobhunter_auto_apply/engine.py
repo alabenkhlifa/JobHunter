@@ -119,6 +119,7 @@ class PageInspection:
     sensitive_questions: list[str] = field(default_factory=list)
     missing_required: list[str] = field(default_factory=list)
     invalid_fields: list[str] = field(default_factory=list)
+    frame_path: list[str] = field(default_factory=list)
 
     @property
     def loaded_application_page(self) -> bool:
@@ -457,6 +458,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
 
     expression = r"""
 (() => {
+  const inspectDocument = (document, window, location, framePath) => {
   const visible = (el) => {
     const style = window.getComputedStyle(el);
     const rect = el.getBoundingClientRect();
@@ -498,6 +500,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
   };
   return {
     url: location.href,
+    frame_path: framePath,
     title: document.title,
     text: document.body ? document.body.innerText.slice(0, 7000) : '',
     headings: [...document.querySelectorAll('h1, h2, h3, [role=heading]')]
@@ -544,11 +547,61 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
         && rect.width >= 120 && rect.height >= 100;
     })
   };
+  };
+  const root = inspectDocument(document, window, location, []);
+  const candidates = [];
+  const selectorFor = (el) => {
+    if (el.id && el.ownerDocument.querySelectorAll('#' + CSS.escape(el.id)).length === 1)
+      return '#' + CSS.escape(el.id);
+    const parts = [];
+    for (let node = el; node; node = node.parentElement) {
+      const index = node.parentElement ? [...node.parentElement.children].indexOf(node) + 1 : 1;
+      parts.unshift(node.tagName.toLowerCase() + ':nth-child(' + index + ')');
+    }
+    return parts.join(' > ');
+  };
+  const walk = (win, path) => {
+    if (path.length >= 5 || candidates.length >= 20) return;
+    for (const frame of win.document.querySelectorAll('iframe')) {
+      const style = win.getComputedStyle(frame), rect = frame.getBoundingClientRect();
+      if (style.display === 'none' || style.visibility === 'hidden' || rect.width <= 0 || rect.height <= 0) continue;
+      try {
+        const child = frame.contentWindow;
+        if (!frame.contentDocument || child.location.origin !== location.origin) continue;
+        const next = [...path, selectorFor(frame)];
+        candidates.push(inspectDocument(child.document, child, location, next));
+        walk(child, next);
+      } catch (_) { /* Cross-origin frames remain outside this DOM scope. */ }
+      if (candidates.length >= 20) break;
+    }
+  };
+  walk(window, []);
+  return {...root, frame_candidates: candidates};
 })()
 """
+    client.frame_path = ()
     data = client.evaluate(expression)
     if not isinstance(data, dict):
         raise CDPError("application page inspection returned no document")
+    inspection = _inspection_from_data(data, blocklist_terms)
+    candidates = [_inspection_from_data(item, blocklist_terms)
+                  for item in data.get("frame_candidates", []) if isinstance(item, dict)]
+    actionable = [item for item in candidates if item.actionable_application_form]
+    # Never mix a heading from one document with a form in another, and never
+    # guess between multiple embedded application forms.
+    if not inspection.actionable_application_form and len(actionable) == 1:
+        selected = actionable[0]
+        challenges = ["human verification"] if any(
+            "human verification" in item.blockers for item in candidates) else []
+        selected.blockers = list(dict.fromkeys(inspection.blockers + selected.blockers + challenges))
+        client.frame_path = tuple(selected.frame_path)
+        return selected
+    if not inspection.actionable_application_form and len(actionable) > 1:
+        inspection.blockers.append("multiple embedded application forms")
+    return inspection
+
+
+def _inspection_from_data(data: dict[str, Any], blocklist_terms: tuple[str, ...]) -> PageInspection:
     text = data.get("text") or ""
     lower = text.lower()
     blockers = [term for term in blocklist_terms if term.lower() in lower]
@@ -587,6 +640,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
         sensitive_questions=sensitive,
         missing_required=missing_required,
         invalid_fields=invalid_fields,
+        frame_path=data.get("frame_path") or [],
     )
     # Full text for per-field classification; deliberately not a dataclass field
     # so asdict()/JSON output of existing callers is unchanged.

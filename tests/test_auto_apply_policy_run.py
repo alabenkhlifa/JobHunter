@@ -182,7 +182,7 @@ def test_cli_inspect_without_policy_has_no_question_plan(tmp_path, monkeypatch, 
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0 and "question_plan" not in payload and "page_text" not in payload
     assert set(payload) == {"url", "title", "text_excerpt", "inputs", "buttons", "links", "headings", "blockers",
-                            "sensitive_questions", "missing_required", "invalid_fields"}
+                            "sensitive_questions", "missing_required", "invalid_fields", "frame_path"}
 
 
 @pytest.mark.parametrize("command", [
