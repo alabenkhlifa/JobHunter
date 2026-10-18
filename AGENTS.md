@@ -59,6 +59,8 @@ Routine email-code verification for an already-approved application must use the
 
 ## Development rules
 
+- Treat the deployed Pi checkout as runtime code. Routine collection, research, resume generation and application preparation may write only ignored private state. Do not edit source, tests, skills, dependencies or Git metadata to work around a blocker. Report the exact failure; make an explicitly requested repair in a separate development checkout, test it, commit and push it, then deploy the reviewed revision.
+- Keep the working tree clean after delivery. Never hide source changes with ignore rules, assume-unchanged or skip-worktree. Ignore only private state, caches and generated output.
 - Deliver Pi changes through Git: commit and push the task-owned changes in this repository and the RaspberryPi configuration repository before deployment. Uncommitted SSH copies are not a completed deployment.
 - Inspect local and Pi status and compare the pushed commit's exact deployment files or hunks with the Pi. Preserve concurrent edits, private state and unpublished Pi commits. For a dirty or diverged Pi checkout, use an isolated checkout of the pushed commit and apply only reviewed, task-owned changes after checking their current contents; never force-pull, reset, discard, stash or replace the dirty checkout.
 - Verify the applied runtime behavior and report the pushed commit IDs separately from Pi deployment verification.

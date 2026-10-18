@@ -25,6 +25,8 @@ verdicts are persisted. Review input is balanced across markets, and delivery
 combines eligible approvals across batches, checking source availability
 before selecting the jobs actually sent.
 
+Routine runs use deployed code without editing it. Write review input, candidate data, generated documents and evidence under ignored `data/`. If a command or verifier fails, report the failure instead of patching source or changing dependencies. Explicit development work follows `AGENTS.md`: a separate checkout, tests, commit, push and reviewed deployment.
+
 ## Architecture
 - **Scraper**: `scraper.py` — scraping + CLI utilities (get-job, list-queued, send-doc, send-msg, mark-interested)
 - **Renderer**: `render_pdf.py` — dumb PDF renderer for resume and cover letter
