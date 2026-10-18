@@ -310,7 +310,9 @@ employer 12, freshness 8.
    Spanish`, the same rule as German and Italian. "No Spanish required",
    "Spanish is a plus", "English or Spanish" and "Spanish market/company/
    payroll" are not barriers; a bare "Spanish required" without a speaking
-   or level context is left to the reviewer. A board's own note is read the
+   or level context is not a fluency barrier. An unclear or unstated Spanish
+   requirement is informational only and cannot alone cause a hold or rejection.
+   A board's own note is read the
    same way: "board: fluent Spanish required", "board: ad written in Spanish"
    (SpainJobs.io shows Spanish ads translated into English, so the body rule
    cannot see them) or "board: Turkish required" knock the posting out.
@@ -394,8 +396,10 @@ For each candidate job, the scraper fetches the full description and extracts:
    English-speaking board, or a board's `language_requirement` note such as
    "no Spanish required" is a claim, not evidence that Spanish is optional;
    SpainJobs.io translates Spanish ads into English. Reject a
-   posting that requires fluent Spanish for the job; hold one where the
-   requirement is unclear and say so in the reason. Salary: only an
+   posting that explicitly requires fluent Spanish for the job. An unclear or
+   unstated Spanish requirement is informational only: note it when useful,
+   but do not hold, reject, or defer a role on that uncertainty alone. Continue
+   assessing the other criteria. Salary: only an
    employer-published figure counts. The boards' estimates are never stored,
    and an aggregator's estimate must never be reported as the employer's.
    The same job often appears on several boards and on LinkedIn; collection
