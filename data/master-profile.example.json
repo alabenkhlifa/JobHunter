@@ -63,7 +63,20 @@
         "resume",
         "cover-letter"
       ],
-      "source": "resume-refiner-interview"
+      "source": "resume-refiner-interview",
+      "achievement_id": "example:production-service",
+      "wording": "full",
+      "facets": {
+        "project": "Example Project",
+        "kind": "ownership",
+        "stack": [
+          "Java",
+          "Spring Boot"
+        ],
+        "domains": [
+          "retail"
+        ]
+      }
     }
   ],
   "resume_variants": [
@@ -123,6 +136,61 @@
       }
     }
   ],
+  "resume_blueprints": [
+    {
+      "id": "backend",
+      "confirmation": "candidate-confirmed",
+      "default": true,
+      "families": [
+        "backend",
+        "platform"
+      ],
+      "headline": {
+        "default": "Senior Backend Engineer | Cloud | Distributed Systems",
+        "senior": "Senior Backend Engineer | Cloud | Distributed Systems"
+      },
+      "summary": "Truthful two-to-four sentence summary of the candidate's background, seniority, domains, and strongest technologies.",
+      "summary_focus": [
+        "ownership"
+      ],
+      "pages": 1,
+      "lead_kinds": [
+        "ownership",
+        "delivery"
+      ],
+      "projects": {
+        "max": 4,
+        "bullets": {
+          "lead": 6,
+          "other": 3
+        },
+        "pinned": []
+      },
+      "optional_companies": {},
+      "skills": {
+        "Backend": [
+          "Java",
+          "Spring Boot",
+          "REST APIs",
+          "Microservices"
+        ],
+        "Cloud & DevOps": [
+          "AWS",
+          "Docker",
+          "Kubernetes",
+          "Terraform"
+        ],
+        "Data": [
+          "PostgreSQL",
+          "Redis"
+        ]
+      },
+      "certifications": [
+        "Example Certification"
+      ],
+      "show_project_roles": false
+    }
+  ],
   "education": [
     {
       "degree": "Example Degree",
@@ -137,7 +205,48 @@
     "citizenship": "Country or citizenship value if confirmed",
     "notice_period": "Example: 1 month",
     "current_work_location": "City, Country",
+    "gender": "ask_user",
+    "preferred_language": "ask_user",
+    "data_sharing_scope": "ask_user",
     "allow_contact_for_other_vacancies": "yes/no",
     "requires_visa_sponsorship": "ask_user"
-  }
+  },
+  "additional": {
+    "languages": "English (C1)"
+  },
+  "resume_quality": {
+    "enabled": false,
+    "activation_variant_id": "jvm-backend",
+    "preferred_pages": 1,
+    "max_pages": 2,
+    "hide_progression": false,
+    "fill_same_employer_projects": false,
+    "group_bullets_by_client": false,
+    "omittable_certifications": [
+      "Example Certification"
+    ],
+    "protected_certifications": [],
+    "protected_skills": [],
+    "certification_tags": {
+      "Example Certification": [
+        "architecture"
+      ]
+    },
+    "relocation_targets": {},
+    "job_overrides": {}
+  },
+  "volunteering": [
+    {
+      "title": "University Instructor",
+      "organization": "Example University",
+      "dates": "09/2022 - Present",
+      "description": "Microservices and Spring Framework",
+      "confirmation": "draft",
+      "confidentiality": "public",
+      "match_terms": [
+        "microservices",
+        "spring"
+      ]
+    }
+  ]
 }

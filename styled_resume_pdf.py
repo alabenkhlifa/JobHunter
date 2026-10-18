@@ -1,10 +1,13 @@
 """Dynamic two-column resume using the candidate's reviewed PDF design."""
 
 import re
+from collections import Counter
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from fpdf import FPDF
+from fpdf.enums import PathPaintRule
+from resume_inline import fragments
 
 
 ASSETS = Path(__file__).resolve().parent / "assets" / "resume_template"
@@ -28,11 +31,17 @@ class StyledResumePDF(FPDF):
     SIDE_X = 383.7
     SIDE_W = 187.7
     BOTTOM = 792
-    PAGE_TOP = 27
-    SKILL_ROW_STEP = 19.0
-    SKILL_CATEGORY_TOP = 22.0
-    SKILL_CATEGORY_GAP = 3.0
+    PAGE_TOP = 30
+    SKILL_ROW_STEP = 16.0
+    SKILL_CATEGORY_TOP = 15.0
+    SKILL_CATEGORY_GAP = 6.0
+    SECTION_CONTENT_GAP = 9.0
+    LANGUAGE_CONTENT_GAP = 11.0
     LANGUAGE_ROW_STEP = 22.0
+    ROLE_GAP = 25.0
+    ENGAGEMENT_GAP = 20.0
+    COMPACT_ROLE_GAP = 20.0
+    COMPACT_ENGAGEMENT_GAP = 14.0
 
     def __init__(self, profile):
         super().__init__(unit="pt", format=(595.92, 842.88))
@@ -43,11 +52,21 @@ class StyledResumePDF(FPDF):
         self.add_font("Inter", "B", str(ASSETS / "Inter-Bold-full.ttf"))
         self.add_font("Rubik", "", str(ASSETS / "Rubik-Medium-full.ttf"))
         self.add_font("Rubik", "B", str(ASSETS / "Rubik-Bold-full.ttf"))
+        # The bundled weight-specific files share internal family/style names.
+        # Distinct PDF font names preserve weight identity for extraction/audits.
+        for key, name in (("inter", "Inter-Regular"), ("interB", "Inter-Bold"),
+                          ("rubik", "Rubik-Medium"), ("rubikB", "Rubik-Bold")):
+            self.fonts[key].name = name
         self._side_schedule = {}
         self._sidebar_page_count = 1
         self._sidebar_final_page = 1
         self._sidebar_final_y = self._side_start(1)
-        self._page_two_sidebar_after = 28
+        self._page_two_sidebar_after = 30
+        self._role_gap = self.ROLE_GAP
+        self._engagement_gap = self.ENGAGEMENT_GAP
+        if (profile.get("layout") or {}).get("compact_spacing"):
+            self._role_gap = self.COMPACT_ROLE_GAP
+            self._engagement_gap = self.COMPACT_ENGAGEMENT_GAP
 
     @staticmethod
     def _web_link(value, *, linkedin=False, require_scheme=False):
@@ -74,11 +93,58 @@ class StyledResumePDF(FPDF):
         self.set_font(family, style, size)
 
     def _width(self, value, family="Inter", style="", size=8):
+        if "**" in str(value):
+            return sum(self._width(part, family, "B" if bold else style, size)
+                       for part, bold in fragments(value))
         self._font(family, style, size)
         return self.get_string_width(str(value))
 
     def _wrap(self, value, width, family="Inter", style="", size=8):
         """Wrap at words; split a single overlong token only as a last resort."""
+        if "**" in str(value):
+            words, word = [], []
+            for part, bold in fragments(value):
+                for token in re.findall(r"\s+|\S+", part):
+                    if token.isspace():
+                        if word:
+                            words.append(word)
+                            word = []
+                    else:
+                        word.append((token, bold))
+            if word:
+                words.append(word)
+            lines, line, used = [], [], 0.0
+            space = self._width(" ", family, style, size)
+            for word in words:
+                word_width = sum(self._width(text, family, "B" if bold else style, size)
+                                 for text, bold in word)
+                if word_width > width:
+                    # Carry the style through token splitting, not raw delimiters.
+                    pieces, piece, piece_width = [], [], 0.0
+                    for token, bold in word:
+                        for char in token:
+                            char_width = self._width(char, family, "B" if bold else style, size)
+                            if piece and piece_width + char_width > width:
+                                pieces.append(piece)
+                                piece, piece_width = [], 0.0
+                            piece.append((char, bold))
+                            piece_width += char_width
+                    if piece:
+                        pieces.append(piece)
+                else:
+                    pieces = [word]
+                for piece in pieces:
+                    piece_width = sum(self._width(text, family, "B" if bold else style, size)
+                                      for text, bold in piece)
+                    marked = "".join("**" + text + "**" if bold else text for text, bold in piece)
+                    if line and used + space + piece_width > width:
+                        lines.append(" ".join(line))
+                        line, used = [], 0.0
+                    used += piece_width + (space if line else 0)
+                    line.append(marked)
+            if line:
+                lines.append(" ".join(line))
+            return lines
         words = str(value or "").replace("\u00a0", " ").split()
         result, current = [], ""
         for word in words:
@@ -105,6 +171,14 @@ class StyledResumePDF(FPDF):
 
     def _text(self, value, x, baseline, *, family="Inter", style="", size=8,
               color=BODY, link=None):
+        if "**" in str(value):
+            cursor = x
+            for part, bold in fragments(value):
+                active_style = "B" if bold else style
+                self._text(part, cursor, baseline, family=family, style=active_style,
+                           size=size, color=color, link=link)
+                cursor += self._width(part, family, active_style, size)
+            return
         self._font(family, style, size)
         self.set_text_color(*color)
         value = str(value)
@@ -135,11 +209,18 @@ class StyledResumePDF(FPDF):
                    size=10.3, color=BLACK)
         self._rule(x1, x2, baseline + 2, thick=True)
 
-    def _image(self, path, x, y, *, width, height=None):
-        source = ASSETS / path
-        if source.exists():
-            self.image(str(source), x=x, y=y, w=width, h=height or 0,
-                       keep_aspect_ratio=True)
+    def _location_pin(self, x, baseline):
+        self.set_draw_color(*COMPANY_BLUE)
+        self.set_line_width(0.8)
+        cx, cy, tip = x + 4, baseline - 3, baseline + 2.5
+        with self.new_path(paint_rule=PathPaintRule.STROKE) as pin:
+            pin.move_to(cx, tip)
+            pin.curve_to(cx - 0.8, tip - 1.3, cx - 3.25, cy + 1, cx - 3.25, cy)
+            pin.curve_to(cx - 3.25, cy - 1.8, cx - 1.8, cy - 3.25, cx, cy - 3.25)
+            pin.curve_to(cx + 1.8, cy - 3.25, cx + 3.25, cy - 1.8, cx + 3.25, cy)
+            pin.curve_to(cx + 3.25, cy + 1, cx + 0.8, tip - 1.3, cx, tip)
+            pin.close()
+        self.ellipse(cx - 1.1, cy - 1.1, 2.2, 2.2)
 
     def _identity(self):
         p = self.profile
@@ -184,10 +265,7 @@ class StyledResumePDF(FPDF):
                 self.ellipse(x + 1, baseline - 5.4, 6, 6)
                 self.line(x + 1, baseline - 2.4, x + 7, baseline - 2.4)
             elif icon == "loc":
-                self.set_draw_color(*COMPANY_BLUE)
-                self.set_line_width(0.9)
-                self.ellipse(x + 1, baseline - 5.3, 5.5, 5.5)
-                self.line(x + 1.8, baseline - 0.8, x + 3.8, baseline + 2.5)
+                self._location_pin(x, baseline)
             else:
                 self._text(icon, x, baseline + 0.45, family="Inter", style="B",
                            size=8.5, color=COMPANY_BLUE)
@@ -210,7 +288,7 @@ class StyledResumePDF(FPDF):
             return 93.5
         if page == 2:
             return self._page_two_sidebar_after
-        return 28
+        return 30
 
     def _side_next(self, page, y, required):
         if y + required <= self.BOTTOM:
@@ -257,54 +335,77 @@ class StyledResumePDF(FPDF):
                 name, level = entry.get("name"), entry.get("level")
             else:
                 match = re.match(r"\s*([^()]+?)\s*\(([^)]+)\)\s*$", str(entry))
-                if not match:
-                    continue
-                name, level = match.groups()
-            if name and level:
-                result.append((str(name).strip(), str(level).strip()))
+                if match:
+                    name, level = match.groups()
+                else:
+                    name, level = str(entry).strip(), ""
+            if name and str(name).strip():
+                result.append((str(name).strip(), str(level or "").strip()))
         order = {"arabic": 0, "english": 1, "french": 2}
         return sorted(result, key=lambda item: order.get(item[0].lower(), 3))
 
-    def _education_layout(self, item, width):
-        degree = str(item.get("degree") or "")
-        school = str(item.get("school") or "")
+    def _legacy_education_layout(self, item, width):
+        degree = str(item.get("display_degree") or item.get("degree") or "")
+        school = str(item.get("display_school") or item.get("school") or "")
         if item.get("location") and str(item["location"]).lower() not in school.lower():
             school += ", " + str(item["location"])
-        degree_lines = self._wrap(degree, width - 25, "Rubik", "B", 9.15)
-        school_lines = self._wrap(school, width - 25, "Rubik", "B", 8.8)
+        degree_lines = self._wrap(degree, width, "Rubik", "B", 9.15)
+        school_lines = self._wrap(school, width, "Rubik", "B", 8.8)
         required = 13 + 11.4 * len(degree_lines) + 11.2 * len(school_lines) + 18
         return {
             "degree": degree_lines,
             "school": school_lines,
-            "dates": str(item.get("dates") or ""),
-            "image": self._school_image(item),
+            "dates": self._compact_dates(item.get("dates")),
         }, required
 
-    def _plan_language_education(self):
-        page, y = 2, 28
+    def _legacy_plan_language_education(self, page=2, y=30):
+        volunteering = self.profile.get("volunteering") or []
+        if volunteering:
+            first = volunteering[0]
+            first_title = " - ".join(filter(None, (first.get("title"), first.get("organization"))))
+            first_height = (11 * len(self._wrap(first_title, self.SIDE_W, "Rubik", "B", 8.8))
+                            + 13 + 9.4 * len(self._wrap(first.get("description") or "", self.SIDE_W, size=7.7)) + 13)
+            page, y = self._side_next(page, y, 18 + first_height)
+            self._side_add(page, "section", y, title="Volunteering")
+            y += 18
+            for item in volunteering:
+                title = " - ".join(filter(None, (item.get("title"), item.get("organization"))))
+                title_lines = self._wrap(title, self.SIDE_W, "Rubik", "B", 8.8)
+                description_lines = self._wrap(item.get("description") or "", self.SIDE_W, size=7.7)
+                required = 11 * len(title_lines) + 13 + 9.4 * len(description_lines) + 13
+                page, y = self._side_next(page, y, required)
+                self._side_add(page, "volunteering", y, title=title_lines,
+                               dates=item.get("dates") or "", description=description_lines)
+                y += required
+            y += 1 if (self.profile.get("layout") or {}).get("compact_spacing") else 5
         languages = self._parse_languages()
         education = self.profile.get("education") or []
+        if (self.profile.get("layout") or {}).get("personal_details_page_two") and (languages or education) and page < 2:
+            page, y = 2, self.PAGE_TOP
         if languages:
+            page, y = self._side_next(page, y, self.LANGUAGE_CONTENT_GAP + self.LANGUAGE_ROW_STEP)
             self._side_add(page, "section", y, title="Languages")
-            y += 17
+            y += self.LANGUAGE_CONTENT_GAP
             for name, level in languages:
                 page, y = self._side_next(page, y, self.LANGUAGE_ROW_STEP)
                 self._side_add(page, "language", y, name=name, level=level)
                 y += self.LANGUAGE_ROW_STEP
             y += 10
         if education:
-            page, y = self._side_next(page, y, 25)
+            _, first_height = self._education_layout(education[0], self.SIDE_W)
+            page, y = self._side_next(page, y, self.SECTION_CONTENT_GAP + first_height)
             self._side_add(page, "section", y, title="Education")
-            y += 20
+            y += self.SECTION_CONTENT_GAP
             for item in education:
                 data, required = self._education_layout(item, self.SIDE_W)
                 page, y = self._side_next(page, y, required)
                 self._side_add(page, "education", y, **data)
                 y += required
-        self._page_two_sidebar_after = y + 18 if page == 2 else 28
-        return bool(languages or education), page
+        self._page_two_sidebar_after = y + 18 if page == 2 else 30
+        self._personal_details_final_y = y
+        return bool(volunteering or languages or education), page
 
-    def _experience_fits_first_page(self):
+    def _first_page_experience_end(self):
         summary_lines = len(self._wrap(self.profile.get("summary") or "",
                                        self.MAIN_W, size=7.6))
         start = 93.5 + 18 + summary_lines * 9.5 + 8 + 22.5
@@ -314,17 +415,47 @@ class StyledResumePDF(FPDF):
             with_divider = index < len(roles) - 1
             engagements = role.get("engagements") or []
             if engagements:
+                highlights, engagements, tech = self._grouped_layout(role)
                 required += self._group_header_height(role)
+                required += sum(self._bullet_height(value) for value in highlights)
+                required += 4 if highlights and engagements else 0
                 required += sum(self._engagement_height(
                     item, with_divider=child_index < len(engagements) - 1,
                 ) for child_index, item in enumerate(engagements))
-                required += 25 if with_divider else 0
+                required += self._keywords_height(tech)
+                required += self._role_gap if with_divider else 0
             else:
                 required += self._role_height(role, with_divider=with_divider)
-        return start + required + 10 <= self.BOTTOM
+        return start + required
+
+    def _experience_fits_first_page(self):
+        return self._first_page_experience_end() + 10 <= self.BOTTOM
+
+    def _personal_details_fit_first_page(self, experience_end):
+        start_y = experience_end + 14
+        if self._main_personal_details(start_y)[1] <= self.BOTTOM:
+            return True
+        if self._compact_main_personal_details(start_y)[1] <= self.BOTTOM:
+            return True
+        return self._split_personal_details_across_columns(start_y)[2] <= self.BOTTOM
+
+    def _tighten_orphaned_personal_details(self):
+        """Recover inter-section space only when it removes a sidebar-only page."""
+        if not self._second_page_only_has_personal_details():
+            return
+        if not self._experience_fits_first_page():
+            return
+        if self._personal_details_fit_first_page(self._first_page_experience_end()):
+            return
+        self._role_gap = self.COMPACT_ROLE_GAP
+        self._engagement_gap = self.COMPACT_ENGAGEMENT_GAP
+        if not self._personal_details_fit_first_page(self._first_page_experience_end()):
+            self._role_gap = self.ROLE_GAP
+            self._engagement_gap = self.ENGAGEMENT_GAP
 
     def _plan_sidebar(self):
-        personal_details, details_end_page = self._plan_language_education()
+        linear_sidebar = bool(self.profile.get("volunteering"))
+        personal_details, details_end_page = (False, 1) if linear_sidebar else self._plan_language_education()
         page, y = 1, self._side_start(1)
         skills = self.profile.get("skills") or {}
         if skills:
@@ -343,10 +474,10 @@ class StyledResumePDF(FPDF):
                 y += required
         certifications = self.profile.get("certifications") or []
         if certifications:
-            credentials = [(str(item), self._wrap(item, self.SIDE_W,
+            credentials = [(str(item), self._wrap(self._certification_label(item), self.SIDE_W,
                                                    "Rubik", "B", 8.8))
                            for item in certifications]
-            group_height = 17 + sum(10.2 * len(lines) + 18.4
+            group_height = self.SECTION_CONTENT_GAP + sum(10.2 * len(lines) + 18.4
                                     for _, lines in credentials)
             y += 8
             # Keep the entire credential list with its heading when it fits
@@ -355,7 +486,7 @@ class StyledResumePDF(FPDF):
                 page += 1
                 y = self._side_start(page)
             self._side_add(page, "section", y, title="Certifications")
-            y += 17
+            y += self.SECTION_CONTENT_GAP
             links = self.profile.get("certification_links") or {}
             for title, wrapped in credentials:
                 issuer = self._issuer(title)
@@ -364,7 +495,7 @@ class StyledResumePDF(FPDF):
                 page, y = self._side_next(page, y, required)
                 if page != previous_page:
                     self._side_add(page, "section", y, title="Certifications")
-                    y += 17
+                    y += self.SECTION_CONTENT_GAP
                 link = self._web_link(links.get(title), require_scheme=True)
                 self._side_add(page, "certification", y, title=title,
                                lines=wrapped, issuer=issuer, link=link)
@@ -372,10 +503,16 @@ class StyledResumePDF(FPDF):
 
         # Keep short resumes on one page when the whole personal-details block
         # fits beneath skills and credentials. Longer sidebars retain page two.
-        if (personal_details and page == 1 and details_end_page == 2
+        if linear_sidebar:
+            gap = 14 if (self.profile.get("layout") or {}).get("compact_spacing") else 18
+            personal_details, details_end_page = self._plan_language_education(page, y + gap)
+            y = self._personal_details_final_y
+            page = details_end_page
+        if (not (self.profile.get("layout") or {}).get("personal_details_page_two")
+                and not linear_sidebar and personal_details and page == 1 and details_end_page == 2
                 and self._experience_fits_first_page()):
             details_end_y = self._page_two_sidebar_after - 18
-            shift = y + 14 - 28
+            shift = y + 14 - 30
             if shift + details_end_y <= self.BOTTOM:
                 for kind, command_y, data in self._side_schedule.pop(2, []):
                     self._side_add(1, kind, command_y + shift, **data)
@@ -391,7 +528,7 @@ class StyledResumePDF(FPDF):
         languages = self._parse_languages()
         if languages:
             commands.append(("section", y, {"title": "Languages"}))
-            y += 17
+            y += self.LANGUAGE_CONTENT_GAP
             for name, level in languages:
                 commands.append(("language", y, {"name": name, "level": level}))
                 y += self.LANGUAGE_ROW_STEP
@@ -403,7 +540,7 @@ class StyledResumePDF(FPDF):
         education = self.profile.get("education") or []
         if education:
             commands.append(("section", y, {"title": "Education"}))
-            y += 20
+            y += self.SECTION_CONTENT_GAP
             for item in education:
                 data, required = self._education_layout(item, width)
                 commands.append(("education", y, data))
@@ -439,24 +576,33 @@ class StyledResumePDF(FPDF):
         return commands, max(language_end, education_end)
 
     def _split_personal_details_across_columns(self, start_y):
-        """Place education below Experience and a short language line after sidebar content."""
+        """Place education below Experience and languages after sidebar content."""
         if self._sidebar_final_page != 1:
             return [], [], self.BOTTOM + 1
         education, education_end = self._education_commands(start_y, self.MAIN_W)
         languages = self._parse_languages()
         if not education or not languages:
             return [], [], self.BOTTOM + 1
-        language_text = "  |  ".join(f"{name}: {level}" for name, level in languages)
-        lines = self._wrap(language_text, self.SIDE_W, size=8.3)
         side_y = self._sidebar_final_y + 14
+        side_commands, side_end = self._language_commands(side_y)
+        if side_end <= self.BOTTOM:
+            return education, side_commands, max(education_end, side_end)
+        language_text = "  |  ".join(
+            f"{name}: {level}" if level else name for name, level in languages
+        )
+        lines = self._wrap(language_text, self.SIDE_W, size=8.3)
         side_commands = [
             ("section", side_y, {"title": "Languages"}),
-            ("compact_languages", side_y + 17, {"lines": lines}),
+            ("compact_languages", side_y + self.LANGUAGE_CONTENT_GAP, {"lines": lines}),
         ]
-        side_end = side_y + 17 + 10.8 * len(lines) + 5
+        side_end = side_y + self.LANGUAGE_CONTENT_GAP + 8 + 10.8 * len(lines) + 5
         return education, side_commands, max(education_end, side_end)
 
     def _second_page_only_has_personal_details(self):
+        # Linear sidebars may have already drawn some personal details on page
+        # one. Relocating the complete block afterwards would duplicate them.
+        if self.profile.get("volunteering") or (self.profile.get("layout") or {}).get("personal_details_page_two"):
+            return False
         if self._sidebar_page_count != 2:
             return False
         commands = self._side_schedule.get(2, [])
@@ -465,6 +611,12 @@ class StyledResumePDF(FPDF):
             or kind == "section" and data["title"] in ("Languages", "Education")
             for kind, _, data in commands
         )
+
+    @staticmethod
+    def _certification_label(title):
+        # Keep the original credential name as the verification-link key.
+        return re.sub(r"(\bSpring\s+Certified\s+Professional)\s+2024\b",
+                      r"\1", str(title), flags=re.I)
 
     @staticmethod
     def _issuer(title):
@@ -483,16 +635,7 @@ class StyledResumePDF(FPDF):
             return "Anthropic"
         return ""
 
-    @staticmethod
-    def _school_image(item):
-        school = str(item.get("school") or "").lower()
-        if "esprit" in school:
-            return "esprit.png"
-        if "isimm" in school:
-            return "isimm.png"
-        return None
-
-    def _draw_side_command(self, command, *, x=None, width=None):
+    def _legacy_draw_side_command(self, command, *, x=None, width=None):
         kind, y, data = command
         x = self.SIDE_X if x is None else x
         right = x + (self.SIDE_W if width is None else width)
@@ -530,13 +673,21 @@ class StyledResumePDF(FPDF):
             self._text(data["level"], right - self._width(data["level"], size=8.8),
                        y + 8, size=8.8, color=GRAY)
             self._rule(x, right, y + 19, dashed=True)
+        elif kind == "volunteering":
+            for line in data["title"]:
+                self._text(line, x, y, family="Rubik", style="B", size=8.8, color=BLACK)
+                y += 11
+            self._text(data["dates"], x, y, size=8.3, color=GRAY)
+            y += 13
+            for line in data["description"]:
+                self._text(line, x, y, size=7.7)
+                y += 9.4
+            self._rule(x, right, y + 3, dashed=True)
         elif kind == "compact_languages":
             for index, line in enumerate(data["lines"]):
-                self._text(line, x, y + index * 10.8, size=8.3)
+                self._text(line, x, y + 8 + index * 10.8, size=8.3)
         elif kind == "education":
-            if data["image"]:
-                self._image(data["image"], x, y + 1, width=20, height=20)
-            text_x = x + 25
+            text_x = x
             baseline = y + 10
             for line in data["degree"]:
                 self._text(line, text_x, baseline, family="Rubik", style="B",
@@ -553,17 +704,6 @@ class StyledResumePDF(FPDF):
             self._rule(x, right, y + 13 + 11.4 * len(data["degree"]) +
                        11.2 * len(data["school"]) + 13, dashed=True)
 
-    @staticmethod
-    def _company_image(company):
-        name = str(company).lower()
-        if "maibornwolff" in name:
-            return "maibornwolff.png"
-        if "verse" in name:
-            return "verse.png"
-        if "talan" in name:
-            return "talan.png"
-        return None
-
     def _new_experience_page(self):
         self.add_page()
         self._section("Experience", self.MAIN_X, self.MAIN_X + self.MAIN_W,
@@ -571,12 +711,7 @@ class StyledResumePDF(FPDF):
         return self.PAGE_TOP + 22.5
 
     def _role_header(self, role, y):
-        image = self._company_image(role.get("company"))
-        if image:
-            width = 34 if image == "talan.png" else 20
-            height = 10 if image == "talan.png" else 20
-            self._image(image, self.MAIN_X, y - 10, width=width, height=height)
-        text_x = self.MAIN_X + (40 if image == "talan.png" else 25.5)
+        text_x = self.MAIN_X
         title_lines = self._wrap(role.get("title") or "",
                                  self.MAIN_X + self.MAIN_W - text_x,
                                  "Rubik", "", 9.1)
@@ -596,7 +731,7 @@ class StyledResumePDF(FPDF):
                        size=8.2, color=COMPANY_BLUE, link=company_link)
             baseline += 10.2
         detail = "   |   ".join(filter(None,
-            (str(role.get("dates") or "").replace("\u2013", "-"), role.get("location"))))
+            (self._compact_dates(role.get("dates")), role.get("location"))))
         self._text(detail, text_x, baseline + 2, size=7.35, color=GRAY)
         return baseline + 14
 
@@ -623,9 +758,9 @@ class StyledResumePDF(FPDF):
         subtitle = role.get("subtitle")
         if subtitle and subtitle.lower() not in company.lower():
             company += " - " + str(subtitle)
-        title_lines = len(self._wrap(role.get("title") or "", 312,
+        title_lines = len(self._wrap(role.get("title") or "", self.MAIN_W,
                                      "Rubik", "", 9.1))
-        company_lines = len(self._wrap(company, 312, "Rubik", "B", 8.2))
+        company_lines = len(self._wrap(company, self.MAIN_W, "Rubik", "B", 8.2))
         height = 27.4 + max(0, title_lines - 1) * 10.5 + company_lines * 10.2
         for bullet in role.get("bullets") or []:
             height += len(self._wrap(bullet, 300.5, size=7.7)) * 9.4 + 1.4
@@ -633,7 +768,7 @@ class StyledResumePDF(FPDF):
             terms = re.sub(r"\s*[\u00b7|]\s*", ", ", str(role["tech"]))
             height += 1 + len(self._wrap("Keywords: " + terms,
                                          300.5, size=7.2)) * 8.9 + 1
-        return height + (25 if with_divider else 0)
+        return height + (self._role_gap if with_divider else 0)
 
     @staticmethod
     def _compact_dates(value):
@@ -647,6 +782,9 @@ class StyledResumePDF(FPDF):
 
     def _engagement_heading_lines(self, engagement):
         name = str(engagement.get("name") or "")
+        role = str(engagement.get("role") or "").strip()
+        if role:
+            name = f"{name} \u00b7 {role}"
         return self._wrap(name, self.MAIN_W - 25.5, "Rubik", "B", 8.2)
 
     def _engagement_header(self, engagement, y, *, continued=False):
@@ -667,13 +805,71 @@ class StyledResumePDF(FPDF):
         if engagement.get("tech"):
             terms = re.sub(r"\s*[\u00b7|]\s*", ", ", str(engagement["tech"]))
             height += 2 + len(self._wrap("Keywords: " + terms, 300.5, size=7.2)) * 8.9
-        return height + (20 if with_divider else 0)
+        return height + (self._engagement_gap if with_divider else 0)
+
+    def _bullet_height(self, value):
+        return len(self._wrap(value, 300.5, size=7.7)) * 9.4 + 1.4
+
+    def _keywords_height(self, value):
+        if not value:
+            return 0
+        terms = re.sub(r"\s*[\u00b7|]\s*", ", ", str(value))
+        return 2 + len(self._wrap("Keywords: " + terms, 300.5, size=7.2)) * 8.9
+
+    @staticmethod
+    def _grouped_layout(role):
+        """Lift attributed evidence once; leave client history in source order."""
+        engagements = role.get("engagements") or []
+        highlights = role.get("highlights") or []
+        if not highlights:
+            return [], engagements, ""
+        available = Counter((item.get("name"), bullet)
+                            for item in engagements for bullet in item.get("bullets") or [])
+        selected, labels = Counter(), []
+        contexts = {item.get("name") for item in engagements}
+
+        def short_label(context):
+            parts = [part.strip() for part in context.split(" - ") if len(part.strip()) >= 3]
+            return min(parts, key=len) if parts else context
+
+        for highlight in highlights:
+            key = (highlight.get("context"), highlight.get("text"))
+            if not isinstance(key[0], str) or not key[0] or not available[key] or selected[key] >= available[key]:
+                raise ValueError("Employer highlight must match an included client bullet")
+            selected[key] += 1
+            # Labels come only from the public heading, never matching aliases.
+            label = short_label(key[0])
+            if any(other != key[0] and isinstance(other, str) and short_label(other) == label for other in contexts):
+                label = key[0]
+            labels.append(f"{label}: {key[1]}")
+        remaining, terms = [], []
+        consumed = Counter()
+        for item in engagements:
+            bullets = []
+            for bullet in item.get("bullets") or []:
+                key = (item.get("name"), bullet)
+                if consumed[key] < selected[key]:
+                    consumed[key] += 1
+                else:
+                    bullets.append(bullet)
+            if bullets:
+                remaining.append({**item, "bullets": bullets, "tech": ""})
+            for term in re.split(r"\s*[\u00b7|,]\s*", str(item.get("tech") or "")):
+                if term and term.casefold() not in {value.casefold() for value in terms}:
+                    terms.append(term)
+        return labels, remaining, " · ".join(terms)
+
+    def _experience_divider(self, y, gap):
+        # Keep at least three points between the rule and the next heading.
+        self._rule(self.MAIN_X + 25.5, self.MAIN_X + self.MAIN_W,
+                   y + min(8, gap - 12), dashed=True)
+        return y + gap
 
     def _group_header_height(self, role):
         company = str(role.get("company") or "")
-        title_lines = len(self._wrap(role.get("title") or "", 312,
+        title_lines = len(self._wrap(role.get("title") or "", self.MAIN_W,
                                      "Rubik", "", 9.1))
-        company_lines = len(self._wrap(company, 312, "Rubik", "B", 8.2))
+        company_lines = len(self._wrap(company, self.MAIN_W, "Rubik", "B", 8.2))
         height = 27.4 + max(0, title_lines - 1) * 10.5 + company_lines * 10.2
         progression = role.get("progression")
         if progression:
@@ -689,13 +885,13 @@ class StyledResumePDF(FPDF):
         return y + 15
 
     def _render_grouped_role(self, role, y, *, with_divider):
-        engagements = role.get("engagements") or []
-        if not engagements:
+        if not role.get("engagements"):
             return y
-        first = self._engagement_height(engagements[0])
+        highlights, engagements, tech = self._grouped_layout(role)
+        first = sum(self._bullet_height(value) for value in highlights) if highlights else self._engagement_height(engagements[0])
         header = self._group_header_height(role)
         fresh_capacity = self.BOTTOM - (self.PAGE_TOP + 22.5)
-        if y + header + min(first, 45) > self.BOTTOM and header + first <= fresh_capacity:
+        if y + header + (first if highlights else min(first, 45)) > self.BOTTOM and header + first <= fresh_capacity:
             y = self._new_experience_page()
         elif y + header + 35 > self.BOTTOM:
             y = self._new_experience_page()
@@ -704,7 +900,16 @@ class StyledResumePDF(FPDF):
         if progression:
             y = self._lines(progression, self.MAIN_X + 25.5, y,
                             self.MAIN_W - 25.5, size=7.7, leading=9.5) + 5
+        for value in highlights:
+            if y + self._bullet_height(value) > self.BOTTOM:
+                y = self._group_continuation(role)
+            y = self._bullet(value, y)
+        if highlights and engagements:
+            y += 4
         for index, engagement in enumerate(engagements):
+            if (index and self.page_no() == 1 and engagement.get("name")
+                    == (self.profile.get("layout") or {}).get("page_break_before_engagement")):
+                y = self._group_continuation(role)
             divided = index < len(engagements) - 1
             height = self._engagement_height(engagement)
             if y + height > self.BOTTOM and height + 15 <= fresh_capacity:
@@ -729,15 +934,15 @@ class StyledResumePDF(FPDF):
                     y = self._engagement_header(engagement, y, continued=True)
                 y = self._keywords(engagement["tech"], y + 1)
             if divided:
-                if y + 20 <= self.BOTTOM:
-                    self._rule(self.MAIN_X + 25.5, self.MAIN_X + self.MAIN_W,
-                               y + 8, dashed=True)
-                    y += 20
+                if y + self._engagement_gap <= self.BOTTOM:
+                    y = self._experience_divider(y, self._engagement_gap)
+        if tech:
+            if y + self._keywords_height(tech) > self.BOTTOM:
+                y = self._group_continuation(role)
+            y = self._keywords(tech, y + 1)
         if with_divider:
-            if y + 25 <= self.BOTTOM:
-                self._rule(self.MAIN_X + 25.5, self.MAIN_X + self.MAIN_W,
-                           y + 8, dashed=True)
-                y += 25
+            if y + self._role_gap <= self.BOTTOM:
+                y = self._experience_divider(y, self._role_gap)
         return y
 
     def _render_experience(self, experience, y):
@@ -782,13 +987,12 @@ class StyledResumePDF(FPDF):
                     y += 14
                 y = self._keywords(role["tech"], y + 1)
             if index < len(experience) - 1:
-                self._rule(self.MAIN_X + 25.5, self.MAIN_X + self.MAIN_W,
-                           y + 8, dashed=True)
-                y += 25
+                y = self._experience_divider(y, self._role_gap)
         return y
 
     def render(self):
         self._plan_sidebar()
+        self._tighten_orphaned_personal_details()
         self.add_page()
         summary = self.profile.get("summary") or ""
         heading_y = 93.5
@@ -823,3 +1027,117 @@ class StyledResumePDF(FPDF):
                     self._sidebar_page_count = 1
         while self.page_no() < self._sidebar_page_count:
             self.add_page()
+
+
+    def _plan_language_education(self, page=2, y=30):
+        layout = self.profile.get("layout") or {}
+        heading = layout.get("volunteering_section_title")
+        entries = self.profile.get("volunteering") or []
+        if not heading or not entries:
+            return self._legacy_plan_language_education(page, y)
+        certification_spacing = bool(layout.get("teaching_certification_spacing"))
+        planned = []
+        for item in entries:
+            title = " - ".join(filter(None, (item.get("title"), item.get("organization"))))
+            title_lines = self._wrap(title, self.SIDE_W, "Rubik", "B", 8.8)
+            description = self._wrap(item.get("description") or "", self.SIDE_W, size=7.7)
+            dates = str(item.get("dates") or "")
+            required = 11 * len(title_lines) + (13 if dates else 0) + 9.4 * len(description) + 13
+            if certification_spacing:
+                if description:
+                    raise ValueError("Certification spacing supports a title and date only")
+                required = 10.2 * len(title_lines) + 18.4
+            planned.append((required, {
+                "title": title_lines, "dates": dates, "description": description,
+                "link": self._web_link(item.get("url"), require_scheme=True),
+                "align": item.get("align", "left"),
+                "vertical_inset": float(item.get("vertical_inset", 0)),
+                "certification_spacing": certification_spacing,
+                "compact_entry": True,
+            }))
+        heading_gap = self.SECTION_CONTENT_GAP if certification_spacing else 18
+        page, y = self._side_next(page, y, heading_gap + planned[0][0])
+        self._side_add(page, "section", y, title=heading)
+        y += heading_gap
+        for required, data in planned:
+            page, y = self._side_next(page, y, required)
+            self._side_add(page, "volunteering", y, **data)
+            y += required
+        original_profile = self.profile
+        self.profile = {**original_profile, "volunteering": []}
+        details_gap = (14 if layout.get("compact_spacing") else 18) if certification_spacing else 8
+        try:
+            details, last_page = self._legacy_plan_language_education(page, y + details_gap)
+        finally:
+            self.profile = original_profile
+        return bool(entries) or details, last_page
+
+
+    def _education_layout(self, item, width):
+        data, required = self._legacy_education_layout(item, width)
+        if not (self.profile.get("layout") or {}).get("education_dates_inline"):
+            return data, required
+        if not data["dates"]:
+            return data, required
+        if len(data["school"]) != 1:
+            return data, required
+        school_width = self._width(data["school"][0], "Rubik", "B", 8.8)
+        date_width = self._width(data["dates"], size=8.3)
+        if school_width + date_width + 8 > width:
+            return data, required
+        data["inline_dates"] = True
+        return data, required - 11.7
+
+
+    def _draw_side_command(self, command, *, x=None, width=None):
+        kind, y, data = command
+        if kind == "volunteering" and data.get("compact_entry"):
+            text_x = self.SIDE_X if x is None else x
+            right = text_x + (self.SIDE_W if width is None else width)
+            if data.get("certification_spacing"):
+                self._legacy_draw_side_command(("certification", y, {
+                    "lines": data["title"], "issuer": "", "link": data["link"],
+                }), x=x, width=width)
+                if data["dates"]:
+                    self._text(data["dates"], text_x, y + 10.2 * len(data["title"]) + 11,
+                               size=8.3, color=GRAY)
+                return
+            rule_y = (y + 11 * len(data["title"]) + (13 if data["dates"] else 0)
+                      + 9.4 * len(data["description"]) + 3)
+            y += data.get("vertical_inset", 0)
+            for line in data["title"]:
+                title_x = text_x
+                if data.get("align") == "center":
+                    title_x += (right - text_x - self._width(line, "Rubik", "B", 8.8)) / 2
+                self._text(line, title_x, y, family="Rubik", style="B", size=8.8,
+                           color=BLACK, link=data["link"])
+                y += 11
+            if data["dates"]:
+                date_x = text_x
+                if data.get("align") == "center":
+                    date_x += (right - text_x - self._width(data["dates"], size=8.3)) / 2
+                self._text(data["dates"], date_x, y, size=8.3, color=GRAY)
+                y += 13
+            for line in data["description"]:
+                self._text(line, text_x, y, size=7.7)
+                y += 9.4
+            self._rule(text_x, right, rule_y, dashed=True)
+            return
+        if kind != "education" or not data.get("inline_dates"):
+            return self._legacy_draw_side_command(command, x=x, width=width)
+        text_x = self.SIDE_X if x is None else x
+        right = text_x + (self.SIDE_W if width is None else width)
+        baseline = y + 10
+        for line in data["degree"]:
+            self._text(line, text_x, baseline, family="Rubik", style="B",
+                       size=9.15, color=BLACK)
+            baseline += 11.4
+        baseline += 1.5
+        self._text(data["school"][0], text_x, baseline, family="Rubik",
+                   style="B", size=8.8, color=BLUE)
+        dates = data["dates"].replace("\u2013", "-")
+        self._text(dates, right - self._width(dates, size=8.3), baseline,
+                   size=8.3, color=GRAY)
+        rule_y = (y + 13 + 11.4 * len(data["degree"])
+                  + 11.2 * len(data["school"]) + 13 - 11.7)
+        self._rule(text_x, right, rule_y, dashed=True)

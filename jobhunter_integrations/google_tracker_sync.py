@@ -76,6 +76,14 @@ def merge_rows(existing, incoming, *, repo_root=None):
         index = candidates[0]
         matched.add(index)
         old = result[index]
+        old_status = str(old[2]).strip().casefold()
+        new_status = str(row[2]).strip().casefold()
+        recruiter_outcomes = {"rejected", "interview_invited", "assessment_requested", "action_required", "application_progressed", "offer_received"}
+        if (old_status == "rejected" and new_status not in recruiter_outcomes
+                or old_status == "closed" and new_status not in {"closed", "rejected"}):
+            # A manual terminal status need not change the Sheet timestamp.
+            # Refresh evidence and notes without restoring an actionable stage.
+            row[2], row[13] = old[2], old[13]
         old_time, new_time = timestamp(old[1]), timestamp(row[1])
         if old_time is not None and (new_time is None or old_time > new_time):
             counts["kept_newer"] += 1
@@ -183,6 +191,8 @@ def sync_locked(args, state_dir):
                     if not path.resolve().is_relative_to(candidate_root):
                         raise ValueError("Application documents must belong to this candidate.")
     after, counts = merge_rows(before, incoming, repo_root=args.repo_root)
+    from .tracker_closures import project_rows
+    after = project_rows(after, args.db_path, key=row_key)
     summary = {"rows": len(after) - 1, **counts, "dry_run": bool(args.dry_run)}
     if args.dry_run:
         return summary

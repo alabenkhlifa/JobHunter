@@ -102,6 +102,14 @@ Only evidence marked `candidate-confirmed`, `public`, and visible to `resume` or
 
 For a role family that needs a deliberately curated resume structure, Resume Refiner may add a `resume_variants` entry after the user confirms the complete public output. Each variant has a stable ID, `match_terms`, optional title-scoped `role_terms`, optional priority and `max_pages`, optional omitted sections, and a complete renderer-compatible public resume snapshot. Identity and contact data always come from the master profile; unspecified master-profile resume sections are not inherited. JobHunter selects only `candidate-confirmed` variants, preserves their wording and order exactly, and normally falls back to legacy evidence ranking when none matches. Architecture-titled jobs are stricter: they require a matching role-scoped confirmed variant instead of the generic fallback. The renderer must report a page count within `max_pages` before the application can reach `package_generated`.
 
+The current resume path uses role-family blueprints and evidence facets instead of fixed variants. Put the changes in a private updates file (never in git) with up to five keys: `facets` (per evidence ID: `project`, `kind`, `stack`, `domains`), `new_evidence` (evidence items whose `public_text` already exists verbatim as confirmed wording; anything else is refused), `engagement_roles` (the confirmed role title per company and client engagement), `resume_blueprints` (one entry per role family with the confirmed headline, summary, skills, certification order, page target and project limits) and `hide_from` (removes a confirmed bullet from resumes by dropping `resume` from its visibility, without deleting it). Run the migration as a dry run first, then again with `--apply`; it writes a timestamped backup next to the profile and replaces it atomically. Validate the profile afterwards. Only `candidate-confirmed` blueprints are used, and one of them may carry `default: true` as the fallback for titles no blueprint lists. Each package's private manifest then records `resume_score`, `resume_needs_review` and `score_flags`. The evaluation harness `tools/eval_resume_packages.py` runs only on a COPY of `data/jobs.db`, never on the live database.
+
+```bash
+python tools/migrate_profile_blueprints.py --profile data/master-profile.json --updates <private_updates.json>   # dry run
+python tools/migrate_profile_blueprints.py --profile data/master-profile.json --updates <private_updates.json> --apply
+python resume_refiner.py validate data/master-profile.json
+```
+
 Package generation also pauses when the profile contains an obvious inconsistent same-employer progression, such as an earlier lower-seniority role marked `Present` after a later higher-seniority role has ended. Confirm and store the exact date before retrying; do not guess it. Each successful package includes a private `tailoring_manifest.json` recording the selected mode, variant ID, profile digest, page count, and readiness checks.
 
 ## 5. Dedicated application mailbox and dual-account model
@@ -255,6 +263,29 @@ The user logs in manually and handles any 2FA/CAPTCHA. Automation later reuses t
 
 ## 7. Job recommendation flow
 
+### Owner resume quality rollout
+
+Install the updated `requirements.txt` in the owner's existing virtual environment. `PyMuPDF` and `pypdf` are mandatory for PDF verification; a missing verifier blocks quality generation. Existing profiles and invited candidates retain their current behavior unless their private profile explicitly opts in.
+
+Back up the private profile before adding approved evidence and a new draft variant. Separate factual employer/client dates from presentation preferences. `resume_quality.enabled` stays false until the candidate reviews the complete public snapshot, omissions, role terms and matching terms for `activation_variant_id`. Never mark a draft confirmed just to test it. The review-only CLI works with a stored draft and does not change the application database, send Telegram messages, upload documents or submit an application:
+
+```bash
+python resume_refiner.py validate data/master-profile.json
+python resume_quality.py --profile data/master-profile.json \
+  --variant <pending_variant_id> --job-json data/resume-drafts/job.json \
+  --output data/resume-drafts/preview.pdf
+```
+
+The model draft and independent evidence review reuse `SharedOwnerPlanner`, the existing owner-auth socket and the configured provider. Defaults are `/opt/jobhunter-hermes`, its `venv/bin/python`, and `/run/jobhunter-auth/auth.sock`; deployments can set `JOBHUNTER_HERMES_SOURCE`, `JOBHUNTER_HERMES_PYTHON` and `JOBHUNTER_OWNER_AUTH_SOCKET`. Do not create another Telegram listener or copy credentials. The model receives only selected public evidence and job data, with tools disabled.
+
+Inspect every generated page image and the actual PDF. The private manifest records selected evidence, review flags, explicit or overflow omissions, page count and actual audit results. One-page fitting measures both columns and tries to use 92% of the main column's available height with approved full wording. Set `resume_quality.fill_same_employer_projects: true` only after the candidate explicitly permits additional relevant projects under included employers; candidates come from candidate-reviewed employment groups, and each trial must remain one page. Unrelated work and excluded employers are never added to fill space. Review the `one_page_fill` manifest entry for accepted additions and the reason unused space remains. Replay the same reviewed summary and fixture on local/Pi installations to compare text, links, emphasis and layout. For an owner Apply text reply, an explicitly reviewed summary can be supplied using `callback_handler.py --apply <job_id> --resume-summary-draft data/resume-drafts/summary.json`; context mismatch blocks it.
+
+After candidate approval, confirm only that new variant and set the policy enabled through a backed-up, validated update. Keep previous variants and private supporting facts. Deployment rollback restores only the backed-up task files and profile, after checking for intervening changes; it never rewinds application records. A generation failure keeps the previous package and stage.
+
+Use `resume_quality.group_bullets_by_client: true` when the candidate requires all project achievements under customer headings. This removes employer-level highlights in selection, preview and fitting; ranking remains within customer sections. Order MaibornWolff client projects by job relevance with newest-first client dates for ties and no project-order caption. Apply it before measuring available space. Keep the variant draft until the corrected customer layout has been reviewed. All resume paths use text-only employer and education headings without logos.
+
+To preserve a reviewed project's opening, add `opening_evidence_ids` to its private `employment_groups[].engagements[]` record, containing one to three evidence-bank IDs in the candidate's approved order. Every referenced record must be candidate-confirmed, public, resume-visible and present verbatim in that project's bullet list. The fill pass tries the opening before feature details, with a two-point fallback for a three-point opening that does not fit. It leaves out the project if its opening cannot fit. This preference never adds omitted facts to an existing variant snapshot.
+
 Typical flow:
 
 1. `scraper.py --collect-only` collects candidates into local SQLite.
@@ -374,6 +405,36 @@ Security notes:
 - Do not share browser profiles, cookies, or remote-debugging ports outside the machine.
 - The agent may continue after the user finishes the CAPTCHA, but it should never solve the CAPTCHA itself.
 
+### Auto-apply (autopilot)
+
+The autopilot (`jobhunter_autopilot/`) lets the engine submit without a per-application approval, but only for jobs its policy selects and only through `--policy-run` actions, which `jobhunter_autopilot.gate` authorizes (refusal exits 4). It is disabled by default.
+
+1. Check the policy and fill missing application facts (visa, notice period, …) that forms ask for:
+
+   ```bash
+   python -m jobhunter_autopilot.cli config show
+   python -m jobhunter_autopilot.cli config defaults set notice_period="1 month" requires_visa_sponsorship=no
+   python -m jobhunter_autopilot.cli plan --dry-run   # read-only; lists preflight.missing_application_defaults
+   ```
+
+   The policy lives in `~/.jobhunter/state/auto_apply.json` (0600). Change it only with `config set K=V` (`min_score`, `min_resume_score`, `max_per_day`, `roles`, `locations.cities`, `companies.allow`, `companies.deny`, `preferred_stack`), `enable`, `disable`, `pause [--until DATE]`, `resume`, `live`, `rehearsal`, `reset`.
+2. Install the Hermes skill `auto-apply` and the wrapper scripts `jobhunter_autopilot.py`, `jobhunter_autopilot_review_batch.py`, `jobhunter_autopilot_plan.py` under `~/.hermes/`, then start a new Hermes session so the skill is visible. In Telegram, plain phrases such as "auto apply settings", "set auto apply min score 80", "enable auto apply" or "auto apply go live" run the matching `config` command.
+3. Create the two cron jobs (full commands in the `auto-apply` skill, "Operator setup"):
+
+   ```bash
+   hermes cron create "0 20 * * *" "<review prompt>" --name jobhunter-autopilot-review --deliver telegram \
+     --skill job-hunter --skill auto-apply --script jobhunter_autopilot_review_batch.py \
+     --workdir /path/to/JobHunter --model <model> --provider <provider>
+   hermes cron create "40 20 * * *" "<apply prompt>" --name jobhunter-autopilot-apply --deliver telegram \
+     --skill job-hunter --skill auto-apply --script jobhunter_autopilot_plan.py \
+     --workdir /path/to/JobHunter --model <model> --provider <provider>
+   ```
+
+   The plan pre-run does selection, availability checks, salary/company research, packages and answers before the agent starts, so the agent's terminal timeout does not cut them off.
+4. Rehearsal → live: `config enable` turns it on in `rehearsal` mode (every form filled, final submit refused, screenshot saved, summary sent). After checking a few rehearsals, `config set max_per_day=1` and `config live`. A submit counts as `submitted` only after `verify-receipt` confirms the portal receipt; raise the cap once a few live runs look right.
+
+   A package whose resume scores below `min_resume_score` (default 60) or is flagged for review is handed off as `resume_needs_review` at plan time and never applied unattended.
+
 ## 9. Privacy Notice / Terms & Conditions gates
 
 When an ATS asks for a Privacy Notice, Terms & Conditions, certification, or similar legal acknowledgement:
@@ -489,6 +550,8 @@ Recommended setup:
 7. Set `JOBHUNTER_TRACKER_SHARE_WITH` in private `.env` to the main/personal Google account (comma-separated for multiple named readers). Sync verifies or grants reader access to its managed evidence folder without notification emails, so existing and future uploads can be opened from the Sheet. It does not make the folder public or modify unrelated old Drive folders. Include this setting in encrypted recovery.
 
 The scheduled mail monitor also retries enabled tracker sync after every check, even without new replies, and reports retry failures through cron delivery. Include the separate tracker token and private state files `tracker_drive_files.json`, `tracker_sync_state.json`, and `tracker_before_sync.json` in encrypted recovery. The last file is the sheet snapshot saved before the most recent write; a no-change sync preserves it.
+
+For tracked-offer closure monitoring, first run `python -m jobhunter_integrations.listing_monitor --dry-run` with the existing tracker and Telegram configuration. Then schedule the same module without `--dry-run`; the Pi uses its project-Python wrapper at 17:00 daily Africa/Tunis. It checks all Sheet statuses except `closed` and `rejected`, preserves submitted applications, and displays confirmed closures as slate-gray `closed` rows (`#B7C2CC`). Closure records and pending Telegram alerts live in `tracker_listing_closures` inside the existing jobs database; include that database in the normal backup. Use `--use-recorded-closures` once to import existing audited closure records. Never infer closure from a timeout, login wall or unsupported page. Sheet synchronization and exact read-back precede Telegram delivery; failed deliveries retry on the next run. The monitor reports sanitized failures to Telegram and its private cron log.
 
 Useful formatting for the tracker:
 

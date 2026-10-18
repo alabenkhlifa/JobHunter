@@ -468,7 +468,7 @@ import scraper
 def test_scraper_score_job_delegates_to_the_rubric():
     strong = {
         "title": "Backend Lead - Microservices Architect", "company": "PureCS",
-        "location": "Dubai, United Arab Emirates",
+        "location": "Madrid, Spain",
         "tech_required": "kotlin, spring boot, microservices, kubernetes, aws",
         "tech_nice_to_have": "", "min_experience": 6, "description": "",
         "company_website": "https://purecs.example", "recruiter_company": "",
@@ -494,9 +494,10 @@ def test_the_scraper_reads_its_markets_from_job_scoring():
     # the measurement tool. It holds the current markets and nothing
     # else: the wider Gulf was an evaluation convenience, never a choice.
     assert list(scraper.CONFIG["allowed_locations"]) == list(job_scoring.DEFAULT_MARKETS)
-    for market in ("dubai", "madrid", "valencia", "valència", "jeddah", "riyadh", "switzerland", "zurich", "lausanne"):
+    for market in ("valencia", "valència", "madrid", "barcelona"):
         assert market in job_scoring.DEFAULT_MARKETS, market
-    for market in ("abu dhabi", "sharjah", "saudi", "saudi arabia", "united arab emirates", "spain"):
+    for market in ("dubai", "jeddah", "riyadh", "switzerland", "zurich", "lausanne",
+                   "abu dhabi", "sharjah", "saudi", "saudi arabia", "united arab emirates", "spain"):
         assert market not in job_scoring.DEFAULT_MARKETS, market
 
 
@@ -508,22 +509,21 @@ def test_the_shipped_threshold_is_the_rubrics_send_cutoff():
 
 
 def test_allowed_locations_cover_the_board_spellings_of_the_chosen_markets():
-    for location in ("Jiddah, Makkah, Saudi Arabia", "Jeddah, Saudi Arabia",
-                     "Dubai, United Arab Emirates", "Madrid, Spain", "Valencia, Spain",
-                     "València, Comunitat Valenciana", "Zurich, Switzerland",
-                     "Riyadh, Saudi Arabia", "Saudi Arabia, Riyadh", "Riyadh Region"):
+    for location in ("Madrid, Spain", "Valencia, Spain", "València, Comunitat Valenciana",
+                     "Barcelona, Spain", "Barcelona, Catalonia", "Barcelona, Cataluña", "Barcelona, Catalunya"):
         assert job_scoring.knockout({"title": "Software Architect", "location": location,
                                      "description": "", "min_experience": 6},
                                     allowed_locations=job_scoring.DEFAULT_MARKETS) is None, location
 
 
 def test_allowed_locations_still_exclude_the_markets_he_declined():
-    # Jeddah and Riyadh are the two Saudi cities he chose; the country is not
-    # a market, so a bare "Saudi Arabia" or any other Saudi city stays out.
+    # Only the three selected Spanish cities qualify, not a whole country.
     for location in ("Abu Dhabi, United Arab Emirates", "Sharjah, United Arab Emirates", "United Arab Emirates",
                      "Saudi Arabia", "Dammam, Eastern, Saudi Arabia",
                      "Riyad Qana, Al Qasim, Saudi Arabia", "Cairo, Egypt",
-                     "Madrid, Missouri, United States", "Valencia, California, United States"):
+                     "Madrid, Missouri, United States", "Valencia, California, United States",
+                     "Barcelona, Anzoátegui, Venezuela", "Dubai, United Arab Emirates",
+                     "Jeddah, Saudi Arabia", "Riyadh, Saudi Arabia", "Zurich, Switzerland", "Spain", "Seville, Spain"):
         assert job_scoring.knockout({"title": "Software Architect", "location": location,
                                      "description": "", "min_experience": 6},
                                     allowed_locations=job_scoring.DEFAULT_MARKETS), location
@@ -549,11 +549,7 @@ def test_duplicate_key_separates_the_same_role_in_two_countries():
 # stay an explicit list so a dedup fix cannot widen the job search.
 def test_default_markets_is_exactly_the_markets_he_chose():
     assert job_scoring.DEFAULT_MARKETS == (
-        "dubai", "madrid", "valencia", "valència", "jeddah", "jiddah", "riyadh",
-        "switzerland", "schweiz", "suisse", "svizzera",
-        "zurich", "zürich", "geneva", "genève", "genf",
-        "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
-        "sankt gallen", "st. gallen",
+        "valencia", "valència", "madrid", "barcelona",
     )
 
 
@@ -673,7 +669,7 @@ def test_the_duplicate_guard_is_seeded_from_the_database(tmp_path):
     assert job_scoring.duplicate_key(stale) not in keys
     assert job_scoring.knockout(
         dict(repost, description="", min_experience=6),
-        allowed_locations=job_scoring.DEFAULT_MARKETS,
+        allowed_locations=UAE,
         seen_keys=keys,
     ) == "duplicate of a posting already seen"
 
@@ -930,6 +926,75 @@ def test_spoken_languages_are_not_knockouts(text):
 def test_spoken_language_does_not_exempt_a_required_unsupported_language():
     text = "Fluent French and German are required."
     assert job_scoring.knockout(job(description=text), allowed_locations=UAE) == "language barrier: German"
+
+
+SPANISH_BODY = ("Buscamos un arquitecto de software para liderar el equipo de desarrollo. Requisitos: experiencia de 5 años "
+                "en Java y Spring, conocimientos de AWS. Funciones: diseñar la arquitectura de los microservicios y acompañar "
+                "a los equipos en las decisiones técnicas. Ofrecemos un puesto estable en una empresa consolidada, trabajo "
+                "híbrido en Madrid y proyectos internacionales. ") * 2
+ENGLISH_BODY = ("We are looking for a software architect to lead the development team. Requirements: 5 years of experience "
+                "with Java and Spring, knowledge of AWS. You will design the architecture of our microservices and support "
+                "the teams in their technical decisions. We offer a stable position in an established company, hybrid work "
+                "in Madrid and international projects. ") * 2
+
+
+def test_spanish_only_body_is_knocked_out_but_a_bilingual_posting_is_not():
+    assert job_scoring.language_body_barrier(job(description=SPANISH_BODY)) == "language barrier: Spanish"
+    assert job_scoring.language_body_barrier(job(description=SPANISH_BODY + ENGLISH_BODY)) is None
+    assert job_scoring.language_body_barrier(job(description=ENGLISH_BODY)) is None
+    assert job_scoring.evaluate(job(description=SPANISH_BODY), allowed_locations=UAE)["reason"] == "language barrier: Spanish"
+
+
+@pytest.mark.parametrize("text", [
+    "Fluent Spanish required", "Spanish: C1", "Must speak Spanish", "Español nivel alto", "Nivel alto de español",
+    "Native Spanish speaker", "Spanish and English fluency", "Business-level Spanish", "Good command of Spanish",
+    "Fluent in Spanish and English (C1)", "Spanish language skills are mandatory",
+    "Spanish speaking clients, must be fluent",
+])
+def test_required_spanish_is_a_barrier(text):
+    assert job_scoring.language_requirement_barrier(job(description=text)) == "language barrier: Spanish"
+
+
+@pytest.mark.parametrize("text", [
+    # Waived or optional.
+    "Spanish is a plus", "No Spanish required", "Spanish not required", "No Spanish needed",
+    "Spanish is not required, English is mandatory", "You don't need to speak Spanish. English is required.",
+    "Spanish valorable", "Sin necesidad de español",
+    # The adjective, not the language.
+    "A Spanish fintech with excellent benefits", "Spanish market; must have Java", "Strong Spanish team",
+    "Spanish payroll experience required", "Native cloud platform for the Spanish public sector",
+    # No speaking or level context: left to the reviewer.
+    "Spanish required",
+])
+def test_spanish_mentions_without_a_language_requirement_are_not_barriers(text):
+    assert job_scoring.language_requirement_barrier(job(description=text)) is None
+    assert job_scoring.knockout(job(description=text), allowed_locations=UAE) is None
+
+
+@pytest.mark.parametrize("text", [
+    "C1+ level in either English or Spanish (fluency in either is acceptable).",
+    "Fluent in English and/or Spanish.", "Fluent Spanish or English required.", "Native English or Spanish speaker.",
+])
+def test_either_language_is_enough(text):
+    assert job_scoring.language_requirement_barrier(job(description=text)) is None
+
+
+@pytest.mark.parametrize("note,reason", [
+    ("board: fluent Spanish required", "language barrier: Spanish (board)"),
+    ("board: native Spanish required", "language barrier: Spanish (board)"),
+    ("board: ad written in Spanish, Spanish requirement not stated", "language barrier: Spanish (board: ad written in Spanish)"),
+    ("board: ad in English, Spanish requirement not stated; Turkish required", "language barrier: Turkish (board)"),
+    ("board: no Spanish needed (ad in English); Catalan required", "language barrier: Catalan (board)"),
+    ("board: no Spanish needed (ad in English)", None),
+    ("board: no Spanish needed (English required)", None),
+    ("board: Spanish not required; English working language", None),
+    ("board: ad in English, Spanish requirement not stated; French required", None),
+    ("Spanish required", None),  # not a board note: the text rules decide
+    ("", None),
+])
+def test_board_language_notes_knock_out_languages_he_does_not_speak(note, reason):
+    assert job_scoring.board_language_barrier(job(language_requirement=note)) == reason
+    assert job_scoring.knockout(job(language_requirement=note), allowed_locations=UAE) == reason
 
 
 @pytest.mark.parametrize("text", ["UAE nationals only", "Saudi national", "Emirati", "nationals only", "Saudization", "Emiratisation"])

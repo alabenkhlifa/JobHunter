@@ -5,11 +5,13 @@ import json
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
+import logging
 import time
 
 import job_scoring
 import jobhunter_availability as availability
 import jobhunter_matching
+from .diagnostics import error_category
 
 
 MAX_RUN_JOBS = 12
@@ -26,13 +28,23 @@ class DeliveryQueue:
         with self.service.mutation(user_id):
             return self._enqueue(user_id, run_id, message, selected_ids)
 
-    def _enqueue(self, user_id, run_id, message, selected_ids):
+    def enqueue_notice(self, user_id, run_id, message):
+        """Queue a private status message without sending or checking listings."""
+        with self.service.mutation(user_id):
+            return self._enqueue(user_id, run_id, message, [], notice=True)
+
+    def _enqueue(self, user_id, run_id, message, selected_ids, *, notice=False):
         member = self.service._member(user_id)
         from .telegram import message_chunks
         parts = message_chunks(message)
         if not parts:
             raise ValueError('A digest cannot be empty.')
-        destinations = json.loads(member['settings'])['telegram']['destinations']
+        destinations = ([{'kind': 'private', 'chat_id': str(user_id)}] if notice else
+                        json.loads(member['settings'])['telegram']['destinations'])
+        markup = None
+        if selected_ids and not notice:
+            from .presentation import digest_markup
+            markup = digest_markup(selected_ids)
         with self.service.store.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT user_id,revision FROM runs WHERE id=?', (run_id,)).fetchone()
@@ -45,12 +57,16 @@ class DeliveryQueue:
                 if destination['kind'] == 'channel':
                     self.client.validate_destination(user_id, destination)
                 for part, chunk in enumerate(parts):
-                    db.execute('INSERT INTO deliveries(run_id,user_id,chat_id,part,message) VALUES(?,?,?,?,?) '
+                    # Put navigation on the last part, after the complete digest.
+                    controls = markup if destination['kind'] == 'private' and part == len(parts) - 1 else None
+                    db.execute('INSERT INTO deliveries(run_id,user_id,chat_id,part,message,kind,reply_markup) VALUES(?,?,?,?,?,?,?) '
                                'ON CONFLICT(run_id,chat_id,part) DO NOTHING',
-                               (run_id, user_id, destination['chat_id'], part, chunk))
-            db.executemany('INSERT OR IGNORE INTO delivery_jobs VALUES(?,?,?)',
-                           [(run_id, user_id, job_id) for job_id in selected_ids])
-        self.reconcile(user_id)
+                               (run_id, user_id, destination['chat_id'], part, chunk,
+                                'notice' if notice else 'digest', json.dumps(controls) if controls else None))
+            db.executemany('INSERT OR IGNORE INTO delivery_jobs(run_id,user_id,job_id,position) VALUES(?,?,?,?)',
+                           [(run_id, user_id, job_id, index) for index, job_id in enumerate(selected_ids, 1)])
+        if not notice:
+            self.reconcile(user_id)
 
     def reconcile(self, user_id):
         with self.service.mutation(user_id):
@@ -185,8 +201,11 @@ class DeliveryQueue:
                             db.execute("UPDATE deliveries SET status='cancelled' WHERE user_id=? AND run_id=? AND status='pending'",
                                        (row['user_id'], row['run_id']))
                             continue
-                    key = (row['user_id'], row['run_id'], member['revision'])
-                    if key not in preflights:
+                    key = (row['user_id'], row['run_id'], member['revision'], row['kind'])
+                    if row['kind'] == 'notice':
+                        # A completed search's status does not depend on listings.
+                        preflights[key] = 'open'
+                    elif key not in preflights:
                         # Untouched runs must keep their priority for the next
                         # drain. Counting a budget skip as a retry would let old
                         # inconclusive sources starve every later profile.
@@ -202,24 +221,30 @@ class DeliveryQueue:
                     if preflights[key] != 'open':
                         raise RuntimeError('Listing availability is inconclusive; retry the whole digest.')
                     current_destinations = json.loads(member['settings'])['telegram']['destinations']
-                    destination = next((x for x in current_destinations if x['chat_id'] == row['chat_id']), None)
+                    destination = ({'kind': 'private', 'chat_id': str(row['user_id'])}
+                                   if row['kind'] == 'notice' and row['chat_id'] == str(row['user_id']) else
+                                   next((x for x in current_destinations if x['chat_id'] == row['chat_id']), None))
                     if destination is None:
                         with self.service.store.connect() as db:
                             db.execute("UPDATE deliveries SET status='cancelled' WHERE id=?", (row['id'],))
                         continue
                     if destination['kind'] == 'channel':
                         self.client.validate_destination(row['user_id'], destination)
-                    receipt = self.client.send_message(row['chat_id'], row['message'])
+                    markup = json.loads(row['reply_markup']) if row['reply_markup'] else None
+                    receipt = (self.client.send_message(row['chat_id'], row['message'], reply_markup=markup)
+                               if markup else self.client.send_message(row['chat_id'], row['message']))
                     message_id = receipt.get('message_id') if isinstance(receipt, dict) else None
                     if type(message_id) is not int or message_id <= 0:
                         raise RuntimeError('Telegram acknowledgement missing.')
-                except Exception:
+                except Exception as error:
                     failed += 1
+                    category = error_category(error)
                     with self.service.store.connect() as db:
-                        db.execute('UPDATE deliveries SET attempts=attempts+1 WHERE id=?', (row['id'],))
+                        db.execute('UPDATE deliveries SET attempts=attempts+1,last_error=? WHERE id=?', (category, row['id']))
+                    logging.getLogger('jobhunter').warning('Delivery %s deferred (%s); message retained.', row['id'], category)
                     continue
                 with self.service.store.connect() as db:
-                    db.execute("UPDATE deliveries SET status='sent',message_id=?,attempts=attempts+1 WHERE id=?", (message_id, row['id']))
+                    db.execute("UPDATE deliveries SET status='sent',message_id=?,attempts=attempts+1,last_error=NULL WHERE id=?", (message_id, row['id']))
                 sent += 1
         for user_id in {row['user_id'] for row in rows}:
             try:

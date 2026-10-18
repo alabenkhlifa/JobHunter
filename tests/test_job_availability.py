@@ -82,7 +82,8 @@ def test_open_requires_identified_title_company_description_and_application_cont
 
 
 @pytest.mark.parametrize("marker", ["No longer accepting applications", "This job posting is no longer available",
-                                    "This job has expired", "This position has been filled"])
+                                    "This job has expired", "This position has been filled",
+                                    "Not currently accepting applications"])
 def test_explicit_main_listing_closed_markers_override_apply_control(marker):
     result = run(page(status=marker))
     assert result["state"] == "closed" and result["reason"] == "closed_marker"
@@ -96,13 +97,82 @@ def test_linkedin_current_closed_figure_markup_is_recognized():
     assert run(html)["state"] == "closed"
 
 
-@pytest.mark.parametrize("status", [403, 429, 404, 410, 500, 204])
+@pytest.mark.parametrize("status", [403, 429, 404, 500, 204])
 def test_http_errors_are_retryable_even_when_error_body_contains_closed_text(status):
     response = Response(page(status="No longer accepting applications"), status=status)
     transport = Transport(response)
     result = availability.check(LINKEDIN, transport, NOW)
     assert result["state"] == "unknown" and result["reason"] == "http_unavailable"
     assert response.closed and len(transport.requests) == 2
+
+
+def test_gone_listing_closes_only_on_an_identified_closed_page():
+    response = Response(page(status="No longer accepting applications"), status=410)
+    result = availability.check(LINKEDIN, Transport(response), NOW)
+    assert (result["state"], result["reason"], result["matched"]) == ("closed", "closed_marker", True)
+    assert response.closed
+    # A 410 never opens a job, and closed text on another or unidentified page proves nothing.
+    for body in (page(), page(identifier="99999", status="No longer accepting applications"),
+                 "<h1>Gone</h1><p>No longer accepting applications</p>"):
+        result = availability.check(LINKEDIN, Transport(Response(body, status=410)), NOW)
+        assert (result["state"], result["reason"], result["matched"]) == ("unknown", "http_unavailable", False)
+
+
+def test_failed_fallback_keeps_what_the_identified_listing_showed():
+    # LinkedIn often answers the guest API with 429 right after serving the job page.
+    transport = Transport(Response(page(apply=False)), Response("", status=429))
+    result = availability.check(LINKEDIN, transport, NOW)
+    assert (result["state"], result["reason"], result["matched"]) == ("unknown", "no_open_evidence", True)
+    assert len(transport.requests) == 2
+
+
+SDJ = {"id": "sdj-7ufonly", "source": "Spain Dev Jobs", "title": "Senior Java Software Developer (m/f/d)",
+       "company": "Allianz", "url": "https://spain-devjobs.com/jobs/allianz-senior-java-software-developer-m-f-d-7ufonly"}
+
+
+def board_page(*, crumb=SDJ["url"], banner="This job is no longer accepting applications", banner_attributes="",
+               apply=False, description_extra=""):
+    """Markup of a Spain Dev Jobs page answered with 410 (2026-10-17): no canonical link or
+    JobPosting data, a BreadcrumbList naming the page and the closure in a status banner."""
+    trail = {"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": [
+        {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://spain-devjobs.com/"},
+        {"@type": "ListItem", "position": 2, "name": "Allianz", "item": "https://spain-devjobs.com/companies/allianz"},
+        {"@type": "ListItem", "position": 3, "name": SDJ["title"], "item": crumb}]}
+    status = (f'<div class="expired" role="status" {banner_attributes}><div><p class="expired__title">{banner}</p>'
+              '<p>See <a href="/companies/allianz">other jobs at Allianz</a> or the similar jobs below.</p></div></div>'
+              if banner else "")
+    button = '<a class="apply-btn" href="/go/01a11909-382f-7e9d-9996-d9eb6bd8630c">Apply</a>' if apply else ""
+    return (f'<html><head><title>{SDJ["title"]} at Allianz</title><meta name="robots" content="noindex,follow">'
+            f'<script type="application/ld+json">{json.dumps(trail)}</script></head><body><main>'
+            f'<div class="container job-page">{status}<header class="job-header" id="job-header">'
+            '<div class="job-header__top"><a class="job-header__company" href="/companies/allianz">'
+            '<span aria-label="Allianz" class="company-logo" role="img"><span aria-hidden="true">AL</span></span>'
+            f'<span>Allianz</span></a>{button}</div><h1 class="job-header__title">{SDJ["title"]}</h1></header>'
+            f'<article><div class="job-description">{DESCRIPTION}{description_extra}</div></article></div></main></body></html>')
+
+
+@pytest.mark.parametrize("status", [410, 200])
+def test_board_status_banner_closes_the_identified_listing(status):
+    result = availability.check(SDJ, Transport(Response(board_page(), status=status)), NOW)
+    assert (result["state"], result["reason"], result["matched"]) == ("closed", "closed_marker", True)
+    assert result["source_job_id"] == "7ufonly"
+
+
+def test_board_breadcrumb_naming_another_job_is_an_identity_mismatch():
+    other = "https://spain-devjobs.com/jobs/allianz-senior-java-software-developer-m-f-d-zzzzzzz"
+    result = availability.check(SDJ, Transport(Response(board_page(crumb=other))), NOW)
+    assert (result["state"], result["reason"]) == ("unknown", "identity_mismatch")
+    gone = availability.check(SDJ, Transport(Response(board_page(crumb=other), status=410)), NOW)
+    assert (gone["state"], gone["reason"]) == ("unknown", "http_unavailable")
+
+
+@pytest.mark.parametrize("page_fields", [{"banner_attributes": "hidden"}, {"banner": "Saved to your list"},
+                                         {"banner": "", "description_extra": '<div role="status"><p>Closed</p></div>'}],
+                         ids=["hidden-banner", "other-status", "status-in-description"])
+def test_other_or_hidden_status_regions_do_not_close_a_listing(page_fields):
+    assert availability.check(SDJ, Transport(Response(board_page(apply=True, **page_fields))), NOW)["state"] == "open"
+    gone = availability.check(SDJ, Transport(Response(board_page(**page_fields), status=410)), NOW)
+    assert (gone["state"], gone["reason"]) == ("unknown", "http_unavailable")
 
 
 def test_timeout_reason_never_exposes_exception_headers_or_credentials():

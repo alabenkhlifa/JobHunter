@@ -168,7 +168,10 @@ def create_app(service, *, google_client=None, admin_token=None, telegram_ingres
                 return cookie, remaining
         cookie, remaining = await asyncio.to_thread(start_session)
         response = web.HTTPFound('/browser/vnc.html?' + urlencode({'autoconnect': '1', 'resize': 'scale', 'path': 'browser/websockify'}))
-        response.set_cookie('jobhunter_browser', cookie, secure=True, httponly=True, samesite='Strict', max_age=remaining, path='/browser')
+        # A connection opened from Telegram can have a cross-site redirect
+        # chain. Lax permits this top-level GET; WebSocket Origin checks still
+        # reject other sites and the capability remains private and single-use.
+        response.set_cookie('jobhunter_browser', cookie, secure=True, httponly=True, samesite='Lax', max_age=remaining, path='/browser')
         raise response
 
     def browser_session(raw):

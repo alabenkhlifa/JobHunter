@@ -26,7 +26,7 @@ def test_format_job_message_includes_recruiter_and_credibility_notes():
         "id": "li-1",
         "title": "Lead Backend Engineer",
         "company": "ExampleCo",
-        "location": "Dubai",
+        "location": "Madrid",
         "url": "https://example.com/job",
         "source": "LinkedIn",
         "score": 25,
@@ -88,7 +88,7 @@ def test_assess_company_recruiter_credibility_penalizes_agencies_and_aggregators
 def test_score_job_scores_an_agency_posting_down_on_the_employer_dimension():
     job = {
         "title": "Lead Backend Engineer",
-        "location": "Dubai, United Arab Emirates",
+        "location": "Madrid, Spain",
         "tech_required": "Java AWS",
         "tech_nice_to_have": "",
         "company": "TALENTMATE",

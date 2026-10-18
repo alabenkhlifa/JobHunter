@@ -4,7 +4,8 @@ A successful HTTP response is not proof that applications are open. Only an
 identified listing with a description and an explicit application control can
 be delivered. An ``open`` result verifies the source listing only; it never
 verifies that an external ATS form has rendered or accepts applications.
-Transport failures and ambiguous source pages remain retryable.
+Transport failures and ambiguous source pages remain retryable. A 410 Gone
+reply is read only for an explicit, identified closure; it never opens a job.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 import requests
+
+import jobhunter_sources
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_REQUESTS = 4
@@ -85,7 +88,18 @@ def _url_identity(value):
         detail = re.fullmatch(r"/middleware/jobdetail/(\d{1,20})/?", parsed.path)
         if match or detail:
             return "foundit", (match or detail).group(1)
+    board = jobhunter_sources.by_host(host)
+    if board is not None:
+        match = re.fullmatch(board.job_path, parsed.path)
+        if match and match.group(1):
+            return board.key, match.group(1)
     return None
+
+
+def _board_source(declared):
+    """The identity key a job's declared source maps to: a board key or the name itself."""
+    board = jobhunter_sources.by_name(declared)
+    return board.key if board is not None else str(declared or "").strip().casefold()
 
 
 def _listing(job):
@@ -93,11 +107,16 @@ def _listing(job):
     if identity is None:
         return None
     source, source_id = identity
-    declared = str(job.get("source") or "").strip().casefold()
-    if declared and declared != source:
+    declared = str(job.get("source") or "").strip()
+    if declared and _board_source(declared) != source:
         return None
     local_id = str(job.get("id") or "")
+    owner = jobhunter_sources.by_job_id(local_id)
+    if owner is not None and owner.key != source:
+        return None
     if source == "linkedin" and local_id.startswith("foundit-") or source == "foundit" and local_id.startswith(("li-", "linkedin-")):
+        return None
+    if source in ("linkedin", "foundit") and owner is not None:
         return None
     local_match = re.fullmatch(r"(?:li|linkedin)-(\d+)", local_id) if source == "linkedin" else re.fullmatch(r"foundit-(\d+)", local_id)
     if local_match and local_match.group(1) != source_id:
@@ -108,13 +127,44 @@ def _listing(job):
         return Listing(source, source_id, f"https://www.linkedin.com/jobs/view/{source_id}",
                        f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{source_id}")
     parsed = _parsed_url(job["url"])
-    url = f"https://www.founditgulf.com{parsed.path.rstrip('/')}"
-    return Listing(source, source_id, url,
-                   f"https://www.founditgulf.com/middleware/jobdetail/{source_id}")
+    if source == "foundit":
+        url = f"https://www.founditgulf.com{parsed.path.rstrip('/')}"
+        return Listing(source, source_id, url,
+                       f"https://www.founditgulf.com/middleware/jobdetail/{source_id}")
+    board = jobhunter_sources.by_key(source)
+    if owner is not None and owner.key == source and local_id != jobhunter_sources.base.stable_id(board, source_id):
+        return None
+    # A board page has no second representation: the fallback is the same URL.
+    url = f"https://{board.canonical_host}{parsed.path.rstrip('/')}"
+    return Listing(source, source_id, url, url)
 
 
 class FetchFailure(Exception):
     pass
+
+
+class Gone(FetchFailure):
+    """HTTP 410 for the exact listing URL. Boards still render the job page with
+    its closure banner, so the body is kept for an explicit closed marker."""
+
+    def __init__(self, body):
+        super().__init__("http_unavailable")
+        self.body = body
+
+
+def _read(response, budget):
+    length = response.headers.get("Content-Length")
+    if length and (not str(length).isdigit() or int(length) > MAX_RESPONSE_BYTES):
+        raise FetchFailure("response_too_large")
+    chunks, size = [], 0
+    for chunk in response.iter_content(chunk_size=8192):
+        if time.monotonic() - budget[1] >= TOTAL_SECONDS:
+            raise FetchFailure("request_limit")
+        size += len(chunk)
+        if size > MAX_RESPONSE_BYTES:
+            raise FetchFailure("response_too_large")
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def _fetch(transport, url, listing, budget):
@@ -140,20 +190,11 @@ def _fetch(transport, url, listing, budget):
                     raise FetchFailure("unsafe_redirect")
                 url = urljoin(url, location)
                 continue
+            if response.status_code == 410:
+                raise Gone(_read(response, budget))
             if response.status_code != 200:
                 raise FetchFailure("http_unavailable")
-            length = response.headers.get("Content-Length")
-            if length and (not str(length).isdigit() or int(length) > MAX_RESPONSE_BYTES):
-                raise FetchFailure("response_too_large")
-            chunks, size = [], 0
-            for chunk in response.iter_content(chunk_size=8192):
-                if time.monotonic() - budget[1] >= TOTAL_SECONDS:
-                    raise FetchFailure("request_limit")
-                size += len(chunk)
-                if size > MAX_RESPONSE_BYTES:
-                    raise FetchFailure("response_too_large")
-                chunks.append(chunk)
-            return b"".join(chunks).decode("utf-8", errors="replace")
+            return _read(response, budget)
         except requests.RequestException:
             raise FetchFailure("request_failed") from None
         finally:
@@ -208,6 +249,32 @@ def _schema_identity(node, listing):
     return bool(identities) and all(identity == (listing.source, listing.source_id) for identity in identities)
 
 
+def _breadcrumb_identities(value, depth=0):
+    """The page's own URL from a BreadcrumbList: its last crumb. Expired board
+    pages drop the canonical link and JobPosting data but keep this trail."""
+    if depth > 4:
+        return
+    if isinstance(value, list):
+        for item in value[:20]:
+            yield from _breadcrumb_identities(item, depth + 1)
+    elif isinstance(value, dict):
+        if "@graph" in value:
+            yield from _breadcrumb_identities(value["@graph"], depth + 1)
+        items = value.get("itemListElement")
+        if value.get("@type") == "BreadcrumbList" and isinstance(items, list) and items:
+            last = items[-1]
+            target = last.get("item") if isinstance(last, dict) else None
+            if isinstance(target, dict):
+                target = target.get("@id") or target.get("url")
+            identity = _url_identity(target)
+            if identity:
+                yield identity
+
+
+def _closed_text(node):
+    return _visible(node) and bool(CLOSED.fullmatch(" ".join(node.get_text(" ", strip=True).split())))
+
+
 def _expired(value, now):
     if not isinstance(value, str):
         return False
@@ -226,16 +293,49 @@ def _expired(value, now):
 
 
 CLOSED = re.compile(r"^(?:(?:this|the) (?:job|job posting|position|vacancy) (?:is |has been |has )?)?"
-                    r"(?:no longer accepting applications|no longer available|not accepting applications|"
+                    r"(?:no longer accepting applications|no longer available|(?:not|not currently) accepting applications|"
                     r"closed|expired|removed|filled)[.!]?$", re.I)
-APPLY = re.compile(r"^(?:apply|apply now|apply for this job|apply on company (?:site|website)|"
-                   r"easy apply|quick apply)$", re.I)
+APPLY = re.compile(r"^(?:apply|apply now|apply for this (?:job|role|position)|apply on company (?:site|website)|"
+                   r"apply on (?:the )?(?:employer|company) (?:site|website|page)|apply on [^\n]{1,60} website|"
+                   r"easy apply|quick apply)"
+                   r"(?: \(opens in (?:a )?new (?:tab|window)\))?[\s!\u2192\u2197]*$", re.I)
+# Screen-reader-only text inside a control ("(opens in a new tab)") is not
+# part of its visible label.
+_A11Y_HIDDEN = ".visually-hidden, .sr-only, .screen-reader-text, .screen-reader-only, [aria-hidden='true']"
 HEADER_SELECTORS = {"linkedin": ".top-card-layout, .topcard, .jobs-unified-top-card, .job-details-jobs-unified-top-card",
                     "foundit": ".job-detail-header, .job-details-header, .jd-header, .job-header, [data-testid='job-header']"}
 DESCRIPTION_SELECTORS = {"linkedin": ".show-more-less-html__markup, .description__text, .jobs-description-content__text",
                          "foundit": ".job-description, .job-details-description, .jobDescription, [itemprop='description']"}
 COMPANY_SELECTORS = {"linkedin": ".topcard__org-name-link, .top-card-layout__first-subline a, .job-details-jobs-unified-top-card__company-name",
                      "foundit": ".company-name, .companyName, [itemprop='hiringOrganization']"}
+
+
+def _selectors(listing):
+    """Header, company and description selectors for a source."""
+    if listing.source in HEADER_SELECTORS:
+        return (HEADER_SELECTORS[listing.source], COMPANY_SELECTORS[listing.source],
+                DESCRIPTION_SELECTORS[listing.source])
+    board = jobhunter_sources.by_key(listing.source)
+    selectors = board.selectors if board is not None else {}
+    return (selectors.get("header") or "main > header, article > header",
+            selectors.get("company") or "[itemprop='hiringOrganization'], .company, .company-name",
+            selectors.get("description") or "[itemprop='description'], .job-description, .description")
+
+
+def _label(node):
+    """A control's visible label, without screen-reader-only text."""
+    copy = BeautifulSoup(str(node), "lxml")
+    for hidden in copy.select(_A11Y_HIDDEN):
+        hidden.decompose()
+    text = copy.get_text(" ", strip=True) or node.get("aria-label") or ""
+    return " ".join(text.split())
+
+
+def _apply_label(listing, label):
+    if APPLY.fullmatch(label):
+        return True
+    board = jobhunter_sources.by_key(listing.source)
+    return bool(board) and label.strip().casefold() in board.apply_labels
 
 
 def _visible(node):
@@ -251,10 +351,12 @@ def _html_check(body, listing, job, now):
     if (re.search(r"\b(?:sign in|log in|login|security verification|verify you are human|captcha)\b", title, re.I)
             or soup.select_one(".authwall, .challenge-page, #challenge-form, [data-testid='login-wall']")):
         return "unknown", "login_or_challenge", False
-    schemas = []
+    schemas, crumbs = [], []
     for script in soup.select("script[type='application/ld+json']")[:20]:
         try:
-            schemas.extend(_schema_nodes(json.loads(script.string or script.get_text())))
+            data = json.loads(script.string or script.get_text())
+            schemas.extend(_schema_nodes(data))
+            crumbs.extend(_breadcrumb_identities(data))
         except (ValueError, TypeError, RecursionError):
             continue
     schemas = [node for node in schemas if _schema_identity(node, listing) and _same_text(node.get("title"), job.get("title"))]
@@ -265,7 +367,8 @@ def _html_check(body, listing, job, now):
     # for the main job. Matching structured data was collected before pruning.
     for node in soup.select("script, style, template, aside, [class*='similar-jobs'], [class*='related-jobs'], [class*='recommended-jobs'], .jobs-you-may-like, [data-testid='recommended-jobs']"):
         node.decompose()
-    header = soup.select_one(HEADER_SELECTORS[listing.source])
+    header_selector, company_selector, description_selector = _selectors(listing)
+    header = soup.select_one(header_selector)
     if header is None:
         header = soup.select_one("main > header, article > header")
     heading = header.select_one("h1, h2.topcard__title") if header is not None else None
@@ -274,6 +377,7 @@ def _html_check(body, listing, job, now):
         identity = _url_identity(link.get("href") or link.get("content"))
         if identity:
             page_ids.append(identity)
+    page_ids.extend(crumbs)
     if header is not None:
         for node in (header, *header.select("[data-entity-urn], [data-job-id], a.topcard__link")):
             urn = re.fullmatch(r"urn:li:jobPosting:(\d{1,20})", str(node.get("data-entity-urn", "")))
@@ -289,22 +393,31 @@ def _html_check(body, listing, job, now):
         return "unknown", "identity_mismatch", False
     header_match = bool(page_ids) and heading is not None and _same_text(heading.get_text(" ", strip=True), job.get("title"))
     if header_match and job.get("company") and str(job["company"]).casefold() != "unknown":
-        company = header.select_one(COMPANY_SELECTORS[listing.source])
+        company = header.select_one(company_selector)
         header_match = company is not None and _same_text(company.get_text(" ", strip=True), job["company"])
     matched = bool(schemas) or header_match
     if not matched:
         return "unknown", "listing_unverified", False
     descriptions = [node.get("description") for node in schemas]
     if header_match:
-        descriptions += [node.get_text(" ", strip=True) for node in soup.select(DESCRIPTION_SELECTORS[listing.source])]
-        for node in header.select(DESCRIPTION_SELECTORS[listing.source]):
+        description_nodes = soup.select(description_selector)
+        descriptions += [node.get_text(" ", strip=True) for node in description_nodes]
+        for node in header.select(description_selector):
             node.decompose()
         # Some expired pages retain only the identified top card. An explicit
         # visible status on that card is sufficient; missing content alone is
         # never evidence of closure.
-        if any(_visible(node) and CLOSED.fullmatch(" ".join(node.get_text(" ", strip=True).split()))
-               for node in header.find_all(["span", "p", "div", "strong", "figure", "figcaption"])):
+        if any(_closed_text(node) for node in header.find_all(["span", "p", "div", "strong", "figure", "figcaption"])):
             return "closed", "closed_marker", True
+        # Boards put the closure in a status banner beside the header
+        # (Spain Dev Jobs: <div class="expired" role="status">). Only ARIA
+        # status/alert regions outside the description count.
+        inside = {id(node) for node in description_nodes}
+        for region in soup.select("[role='status'], [role='alert']"):
+            if any(id(node) in inside for node in (region, *region.parents)):
+                continue
+            if any(_closed_text(node) for node in (region, *region.find_all(["span", "p", "div", "strong", "h2", "h3"]))):
+                return "closed", "closed_marker", True
     if not any(_description(value) for value in descriptions):
         return "unknown", "missing_description", True
     if any(_description(node.get("description")) and _expired(node.get("validThrough"), now) for node in schemas):
@@ -313,9 +426,9 @@ def _html_check(body, listing, job, now):
         for node in header.select("button, a"):
             if node.has_attr("disabled") or node.get("aria-disabled") == "true" or not _visible(node):
                 continue
-            label = " ".join((node.get_text(" ", strip=True) or node.get("aria-label") or "").split())
+            label = _label(node)
             href = node.get("href")
-            if APPLY.fullmatch(label) and (node.name == "button" or href and not href.startswith("#") and _parsed_url(urljoin(listing.url, href))):
+            if _apply_label(listing, label) and (node.name == "button" or href and not href.startswith("#") and _parsed_url(urljoin(listing.url, href))):
                 return "open", "application_control", True
     return "unknown", "no_open_evidence", True
 
@@ -340,6 +453,12 @@ def _foundit_json(body, listing, job):
     if detail.get("isApplyAllowed") is True or (apply_url and (detail.get("isActive") is True or status == "ACTIVE")):
         return "open", "source_application_enabled", True
     return "unknown", "no_open_evidence", True
+
+
+def _gone(body, listing, job, now):
+    """410 Gone: only an identified page that states the closure closes the job."""
+    state, reason, matched = _html_check(body, listing, job, now)
+    return (state, reason, matched) if state == "closed" else ("unknown", "http_unavailable", False)
 
 
 def check(job, session=None, now=None):
@@ -368,11 +487,19 @@ def check(job, session=None, now=None):
                 body = _fetch(transport, url, listing, budget)
                 parsed = _foundit_json(body, listing, job) if listing.source == "foundit" else None
                 state, reason, matched = parsed or _html_check(body, listing, job, now)
+            except Gone as exc:
+                try:
+                    state, reason, matched = _gone(exc.body, listing, job, now)
+                except (ValueError, TypeError, RecursionError):
+                    state, reason, matched = "unknown", "http_unavailable", False
             except FetchFailure as exc:
                 state, reason, matched = "unknown", str(exc), False
             except (ValueError, TypeError, RecursionError):
                 state, reason, matched = "unknown", "listing_unverified", False
-            result.update(state=state, reason=reason, matched=matched)
+            # A failed fallback (often LinkedIn's 429 on the guest API) must not
+            # hide what the identified listing page already showed.
+            if state != "unknown" or matched or not result["matched"]:
+                result.update(state=state, reason=reason, matched=matched)
             if state != "unknown":
                 break
     finally:

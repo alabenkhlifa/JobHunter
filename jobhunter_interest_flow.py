@@ -8,6 +8,7 @@ network calls so Telegram callbacks remain reliable.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import html
 import json
@@ -27,10 +28,15 @@ import requests
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import job_scoring
 import scraper
+from resume_bullet_ranking import bullet_match, order_bullet_indexes
+from resume_inline import normalized_text
+import resume_blocks
+import resume_pipeline
+import resume_quality
 from resume_refiner import (
     apply_resume_variant,
     project_public_resume,
@@ -60,6 +66,21 @@ SALARY_MARKET_ALIASES = {
         "zurich", "z\u00fcrich", "geneva", "gen\u00e8ve", "genf",
         "basel", "bern", "lausanne", "zug", "lucerne", "luzern",
     ),
+    # Spain has no configured target: the ask is derived from researched
+    # market data (jobhunter_research), with no floor.
+    "spain": (
+        "spain", "espa\u00f1a", "espana", "remote spain", "madrid", "barcelona",
+        "valencia", "val\u00e8ncia", "sevilla", "seville", "m\u00e1laga", "malaga",
+        "bilbao", "zaragoza",
+    ),
+}
+
+# Currency and pay period per market, including markets without a target.
+SALARY_MARKET_UNITS = {
+    "uae": ("AED", "month"),
+    "saudi": ("SAR", "month"),
+    "switzerland": ("CHF", "year"),
+    "spain": ("EUR", "year"),
 }
 
 # Fallback bands are expressed as a fraction of the market target so they stay
@@ -149,6 +170,9 @@ class JobResearch:
     company_salary_checks: list[str] = field(default_factory=list)
     employer_name: str = ""
     posting_company: str = ""
+    # jobhunter_research.ResearchResult.to_dict(): salary basis/ranges/ask and
+    # company profile. None for briefs built without live research.
+    research: dict[str, Any] | None = None
 
 
 @dataclass
@@ -184,7 +208,7 @@ def salary_market(job: dict[str, Any] | None = None) -> str | None:
 def salary_target(job: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """The configured ask for a job's market, env override applied."""
     market = salary_market(job)
-    if market is None:
+    if market is None or market not in SALARY_TARGETS:
         return None
     target = dict(SALARY_TARGETS[market])
     env = f"JOBHUNTER_TARGET_SALARY_{target['currency']}_{target['period'].upper()}LY"
@@ -209,6 +233,8 @@ def format_salary(amount: int, currency: str, period: str) -> str:
 def target_salary_label(job: dict[str, Any] | None = None) -> str:
     target = salary_target(job)
     if target is None:
+        if salary_market(job) in SALARY_MARKET_UNITS:
+            return "Market-derived ask; no configured target"
         return "No configured target for this location"
     return format_salary(target["amount"], target["currency"], target["period"])
 
@@ -264,23 +290,57 @@ def firecrawl_api_url() -> str:
     ).rstrip("/")
 
 
-def firecrawl_search_results(query: str, *, timeout: float, poster=requests.post) -> list[dict[str, str]]:
+def firecrawl_headers() -> dict[str, str]:
+    """JSON headers, with the bearer key when FIRECRAWL_API_KEY is configured."""
+    headers = {"Content-Type": "application/json"}
+    key = (
+        os.getenv("FIRECRAWL_API_KEY", "").strip()
+        or _env_value_from_file(Path.home() / ".hermes" / ".env", "FIRECRAWL_API_KEY")
+    )
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def firecrawl_search_results(
+    query: str, *, timeout: float, poster=requests.post, notes: list[str] | None = None
+) -> list[dict[str, str]]:
     base_url = firecrawl_api_url()
     if not base_url:
         return []
+    endpoint = base_url + ("/search" if re.search(r"/v[12]$", base_url) else "/v1/search")
     try:
         response = poster(
-            f"{base_url}/v1/search",
+            endpoint,
             json={"query": query, "limit": 5},
-            headers={"Content-Type": "application/json"},
+            headers=firecrawl_headers(),
             timeout=timeout,
         )
-    except Exception:
+    except Exception as exc:
+        if notes is not None:
+            notes.append(f"Firecrawl search failed: {exc.__class__.__name__}.")
         return []
     if response.status_code >= 400:
+        if notes is not None:
+            notes.append(f"Firecrawl search returned HTTP {response.status_code}.")
         return []
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError:
+        if notes is not None:
+            notes.append("Firecrawl search returned invalid JSON.")
+        return []
+    if not isinstance(payload, dict) or payload.get("success") is False:
+        if notes is not None:
+            notes.append("Firecrawl search reported failure.")
+        return []
     rows = payload.get("data") if isinstance(payload, dict) else []
+    if isinstance(rows, dict):
+        rows = rows.get("web")
+    if not isinstance(rows, list):
+        if notes is not None:
+            notes.append("Firecrawl search returned an unsupported result shape.")
+        return []
     results: list[dict[str, str]] = []
     for row in rows or []:
         if not isinstance(row, dict):
@@ -288,8 +348,10 @@ def firecrawl_search_results(query: str, *, timeout: float, poster=requests.post
         title = " ".join(str(row.get("title") or "").split())
         url = str(row.get("url") or "").strip()
         snippet = " ".join(str(row.get("description") or row.get("snippet") or row.get("content") or "").split())
-        if title and url:
+        if title and urlparse(url).scheme in {"http", "https"} and urlparse(url).hostname:
             results.append({"title": title, "url": url, "snippet": snippet})
+    if not results and notes is not None:
+        notes.append("Firecrawl search returned no results.")
     return results
 
 
@@ -297,25 +359,21 @@ def web_search_results(
     query: str,
     *,
     timeout: float | None = None,
-    fetcher=requests.get,
+    fetcher=None,
     poster=requests.post,
+    notes: list[str] | None = None,
 ) -> list[dict[str, str]]:
+    """Firecrawl (when configured), then Brave HTML, then DuckDuckGo lite.
+
+    Every provider failure yields ``[]``; with ``notes`` the reason is kept.
+    """
+    from jobhunter_research import search as research_search
+
     timeout = timeout if timeout is not None else float(os.getenv("JOBHUNTER_WEB_RESEARCH_TIMEOUT", "8"))
-    firecrawl_results = firecrawl_search_results(query, timeout=timeout, poster=poster)
+    firecrawl_results = firecrawl_search_results(query, timeout=timeout, poster=poster, notes=notes)
     if firecrawl_results:
         return firecrawl_results
-    try:
-        response = fetcher(
-            "https://duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": "Mozilla/5.0 JobHunter research bot"},
-            timeout=timeout,
-        )
-    except Exception:
-        return []
-    if response.status_code != 200:
-        return []
-    return parse_duckduckgo_results(response.text)
+    return research_search.fallback_search(query, timeout=timeout, fetcher=fetcher, notes=notes)
 
 
 def salary_search_queries(title: str, location: str) -> list[str]:
@@ -330,12 +388,12 @@ def salary_search_queries(title: str, location: str) -> list[str]:
             f"{place} {normalized_title} salary",
         ]
     if market != "uae":
-        target = SALARY_TARGETS[market]
+        currency = SALARY_MARKET_UNITS[market][0]
         place = city or location
         return [
             f"site:glassdoor.com {place} {normalized_title} salary",
             f"site:indeed.com {place} {normalized_title} salary",
-            f"{place} {normalized_title} salary {target['currency']}",
+            f"{place} {normalized_title} salary {currency}",
         ]
     city = city or "Dubai"
     return [
@@ -456,7 +514,7 @@ def fetch_levels_salary_source(
             response = poster(
                 f"{base_url}/v1/scrape",
                 json={"url": candidate_url, "formats": ["markdown"]},
-                headers={"Content-Type": "application/json"},
+                headers=firecrawl_headers(),
                 timeout=timeout,
             )
             if response.status_code >= 400:
@@ -513,6 +571,19 @@ COMPANY_GENERIC_WORDS = {
     "cloud", "digital", "global", "group", "holding", "international", "software",
     "solutions", "systems", "technologies", "technology", "web", "services",
 }
+COMPANY_HOST_SUFFIXES = {
+    "global", "group", "technologies", "technology", "services", "systems", "solutions",
+    "international", "holdings", "holding", "consulting", "consultancy", "corporation", "corp",
+}
+
+
+def _host_label_matches_company(label: str, alias_token: str) -> bool:
+    """Match the brand as a whole host-label token, optionally plus a known corporate suffix."""
+    compact_label = re.sub(r"[^a-z0-9]", "", str(label or "").lower())
+    if not alias_token or not compact_label.startswith(alias_token):
+        return False
+    remainder = compact_label[len(alias_token):]
+    return not remainder or remainder in COMPANY_HOST_SUFFIXES
 
 
 def company_identity_aliases(company: str) -> list[str]:
@@ -521,6 +592,10 @@ def company_identity_aliases(company: str) -> list[str]:
     if not raw:
         return []
     parenthetical = re.findall(r"\(([^()]{2,30})\)", raw)
+    # Regional/legal labels often describe a posting entity rather than the
+    # public brand (for example "UST España & Latam"). Keep the distinctive
+    # first brand token as an alias, but do not turn short initials into broad
+    # substring matches.
     base = " ".join(re.sub(r"\([^()]*\)", " ", raw).split()).strip(" ,-–—")
     legal_pattern = "|".join(re.escape(value) for value in sorted(COMPANY_LEGAL_SUFFIXES, key=len, reverse=True))
     base = re.sub(rf"(?:[\s,.-]+(?:{legal_pattern}))+$", "", base, flags=re.IGNORECASE).strip(" ,-–—")
@@ -532,6 +607,8 @@ def company_identity_aliases(company: str) -> list[str]:
         aliases.append(distinctive[0])
     elif words and len(words[0]) >= 4 and words[0].lower() not in COMPANY_GENERIC_WORDS:
         aliases.append(words[0])
+    elif words and len(words[0]) == 3 and words[0].isupper():
+        aliases.append(words[0])
     aliases.extend(value.strip() for value in parenthetical)
     if len(words) >= 2:
         aliases.append("".join(word[0] for word in words).upper())
@@ -540,7 +617,9 @@ def company_identity_aliases(company: str) -> list[str]:
     seen_tokens: set[str] = set()
     for alias in aliases:
         token = re.sub(r"[^a-z0-9]", "", alias.lower())
-        short_public_name = len(token) >= 2 and alias.upper() == alias
+        short_public_name = len(token) >= 2 and alias.upper() == alias and (
+            bool(parenthetical) or len(token) <= 2
+        )
         if (len(token) >= 3 or short_public_name) and token not in seen_tokens:
             seen_tokens.add(token)
             deduped.append(alias)
@@ -551,9 +630,12 @@ def company_search_name(company: str) -> str:
     aliases = company_identity_aliases(company)
     if not aliases:
         return ""
+    first_word = re.findall(r"[A-Za-z0-9]+", aliases[0])[0] if aliases[0] else ""
     single_brand = next(
-        (alias for alias in aliases[1:] if " " not in alias and len(alias) >= 4 and not alias.isupper()),
+        (alias for alias in aliases[1:] if alias.lower() == first_word.lower() and len(alias) >= 3),
         "",
+    ) or next(
+        (alias for alias in aliases[1:] if " " not in alias and len(alias) >= 4 and not alias.isupper()), ""
     )
     explicit_parenthetical = {
         re.sub(r"[^a-z0-9]", "", value.lower())
@@ -573,16 +655,18 @@ def company_search_name(company: str) -> str:
 def _result_matches_company(company: str, result: dict[str, str]) -> bool:
     """Require the employer identity in the title or URL, never only the snippet."""
     aliases = company_identity_aliases(company)
-    title_token = re.sub(r"[^a-z0-9]", "", str(result.get("title") or "").lower())
     parsed = urlparse(str(result.get("url") or ""))
-    url_token = re.sub(r"[^a-z0-9]", "", f"{parsed.netloc}{parsed.path}".lower())
+    title = str(result.get("title") or "")
+    host_labels = {label.lower().removeprefix("www.") for label in parsed.netloc.split(".")}
     boundary_text = f"{result.get('title') or ''} {parsed.netloc} {parsed.path}".lower()
     for alias in aliases:
         alias_token = re.sub(r"[^a-z0-9]", "", alias.lower())
-        if len(alias_token) <= 3:
-            if re.search(rf"(?<![a-z0-9]){re.escape(alias.lower())}(?![a-z0-9])", boundary_text):
+        if any(_host_label_matches_company(label, alias_token) for label in host_labels):
+            return True
+        if len(alias_token) <= 4:
+            if re.search(rf"(?<![a-z0-9]){re.escape(alias.lower())}(?![a-z0-9])", title.lower()):
                 return True
-        elif alias_token in title_token or alias_token in url_token:
+        elif re.search(rf"(?<![a-z0-9]){re.escape(alias.lower())}(?![a-z0-9])", boundary_text):
             return True
     return False
 
@@ -602,17 +686,14 @@ def _result_matches_role(title: str, result: dict[str, str]) -> bool:
 
 def _is_official_company_result(company: str, url: str) -> bool:
     host = urlparse(str(url or "")).netloc.lower().removeprefix("www.")
-    host_token = re.sub(r"[^a-z0-9]", "", host)
-    host_labels = {re.sub(r"[^a-z0-9]", "", label) for label in host.split(".")}
+    host_labels = host.split(".")
     blocked_hosts = ("glassdoor", "indeed", "payscale", "gulftalent", "levels", "linkedin")
-    alias_tokens = [
-        re.sub(r"[^a-z0-9]", "", alias.lower())
-        for alias in company_identity_aliases(company)
-    ]
+    aliases = company_identity_aliases(company)
+    alias_tokens = [re.sub(r"[^a-z0-9]", "", alias.lower()) for alias in aliases]
     return bool(
-        not any(blocked in host_token for blocked in blocked_hosts)
+        not any(blocked in re.sub(r"[^a-z0-9]", "", host) for blocked in blocked_hosts)
         and any(
-            (len(token) >= 3 and token in host_token) or (len(token) == 2 and token in host_labels)
+            any(_host_label_matches_company(label, token) for label in host_labels)
             for token in alias_tokens
         )
     )
@@ -629,11 +710,20 @@ def resolve_research_employer(job: dict[str, Any]) -> tuple[str, str]:
     return (employer, posting_company) if employer != posting_company else (posting_company, "")
 
 
+# Boards whose structured salary field is the employer's own published pay
+# (scraper.evaluate_job stores it as jobs.salary; it never reaches the body).
+TRUSTED_SALARY_BOARDS = ("Spain Dev Jobs", "SpainJobs.io")
+
+
 def validated_job_salary(job: dict[str, Any]) -> str:
     """Revalidate legacy stored salary text against its labelled location."""
     stored = str(job.get("salary") or "").strip()
     if not stored:
         return ""
+    from jobhunter_research.salary import parse_salary_text
+
+    if str(job.get("source") or "") in TRUSTED_SALARY_BOARDS and parse_salary_text(stored):
+        return stored
     description = str(job.get("description") or "")
     normalized_stored = re.sub(r"[\s,]+", "", stored).lower()
     normalized_description = re.sub(r"[\s,]+", "", description).lower()
@@ -645,9 +735,14 @@ def validated_job_salary(job: dict[str, Any]) -> str:
     matches = list(re.finditer(re.escape(stored), description, flags=re.IGNORECASE))
     for match in matches:
         label = scraper._salary_location_label(description, match.start())
+        # The stored span may carry its own label ("Salary: \u20ac60,000 - ..."),
+        # so pay context inside the match counts too.
         if (
             scraper._salary_matches_job_location(label, str(job.get("location") or ""))
-            and _amount_has_pay_context(description, match.start(), match.end())
+            and (
+                _amount_has_pay_context(description, match.start(), match.end())
+                or scraper._salary_has_pay_context(description, match.start(), match.end())
+            )
         ):
             return stored
     return ""
@@ -663,115 +758,52 @@ def company_profile_search_queries(company: str, title: str, location: str) -> l
 
 
 def _compact_company_summary(company: str, location: str, results: list[dict[str, str]]) -> str:
-    city = str(location or "").split(",", 1)[0].strip()
-    text = " ".join(f"{item.get('title', '')} {item.get('snippet', '')}" for item in results)
-    lowered = text.lower()
-    financial_product_terms = sum(
-        term in lowered for term in ("spending", "saving", "investing", "exchanging")
-    )
-    if "database platform" in lowered or "database technology" in lowered:
-        company_type = "database technology company"
-    elif any(term in lowered for term in ("cloud services", "cloud provider", "aws cloud", "migrate to the cloud")):
-        company_type = "cloud technology company"
-    elif "fintech" in lowered or "financial technology" in lowered or financial_product_terms >= 3:
-        company_type = "financial technology company"
-    elif any(term in lowered for term in ("technology consultancy", "technology consulting", "tech consultancy")):
-        company_type = "technology consultancy"
-    elif any(term in lowered for term in ("software company", "software development")):
-        company_type = "software company"
-    else:
-        company_type = "technology company"
+    # Snippets can describe the target role rather than the employer. Never
+    # synthesize a company type or focus from nearby technology keywords.
+    from jobhunter_research.company import summary_from_texts
 
-    focus: list[str] = []
-    if "legacy" in lowered and any(term in lowered for term in ("modernisation", "modernization", "modernise", "modernize")):
-        focus.append("legacy-system modernization")
-    if any(term in lowered for term in ("systems integration", "system integration", "apis", "api architecture")):
-        focus.append("systems integration")
-    if any(term in lowered for term in ("software architecture", "solution architecture", "architecture design")):
-        focus.append("software architecture")
-    if "cloud" in lowered and company_type != "cloud technology company":
-        focus.append("cloud platforms")
-    if "artificial intelligence" in lowered or "machine learning" in lowered or re.search(r"\bai\b", lowered):
-        focus.append("AI")
-    if financial_product_terms >= 3:
-        focus.append("digital financial services")
-
-    company_pattern = re.escape(str(company or "").lower())
-    city_pattern = re.escape(city.lower()) if city else ""
-    explicit_city = bool(
-        city_pattern
-        and re.search(
-            rf"\b{company_pattern}\b.{{0,120}}(?:is\s+(?:an?\s+)?{city_pattern}-based|headquartered\s+in\s+{city_pattern}|registered\s+in\s+{city_pattern})",
-            lowered,
-        )
-    )
-    global_scope = any(term in lowered for term in ("global", "worldwide", "around the world"))
-    scope = f"{city}-based " if explicit_city else ("global " if global_scope else "")
-    base = f"{company} is a {scope}{company_type}"
-    if focus:
-        base += f" focused on {', '.join(dict.fromkeys(focus[:3]))}"
-    size_match = re.search(r"\b(\d{1,4})\s*(?:-|–|to)\s*(\d{1,4})\s+employees\b", lowered)
-    facts: list[str] = []
-    if size_match:
-        facts.append(f"{size_match.group(1)}–{size_match.group(2)} employees")
-    else:
-        employee_match = re.search(r"\b(\d{1,3}(?:,\d{3})*\+?)\s+(?:employees|people working)\b", lowered)
-        if employee_match:
-            facts.append(f"{employee_match.group(1)} employees")
-    customer_match = re.search(r"\b(\d+\+?\s+million)\s+customers\b", lowered)
-    if customer_match:
-        facts.append(f"{customer_match.group(1)} customers")
-    else:
-        customer_match = re.search(r"\b(\d{1,3}(?:,\d{3})*\+?)\s+customers\b", lowered)
-        if customer_match:
-            facts.append(f"{customer_match.group(1)} customers")
-    if facts:
-        base += f" ({'; '.join(facts[:2])})"
-    return base + "."
+    official = [str(item.get("snippet") or "") for item in results
+                if _is_official_company_result(company, str(item.get("url") or ""))]
+    other = [str(item.get("snippet") or "") for item in results if str(item.get("snippet") or "") not in official]
+    return summary_from_texts(company, official, other)
 
 
 def _company_summary_from_job_description(company: str, description: str) -> str:
-    """Use the employer's own About section as a labelled fallback."""
+    """Return employer wording from a labelled About section without rewriting it."""
     value = " ".join(str(description or "").split())
     company_pattern = re.escape(str(company or "").strip())
     about_match = re.search(rf"\bAbout\s+{company_pattern}\b", value, flags=re.IGNORECASE) if company_pattern else None
     if not about_match:
-        alias_matches = [
-            match
-            for alias in company_identity_aliases(company)
-            if (match := re.search(rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])", value, flags=re.IGNORECASE))
-        ]
-        if not alias_matches:
-            return ""
-        first_match = min(alias_matches, key=lambda match: match.start())
-        context = value[max(0, first_match.start() - 120):first_match.start() + 900]
-        context = re.split(
-            r"\b(?:Key\s+Job\s+Responsibilities|Key\s+Responsibilities|Responsibilities|Requirements|Qualifications)\b",
-            context,
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0]
-        if not any(
-            term in context.lower()
-            for term in ("customers", "platform", "products", "services", "software", "technology", "cloud", "database")
-        ):
-            return ""
-        return _compact_company_summary(company, "", [{"snippet": context}])
+        return ""
     about_tail = value[about_match.start():]
     about_section = re.split(
-        r"\b(?:About\s+(?:The\s+)?Role|What\s+You(?:'|’)ll\s+Be\s+Doing|Responsibilities|Requirements)\b",
+        r"\b(?:About\s+(?:The\s+)?Role|About\s+Who\s*We\s*Are|Who\s*We\s*Are|WhoWeAre|"
+        r"Our\s+Team|The\s+Role|Mission|What\s+You(?:'|’)ll\s+Be\s+Doing|Responsibilities|Requirements)\b",
         about_tail,
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0][:2200]
-    if len(about_section) < 80:
+    about_section = re.sub(rf"^About\s+{company_pattern}\s*[:–—-]?\s*", "", about_section, flags=re.I)
+    from jobhunter_research.company import _sentences
+
+    sentences = _sentences(about_section)
+    if not sentences:
         return ""
-    return _compact_company_summary(company, "", [{"snippet": about_section}])
+    # Keep source wording verbatim (apart from whitespace) and constrain the
+    # brief to two employer-level sentences.
+    excerpt = " ".join(sentences[:2])[:520]
+    # Keep the employer explicit when the source labels the section but starts
+    # with "We" or a product sentence.
+    aliases = company_identity_aliases(company)
+    if aliases and not any(re.search(rf"(?<![A-Za-z0-9]){re.escape(alias)}(?![A-Za-z0-9])", excerpt, re.I)
+                           for alias in aliases):
+        excerpt = f"{company}: {excerpt}"
+    return excerpt
 
 
 def _company_summary_has_useful_detail(company: str, summary: str) -> bool:
     normalized = " ".join(str(summary or "").split())
-    return bool(normalized and normalized != f"{company} is a technology company.")
+    return bool(normalized)
 
 
 def _plain_text_from_html(html_text: str, *, limit: int = 6000) -> str:
@@ -815,7 +847,7 @@ def fetch_verified_company_pages(
     if parsed.scheme and parsed.netloc:
         candidates.append(f"{parsed.scheme}://{parsed.netloc}")
     elif company_token:
-        candidates.extend(f"https://{company_token}.{tld}" for tld in ("ae", "com", "io", "ai"))
+        candidates.extend(f"https://{company_token}.{tld}" for tld in ("ae", "es", "com", "io", "ai"))
 
     def fetch(url: str) -> dict[str, str] | None:
         try:
@@ -953,12 +985,41 @@ def collect_salary_sources(title: str, location: str, *, max_sources: int = 3, t
     return [*trusted, *fallback][:max_sources]
 
 
-def research_job(job: dict[str, Any]) -> JobResearch:
+def _offline_search(query: str, **_kwargs: Any) -> list[dict[str, str]]:
+    return []
+
+
+def _offline_fetch(url: str, **_kwargs: Any) -> None:
+    return None
+
+
+def _legacy_salary_sources(result: dict[str, Any]) -> list[dict[str, str]]:
+    """Company-specific evidence in the JobResearch.company_salary_sources shape."""
+    rows = []
+    for source in result.get("sources") or []:
+        if source.get("kind") != "company":
+            continue
+        name = str(source.get("name") or "")
+        title, _, snippet = str(source.get("snippet") or "").partition(": ")
+        rows.append({
+            "source": name.split(":", 1)[0] or "Company page",
+            "title": title if snippet else "",
+            "url": str(source.get("url") or ""),
+            "snippet": snippet or title,
+        })
+    return rows
+
+
+def research_job(job: dict[str, Any], *, conn: sqlite3.Connection | None = None) -> JobResearch:
     """Build a brief company/recruiter/salary research card with web fallback.
 
-    Web lookup is best-effort and warning-only. If search fails, the returned
-    brief still contains stored metadata and salary guidance.
+    Salary and company evidence come from ``jobhunter_research.research`` (at
+    most four web queries plus Spain salary pages). Web lookup is best-effort
+    and warning-only: with research disabled or failing, the brief still has
+    stored metadata, any published salary and the benchmark estimate.
     """
+    import jobhunter_research
+
     employer, posting_company = resolve_research_employer(job)
     research_job_data = dict(job)
     research_job_data["company"] = employer
@@ -966,116 +1027,64 @@ def research_job(job: dict[str, Any]) -> JobResearch:
     research = build_default_research(research_job_data)
     research.employer_name = employer
     research.posting_company = posting_company
-    if not web_research_enabled():
-        return research
-    company = employer
-    title = job.get("title") or ""
-    location = job.get("location") or "Dubai"
-    job_post_company_summary = _company_summary_from_job_description(
-        str(company), str(job.get("description") or "")
-    )
-    has_job_post_company_summary = _company_summary_has_useful_detail(
-        str(company), job_post_company_summary
-    )
+    online = web_research_enabled()
     try:
-        timeout = float(os.getenv("JOBHUNTER_WEB_RESEARCH_TIMEOUT", "12"))
-        search_timeout = min(timeout, 6)
-        company_salary_sources = collect_company_salary_sources(
-            str(company), str(title), str(location), timeout=search_timeout
+        result = jobhunter_research.research(
+            job,
+            conn=conn if online else None,
+            search=None if online else _offline_search,
+            fetch=None if online else _offline_fetch,
         )
-        official_search_results = [
-            item for item in company_salary_sources
-            if _is_official_company_result(str(company), str(item.get("url", "")))
-        ]
-        verified_pages = (
-            fetch_verified_company_pages(str(company), official_search_results, timeout=min(timeout, 8))
-            if official_search_results or not has_job_post_company_summary
-            else []
-        )
-        if not company_salary_sources:
-            for page in verified_pages:
-                page_text = f"{page.get('title', '')} {page.get('snippet', '')}".lower()
-                if any(term in page_text for term in ("compensation", "bonus", "equity", "profit sharing", "salary", "pay")):
-                    company_salary_sources.append({
-                        "source": "Company careers page",
-                        "title": page.get("title", ""),
-                        "url": page.get("url", ""),
-                        "snippet": _excerpt_around_terms(
-                            page.get("snippet", ""),
-                            ("compensation", "bonus", "equity", "profit sharing", "salary", "pay"),
-                        ),
-                    })
-                    break
-        profile_results: list[dict[str, str]] = []
-        if not verified_pages and not has_job_post_company_summary:
-            profile_queries = company_profile_search_queries(str(company), str(title), str(location))
-            with ThreadPoolExecutor(max_workers=len(profile_queries)) as executor:
-                profile_result_groups = list(
-                    executor.map(lambda query: web_search_results(query, timeout=search_timeout)[:5], profile_queries)
-                )
-            profile_results = [
-                result for group in profile_result_groups for result in group
-                if _result_matches_company(str(company), result)
-            ]
-        combined_company_results: list[dict[str, str]] = []
-        seen_company_urls: set[str] = set()
-        for result in [*verified_pages, *official_search_results, *profile_results]:
-            url = result.get("url", "")
-            if url and url not in seen_company_urls:
-                seen_company_urls.add(url)
-                combined_company_results.append(result)
-        company_results = combined_company_results[:3]
     except Exception as exc:  # noqa: BLE001 - callback must stay reliable
         research.warnings.append(f"Web research unavailable: {exc.__class__.__name__}.")
         return research
-    if company_results:
-        research.company_summary = _compact_company_summary(str(company), str(location), company_results)
+    payload = result.to_dict()
+    research.research = payload
+    if not online:
+        return research
+
+    company = str(employer)
+    profile = payload["company"]
+    if profile.get("summary") and result.summary_origin == "web":
+        research.company_summary = profile["summary"]
         research.confidence = "Medium"
-        research.verified_signals.append(f"Web result found: {company_results[0]['title']}.")
-        official_results = [
-            r for r in company_results
-            if _is_official_company_result(str(company), str(r.get("url", "")))
+    elif profile.get("summary") and not research.company_summary.startswith("Job post:"):
+        research.company_summary = f"Job post: {profile['summary']}"
+    if profile.get("website"):
+        website = profile["website"]
+        research.verified_signals.append(f"Official company/careers page found: {website}.")
+        research.missing_signals = [
+            item for item in research.missing_signals if "Official company website/careers page" not in item
         ]
-        if official_results:
-            official = official_results[0]
-            research.verified_signals.append(f"Official company/careers page found: {official['url']}.")
-            research.missing_signals = [
-                item for item in research.missing_signals
-                if "Official company website/careers page" not in item
-            ]
-            research.warnings = [
-                item for item in research.warnings
-                if "Company website not verified" not in item
-            ]
-        research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in company_results)]))[:5]
-        risky_terms = ("scam", "fraud", "fake", "complaint")
-        if any(term in (r["title"] + " " + r["snippet"]).lower() for r in combined_company_results for term in risky_terms):
-            research.warnings.append("Search results mention scam/fraud/fake/complaint terms; verify carefully.")
-            research.legitimacy = "Warn only: suspicious terms appeared in search results; do not block automatically."
-        else:
-            research.legitimacy = "Warn only: web results found; no obvious scam/fake keyword in top snippets."
-            research.recommendation = "Proceed only if the Details link or official company site confirms the role and application path."
-    else:
+        research.warnings = [item for item in research.warnings if "Company website not verified" not in item]
+    web_urls = [url for url in profile.get("sources") or [] if url.startswith("http")]
+    if web_urls or result.summary_origin == "web":
+        research.verified_signals.append(f"Web result found: {(web_urls or [profile.get('website') or company])[0]}.")
+        research.recommendation = (
+            "Proceed only if the Details link or official company site confirms the role and application path."
+        )
+        research.legitimacy = "Warn only: web results found; no obvious scam/fake keyword in top snippets."
+    elif result.summary_origin != "job_post":
         research.warnings.append("No useful web result found for company/recruiter query.")
         research.missing_signals.append("No public company/recruiter result found from the bounded web lookup.")
-    if company_salary_sources:
-        research.company_salary_sources = company_salary_sources
-        research.company_salary_checks = company_salary_check_labels(str(company))
+    risky_terms = ("scam", "fraud", "fake", "complaint")
+    company_rows = [row for row in result.raw_results if _result_matches_company(company, row)]
+    if jobhunter_research.RISK_NOTE in result.notes or any(
+            term in f"{row.get('title', '')} {row.get('snippet', '')}".lower() for row in company_rows for term in risky_terms):
+        research.warnings.append("Search results mention scam/fraud/fake/complaint terms; verify carefully.")
+        research.legitimacy = "Warn only: suspicious terms appeared in search results; do not block automatically."
+
+    research.company_salary_sources = _legacy_salary_sources(payload)
+    research.company_salary_checks = company_salary_check_labels(company)
+    if research.company_salary_sources:
         research.verified_signals.append("Company-specific compensation evidence found.")
-        numeric_salary = next((
-            item for item in company_salary_sources
-            if item.get("source") != "Company careers page"
-            and _looks_like_salary_amount(str(item.get("snippet") or ""))
-            and _salary_source_matches_job_location(item, str(location))
-        ), None)
-        if numeric_salary:
-            research.salary_range = f"Company-specific: {numeric_salary['snippet'][:180]}"
-        else:
-            research.missing_signals.append("No company-specific salary range found.")
-        research.sources = list(dict.fromkeys([*research.sources, *(r["url"] for r in company_salary_sources)]))[:8]
     else:
-        research.company_salary_checks = company_salary_check_labels(str(company))
         research.missing_signals.append("No company-specific salary range found.")
+    lines = jobhunter_research.format_salary_lines(payload)
+    if lines:
+        research.salary_range = html.unescape(" · ".join(lines))
+    source_urls = [source.get("url") for source in payload["sources"] if source.get("url")]
+    research.sources = list(dict.fromkeys([*research.sources, *web_urls, *source_urls]))[:8]
     return research
 
 
@@ -1091,11 +1100,32 @@ def format_salary_band(band_name: str, job: dict[str, Any] | None = None) -> str
     return f"{target['currency']} {low // 1000}k–{high // 1000}k/{target['period']}"
 
 
+def legacy_salary_band_name(job: dict[str, Any]) -> str:
+    """senior / backend / broad: which configured-target band fits the role."""
+    title = (job.get("title") or "").lower()
+    tech = (job.get("tech_required") or "").lower()
+    exp = job.get("min_experience") or -1
+    if any(term in title for term in ("lead", "principal", "architect")) or (isinstance(exp, int) and exp >= 6):
+        return "senior"
+    if any(term in tech for term in ("java", "spring", "golang", "microservices", "kubernetes", "aws", "azure")):
+        return "backend"
+    return "broad"
+
+
+_BAND_NOTES = {
+    "senior": "market ask band",
+    "backend": "likely band; higher if backend/cloud ownership is real",
+    "broad": "broad software range",
+}
+
+
 def estimate_salary_range(job: dict[str, Any]) -> str:
     """Return a conservative salary note for the role.
 
     We keep this intentionally brief and transparent. Live research can replace
-    or augment this text, but callbacks need a no-network fallback.
+    or augment this text, but callbacks need a no-network fallback. Markets
+    without a configured target (Spain) use the benchmark table, labelled as
+    an estimate.
     """
     published_salary = validated_job_salary(job)
     target = salary_target(job)
@@ -1103,17 +1133,22 @@ def estimate_salary_range(job: dict[str, Any]) -> str:
         target_note = f" Target ask: {target_salary_label(job)}." if target else ""
         return f"Published salary: {published_salary}.{target_note}"
     if target is None:
+        if salary_market(job) in SALARY_MARKET_UNITS:
+            import jobhunter_research
+            from jobhunter_research import salary as research_salary
+
+            context = jobhunter_research.build_context(job)
+            source = research_salary.estimate_source(context, "")
+            summary = research_salary.summarize_sources(
+                [source] if source else [], kind="benchmark", currency=context.currency, period=context.period or "year"
+            )
+            if summary:
+                band = research_salary.format_range(summary["low"], summary["high"], summary["currency"], context.period)
+                return f"Estimate: {band} ({source['name']}; estimate, not employer data)."
+            return "Salary not published; no benchmark for this role and location."
         return "Salary not published; no configured target for this location."
-    title = (job.get("title") or "").lower()
-    tech = (job.get("tech_required") or "").lower()
-    exp = job.get("min_experience") or -1
-    if any(term in title for term in ("lead", "principal", "architect")) or (isinstance(exp, int) and exp >= 6):
-        band_name, note = "senior", "market ask band"
-    elif any(term in tech for term in ("java", "spring", "golang", "microservices", "kubernetes", "aws", "azure")):
-        band_name, note = "backend", "likely band; higher if backend/cloud ownership is real"
-    else:
-        band_name, note = "broad", "broad software range"
-    return f"{format_salary_band(band_name, job)} {note}. Configured target: {target_salary_label(job)}."
+    band_name = legacy_salary_band_name(job)
+    return f"{format_salary_band(band_name, job)} {_BAND_NOTES[band_name]}. Configured target: {target_salary_label(job)}."
 
 
 def build_default_research(job: dict[str, Any]) -> JobResearch:
@@ -1309,49 +1344,83 @@ def _posting_visa_note(job: dict[str, Any]) -> str:
     return ""
 
 
+def _brief_salary_lines(job: dict[str, Any], research: JobResearch) -> list[str]:
+    """Published/Company/Market/Estimate/Ask lines; offline research when none was attached."""
+    import jobhunter_research
+
+    payload = research.research
+    if payload is None:
+        try:
+            payload = jobhunter_research.research(job, search=_offline_search, fetch=_offline_fetch).to_dict()
+            # Older callers pass company observations separately. Normalize
+            # these through the same currency, location and evidence checks.
+            from jobhunter_research import salary as research_salary
+            context = jobhunter_research.build_context(job)
+            rows = [{"title": item.get("title", ""), "url": item.get("url", ""),
+                     "snippet": item.get("snippet", "")}
+                    for item in research.company_salary_sources
+                    if item.get("source") != "Company careers page"
+                    and _looks_like_salary_amount(str(item.get("snippet") or ""))]
+            additional = research_salary.company_sources_from_results(context, rows, payload["researched_at"])
+            if additional:
+                payload["sources"].extend(additional)
+                published, _ = research_salary.published_salary(context, payload["researched_at"])
+                payload["salary"] = research_salary.decide(context, published, payload["sources"])
+        except Exception:  # noqa: BLE001 - the card must render without research
+            return []
+    return jobhunter_research.format_salary_lines(payload)
+
+
 def build_research_brief_message(job: dict[str, Any], research: JobResearch) -> str:
     company_name = str(research.employer_name or job.get("company") or "company")
-    published_salary = validated_job_salary(job)
-    salary_source_priority = {"Levels.fyi": 0, "Glassdoor": 1, "Indeed": 2, "PayScale": 3, "GulfTalent": 4}
-    numeric_salary = sorted([
-        item for item in research.company_salary_sources
-        if item.get("source") != "Company careers page"
-        and _looks_like_salary_amount(str(item.get("snippet") or ""))
-        and _salary_source_matches_job_location(item, str(job.get("location") or ""))
-    ], key=lambda item: salary_source_priority.get(str(item.get("source") or ""), 99))[:1]
     compensation_notes = [
         item for item in research.company_salary_sources
         if item.get("source") == "Company careers page"
     ]
-
-    if published_salary:
-        pay_line = f"Published: {_esc(published_salary)}"
-    elif numeric_salary:
-        pay_line = " | ".join(
-            f"{_esc(item.get('source'))}: {_esc(str(item.get('snippet') or '')[:140])}"
-            for item in numeric_salary
-        )
-    else:
-        platforms = ", ".join(COMPANY_PAY_PLATFORMS[:-1]) + f" or {COMPANY_PAY_PLATFORMS[-1]}"
-        pay_line = f"No published range; no {_esc(company_name)} pay data on {platforms}."
+    # Keep the structured evidence labels, including seniority and compensation
+    # type; a raw search snippet must not replace a verified salary range.
+    lines = _brief_salary_lines(job, research)
+    if not any(line.startswith("Published:") for line in lines):
+        lines.insert(0, "No employer-published range verified.")
+    if not any(line.startswith("Company:") for line in lines):
+        lines.insert(1, "No comparable company salary range verified.")
+    pay_block = "\n".join(lines)
 
     benefits_line = _compact_benefits(compensation_notes) if compensation_notes else None
 
-    company_line = " ".join(str(research.company_summary or "Company details not verified.").split())[:180]
-    benefits_block = f"\n<b>Benefits:</b> {_esc(benefits_line)}" if benefits_line else ""
+    company_line = " ".join(str(research.company_summary or "Company details not verified.").split())
+    if len(company_line) > 320:
+        company_line = company_line[:319].rstrip() + "…"
+    company_source = ""
+    context = research.research or {}
+    company_sources = (context.get("company") or {}).get("sources") or []
+    if company_sources and company_sources[0] == "job description":
+        company_source = "\n<i>Source: job posting.</i>"
+    elif company_sources:
+        company_source = f'\n<a href="{_esc(company_sources[0])}">Company source</a>'
+    lookup_notes = context.get("notes") or []
+    partial_lookup = any(any(word in str(note).lower() for word in
+                         ("failed", "http ", "unavailable", "no parsable", "no search results", "challenge", "no results"))
+                         for note in lookup_notes)
+    lookup_status = ("\n\n⚠️ Live lookup was incomplete. Missing data is unverified; retry later."
+                     if partial_lookup else "")
+    benefits_block = f"\n\n<b>🎁 Benefits:</b> {_esc(benefits_line)}" if benefits_line else ""
     fit_checks = _posting_fit_checks(job)
-    fit_block = f"\n<b>Fit checks:</b> {_esc('; '.join(fit_checks))}." if fit_checks else ""
+    fit_block = f"\n\n<b>🧭 Fit checks:</b> {_esc('; '.join(fit_checks))}." if fit_checks else ""
     visa_note = _posting_visa_note(job)
-    visa_block = f"\n<b>Visa:</b> {_esc(visa_note)}" if visa_note else ""
+    visa_block = f"\n\n<b>🛂 Visa:</b> {_esc(visa_note)}" if visa_note else ""
 
     return f"""🔎 <b>Research</b>
 
 <b>{_esc(job.get('title'))}</b>
 {_esc(company_name)} — {_esc(job.get('location'))}{f" (via {_esc(research.posting_company)})" if research.posting_company else ""}
 
-<b>Company:</b> {_esc(company_line)}
-<b>Pay:</b> {pay_line}{benefits_block}{fit_block}{visa_block}
-<b>Ask:</b> Base salary, currency, pay period and bonus/equity terms.
+<b>🏢 Company:</b> {_esc(company_line)}{company_source}
+
+<b>💰 Pay:</b>
+{pay_block}{benefits_block}{fit_block}{visa_block}{lookup_status}
+
+<b>❓ Questions to Ask:</b> Base salary, currency, pay period and bonus/equity terms.
 
 Choose next step:"""
 
@@ -1670,48 +1739,7 @@ def _experience_relevance_score(
 
 
 def _bullet_relevance_score(bullet: str, job_text: str, job_title: str = "") -> int:
-    candidate = _normalized_relevance_text(bullet)
-    job_words = set(re.findall(r"[a-z0-9+#.]+", job_text)) - _KEYWORD_STOPWORDS
-    candidate_words = set(re.findall(r"[a-z0-9+#.]+", candidate)) - _KEYWORD_STOPWORDS
-    exact = sum(len(word) > 2 and word in job_words for word in candidate_words)
-    title = _normalized_relevance_text(job_title)
-    role_terms: tuple[str, ...] = ()
-    if _contains_relevance_term(title, "backend"):
-        role_terms = ("backend", "nestjs", "node", "typescript", "react", "aws", "api", "deployment", "reliability", "outage")
-    elif _contains_relevance_term(title, "manager"):
-        role_terms = ("managing", "team", "mentored", "led", "workflow", "agent", "full-stack", "client", "delivered")
-    role_bonus = sum(
-        5 for term in role_terms
-        if _contains_relevance_term(candidate, term) and _contains_relevance_term(job_text, term)
-    )
-    hard_skill_bonus = sum(
-        20 for term in _HARD_SKILL_TERMS
-        if _contains_relevance_term(candidate, term) and _contains_relevance_term(job_text, term)
-    )
-    cloud_penalty = 15 if (
-        _contains_relevance_term(job_text, "aws")
-        and not _contains_relevance_term(job_text, "azure")
-        and _contains_relevance_term(candidate, "azure")
-        and not _contains_relevance_term(candidate, "aws")
-    ) else 0
-    full_stack_bonus = 30 if (
-        _contains_relevance_term(title, "manager")
-        and (_contains_relevance_term(job_text, "full stack") or _contains_relevance_term(job_text, "full-stack"))
-        and (_contains_relevance_term(candidate, "nestjs") or _contains_relevance_term(candidate, "backend"))
-        and _contains_relevance_term(candidate, "react")
-    ) else 0
-    communications_bonus = 45 if (
-        any(_contains_relevance_term(job_text, term) for term in ("communications", "messaging", "notifications"))
-        and any(_contains_relevance_term(candidate, term) for term in ("notification", "webhook", "retry"))
-    ) else 0
-    reliability_bonus = 15 if (
-        any(_contains_relevance_term(job_text, term) for term in ("reliability", "availability", "resilience"))
-        and any(_contains_relevance_term(candidate, term) for term in ("duplicate", "retry", "outage", "downtime"))
-    ) else 0
-    return (
-        _relevance_score(bullet, job_text) + exact * 5 + role_bonus + hard_skill_bonus
-        + full_stack_bonus + communications_bonus + reliability_bonus - cloud_penalty
-    )
+    return bullet_match(bullet, job_text, job_title).score
 
 
 def _bullet_duplicate_key(bullet: str) -> str:
@@ -1724,42 +1752,23 @@ def _bullet_duplicate_key(bullet: str) -> str:
     return value
 
 
-def _ranked_distinct_bullets(bullets: list[str], job_text: str, limit: int, job_title: str = "") -> list[str]:
-    job_skills = {
-        term for term in _HARD_SKILL_TERMS if _contains_relevance_term(job_text, term)
-    }
-    ranked = [
-        (
-            index,
-            bullet,
-            _bullet_relevance_score(bullet, job_text, job_title),
-            {
-                term for term in job_skills
-                if _contains_relevance_term(_normalized_relevance_text(bullet), term)
-            },
-        )
-        for index, bullet in enumerate(bullets)
-    ]
-    selected: list[str] = []
-    seen: set[str] = set()
-    covered_skills: set[str] = set()
-    while ranked and len(selected) < limit:
-        # Favor new job-relevant evidence when similarly scored bullets repeat
-        # a skill that a stronger selected bullet has already established.
-        best_index = max(
-            range(len(ranked)),
-            key=lambda index: (
-                ranked[index][2] - 3 * len(ranked[index][3] & covered_skills),
-                -ranked[index][0],
-            ),
-        )
-        _, bullet, _, bullet_skills = ranked.pop(best_index)
-        key = _bullet_duplicate_key(bullet)
-        if key in seen:
-            continue
-        selected.append(bullet)
-        seen.add(key)
-        covered_skills.update(bullet_skills)
+def _ranked_distinct_bullets(bullets: list[str], job_text: str, limit: int, job_title: str = "", *, quality=False, profile=None) -> list[str]:
+    if limit <= 0:
+        return []
+    if quality and profile is not None:
+        bullets = resume_quality.distinct_wording(bullets, profile)
+        relevant = [b for b in bullets if bullet_match(b, job_text, job_title, quality=True).facets or any(
+            _contains_relevance_term(job_text, term) and _contains_relevance_term(_normalized_relevance_text(b), term)
+            for term in _HARD_SKILL_TERMS)]
+        bullets = relevant or bullets[:1]
+    selected, seen = [], set()
+    for index in order_bullet_indexes(bullets, job_text, job_title, quality=quality):
+        key = _bullet_duplicate_key(bullets[index])
+        if key not in seen:
+            selected.append(bullets[index])
+            seen.add(key)
+        if len(selected) >= limit:
+            break
     return selected
 
 
@@ -1782,6 +1791,7 @@ def _tailored_experience(
     profile: dict[str, Any],
     job_text: str,
     job_title: str = "",
+    *, quality=False,
 ) -> list[dict[str, Any]]:
     projected = project_public_resume(profile).get("experience") or []
     resume_evidence: dict[str, list[str]] = {}
@@ -1803,14 +1813,59 @@ def _tailored_experience(
     tailored_experience: list[dict[str, Any]] = []
     for ranked_index, (source_index, source) in enumerate(ranked_sources):
         experience = json.loads(json.dumps(projected[source_index]))
-        limit = 4 if ranked_index < 3 else 2
-        experience["bullets"] = _ranked_distinct_bullets(candidates[source_index], job_text, limit, job_title)
+        limit = len(candidates[source_index]) if quality else 4 if ranked_index < 3 else 2
+        experience["bullets"] = _ranked_distinct_bullets(candidates[source_index], job_text, limit, job_title,
+                                                       quality=quality, profile=profile)
         if experience.get("tech"):
             experience["tech"] = _focused_tech_keywords(
                 experience["tech"], experience["bullets"], job_text,
             )
         tailored_experience.append(experience)
     return _filter_optional_experiences(tailored_experience, job_text, job_title)
+
+
+_LOCATION_SEPARATOR = "·"
+_LOCATION_PART_PATTERN = re.compile(r"\s*[,;/|()]\s*|\s+-\s+")
+_WORK_MODE_TERMS = ("remote", "hybrid", "on-site", "onsite")
+_COUNTRY_LOCATION_NAMES = frozenset(
+    name for names in job_scoring.COUNTRY_NAMES.values() for name in names
+)
+
+
+def _resume_location(profile_location: str, job_location: Any) -> str:
+    """Name the job's city as the relocation target.
+
+    The profile line stays unchanged when the posting names no place, and the
+    relocation note is dropped when the job is in the candidate's home city.
+    """
+    home = profile_location.split(_LOCATION_SEPARATOR)[0].strip()
+    parts = [
+        part.strip() for part in _LOCATION_PART_PATTERN.split(scraper.normalize_location(job_location))
+        if part.strip() and not any(_contains_relevance_term(part.lower(), term) for term in _WORK_MODE_TERMS)
+    ]
+    places = [part for part in parts if part.lower() not in _COUNTRY_LOCATION_NAMES] or parts
+    if not home or not places:
+        return profile_location
+    if _contains_relevance_term(home.lower(), places[0].lower()):
+        return home
+    return f"{home} {_LOCATION_SEPARATOR} Relocating to {places[0]}"
+
+
+def _prepare_variant_resume(payload, profile, job, *, quality=False):
+    """Use the same presentation rules for previews and selected variants."""
+    job_text = _job_relevance_text(job)
+    job_title = str(job.get("title") or "")
+    payload["experience"] = _filter_optional_experiences(
+        sorted(payload.get("experience") or [], key=lambda item: _experience_chronology_key(item, 0)),
+        job_text, job_title,
+    )
+    payload["experience"] = _group_company_experiences(
+        payload["experience"], profile, job_text, job_title, preserve_variant=True, quality=quality,
+    )
+    _prioritize_resume_bullets(payload, job_text, job_title, quality=quality, profile=profile)
+    if profile.get("location"):
+        payload["location"] = _resume_location(profile["location"], job.get("location"))
+    return resume_quality.presentation(payload, profile, job) if quality else payload
 
 
 def _resume_for_job(
@@ -1824,42 +1879,70 @@ def _resume_for_job(
     generated, or built for a specific job/company in the resume content.
     """
     validate_profile(profile)
+    if resume_pipeline.enabled(profile):
+        # Blueprint profiles select confirmed evidence per posting; there is no snapshot variant.
+        return resume_pipeline.plan(profile, job).payload, None
+    quality = resume_quality.enabled(profile)
     job_text = _job_relevance_text(job)
     job_title = str(job.get("title") or "")
     variant = select_resume_variant(profile, job_text, job_title=job_title)
     if variant is not None:
         tailored_variant = apply_resume_variant(profile, variant)
-        tailored_variant["experience"] = _filter_optional_experiences(
-            sorted(
-                tailored_variant.get("experience") or [],
-                key=lambda item: _experience_chronology_key(item, 0),
-            ),
-            job_text,
-            job_title,
-        )
-        tailored_variant["experience"] = _group_company_experiences(
-            tailored_variant["experience"], profile, job_text, job_title,
-            preserve_variant=True,
-        )
-        return tailored_variant, variant
+        return _prepare_variant_resume(tailored_variant, profile, job, quality=quality), variant
 
     tailored = project_public_resume(profile)
-    if profile.get("summary"):
+    if profile.get("summary") and not quality:
         tailored["summary"] = _focused_summary(str(profile["summary"]), job_text, job_title, limit=3)
     skills = profile.get("skills") or {}
     tailored["skills"] = {
-        category: _ranked_skills(list(values), job_text)[:_skill_limit(category)]
+        category: _ranked_skills(list(values), job_text)[:None if quality else _skill_limit(category)]
         if isinstance(values, list) else values
         for _, (category, values) in sorted(
             enumerate(skills.items()),
             key=lambda item: (-_skill_category_score(item[1][0], item[1][1], job_text, job_title), item[0]),
         )
     }
-    tailored["experience"] = _tailored_experience(profile, job_text, job_title)
+    tailored["experience"] = _tailored_experience(profile, job_text, job_title, quality=quality)
     tailored["experience"] = _group_company_experiences(
         tailored["experience"], profile, job_text, job_title,
+        summary=str(tailored.get("summary") or ""),
+        quality=quality,
     )
-    return tailored, None
+    _prioritize_resume_bullets(tailored, job_text, job_title, quality=quality, profile=profile)
+    if profile.get("location"):
+        tailored["location"] = _resume_location(profile["location"], job.get("location"))
+    return (resume_quality.presentation(tailored, profile, job) if quality else tailored), None
+
+
+def _prioritize_resume_bullets(resume, job_text, job_title, *, quality=False, profile=None):
+    for role in resume.get("experience") or []:
+        engagements = role.get("engagements") or []
+        for item in engagements or [role]:
+            bullets = item.get("bullets") or []
+            if quality and profile is not None:
+                bullets = resume_quality.distinct_wording(bullets, profile)
+            opening = (resume_quality.project_opening_bullets(profile, role.get("company"), item.get("name"), bullets)
+                       if quality and profile is not None and engagements else [])
+            item["bullets"] = [bullets[index] for index in order_bullet_indexes(bullets, job_text, job_title, quality=quality)]
+            if quality and profile is not None and engagements:
+                present = {normalized_text(b): b for b in item["bullets"]}
+                first = [present[normalized_text(b)] for b in opening if normalized_text(b) in present]
+                item["bullets"] = first + [b for b in item["bullets"] if b not in first]
+        if not engagements:
+            continue
+        _order_client_engagements(role, job_text, job_title, quality=quality)
+        records = [(item["name"], bullet) for item in engagements for bullet in item.get("bullets") or []]
+        indexes = order_bullet_indexes([bullet for _, bullet in records], job_text, job_title, quality=quality)
+        role["bullets"] = [records[index][1] for index in indexes]
+        if quality and (profile or {}).get("resume_quality", {}).get("group_bullets_by_client"):
+            role.pop("highlights", None)
+            continue
+        names = [item.get("name") for item in engagements]
+        if len(set(names)) > 1 and len(set(names)) == len(names) and all(names):
+            role["highlights"] = [
+                {"context": records[index][0], "text": records[index][1]}
+                for index in indexes[:3]
+            ]
 
 
 def _tailor_resume(profile: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
@@ -1893,11 +1976,15 @@ _MONTH_YEAR_PATTERN = re.compile(
 )
 _YEAR_PATTERN = re.compile(r"\b((?:19|20)\d{2})\b")
 _CURRENT_DATE_PATTERN = re.compile(r"\b(?:present|current)\b", re.IGNORECASE)
+_MAX_GROUPED_ENGAGEMENTS = 4
 _ARCHITECT_ROLE_PATTERN = re.compile(r"\barchitect(?:ure)?\b", re.IGNORECASE)
 
 
 def _start_month(value: Any) -> tuple[int, int] | None:
     text = str(value or "")
+    numeric = re.search(r"\b(0?[1-9]|1[0-2])/(\d{4})\b", text)
+    if numeric:
+        return int(numeric.group(2)), int(numeric.group(1))
     month_match = _MONTH_YEAR_PATTERN.search(text)
     if month_match:
         return int(month_match.group(2)), _MONTH_NUMBERS[month_match.group(1).lower()]
@@ -1911,6 +1998,9 @@ def _end_month(value: Any) -> tuple[int, int] | None:
     text = str(value or "")
     if _CURRENT_DATE_PATTERN.search(text):
         return 9999, 12
+    numeric = list(re.finditer(r"\b(0?[1-9]|1[0-2])/(\d{4})\b", text))
+    if numeric:
+        return int(numeric[-1].group(2)), int(numeric[-1].group(1))
     month_matches = list(_MONTH_YEAR_PATTERN.finditer(text))
     if month_matches:
         last = month_matches[-1]
@@ -1925,6 +2015,42 @@ def _experience_chronology_key(experience: dict[str, Any], source_index: int) ->
     end = _end_month(experience.get("dates")) or (0, 0)
     start = _start_month(experience.get("dates")) or (0, 0)
     return -end[0], -end[1], -start[0], -start[1], source_index
+
+
+def _order_client_engagements(role, job_text, job_title, *, quality=False):
+    """Order MaibornWolff's selected public projects by fit; dates break ties."""
+    if _normalized_relevance_text(role.get("company")) != "maibornwolff gmbh":
+        return
+    engagements = role.get("engagements") or []
+    if len(engagements) < 2:
+        role.pop("project_order", None)
+        return
+    job_text = _normalized_relevance_text(f"{job_title} {job_text}")
+
+    def score(item):
+        public_stack = " ".join(str(item.get(k) or "") for k in ("name", "tech"))
+        stack = _normalized_relevance_text(" ".join([public_stack, *(str(b) for b in item.get("bullets") or [])]))
+        matching_skills = {term for term in _HARD_SKILL_TERMS
+            if _contains_relevance_term(job_text, term) and _contains_relevance_term(stack, term)}
+        # Count a framework once rather than separately matching its short name.
+        matching_skills = {term for term in matching_skills if not any(
+            term != other and _contains_relevance_term(other, term) for other in matching_skills)}
+        node_aliases = ("nodejs", "node js", "node.js", "nestjs")
+        if any(_contains_relevance_term(job_text, term) for term in node_aliases) and any(
+            _contains_relevance_term(stack, term) for term in node_aliases):
+            matching_skills.difference_update(node_aliases)
+            matching_skills.add("node_backend")
+        evidence_scores = sorted(
+            (bullet_match(str(b), job_text, job_title, quality=quality).score
+             for b in item.get("bullets") or []), reverse=True,
+        )
+        return len(matching_skills), _relevance_score(public_stack, job_text) + sum(evidence_scores[:2])
+
+    engagements[:] = [item for _, item in sorted(
+        enumerate(engagements),
+        key=lambda pair: (*(-value for value in score(pair[1])), *_experience_chronology_key(pair[1], pair[0])),
+    )]
+    role["project_order"] = "relevance"
 
 
 def _filter_optional_experiences(
@@ -1992,12 +2118,26 @@ def _group_company_experiences(
     job_title: str,
     *,
     preserve_variant: bool = False,
+    summary: str = "",
+    quality=False,
 ) -> list[dict[str, Any]]:
     """Present one employer tenure with dated work inside it.
 
     A confirmed variant keeps its selected bullet wording. Fallback tailoring
-    can select from the candidate's reviewed client-engagement snapshot.
+    can select from the candidate's reviewed client-engagement snapshot. It
+    always keeps the current engagement and every client the summary names, so
+    the tenure shows no recent gap and summary claims keep their evidence.
     """
+    job_text = _normalized_relevance_text(f"{job_title} {job_text}")
+    summary_text = _normalized_relevance_text(summary)
+
+    def required(engagement: dict[str, Any]) -> bool:
+        names = [engagement.get("name"), *(engagement.get("aliases") or [])]
+        return bool(_CURRENT_DATE_PATTERN.search(str(engagement.get("dates") or ""))) or any(
+            _contains_relevance_term(summary_text, _normalized_relevance_text(name))
+            for name in names if name
+        )
+
     result = list(experiences)
     for group in profile.get("employment_groups") or []:
         if group.get("confirmation") != "candidate-reviewed":
@@ -2027,12 +2167,16 @@ def _group_company_experiences(
                     ),
                     pair[0],
                 ),
-            )[:3]
+            )
+            kept = [pair for pair in ranked if required(pair[1])]
+            optional = [pair for pair in ranked if not required(pair[1])]
+            ranked = kept + optional[:None if quality else max(0, _MAX_GROUPED_ENGAGEMENTS - len(kept))]
             engagements = []
             for _, item in ranked:
                 bullets = _ranked_distinct_bullets(
                     [str(bullet) for bullet in item.get("bullets") or []],
-                    job_text, 3, job_title,
+                    job_text, len(item.get("bullets") or []) if quality else 3, job_title,
+                    quality=quality, profile=profile,
                 )
                 engagements.append({
                     "name": str(item.get("name") or ""),
@@ -2053,6 +2197,8 @@ def _group_company_experiences(
             # renderer shows the client sections without their dates.
             "bullets": [bullet for item in engagements for bullet in item["bullets"]],
         }
+        _order_client_engagements(grouped, job_text, job_title, quality=quality)
+        grouped["bullets"] = [bullet for item in engagements for bullet in item["bullets"]]
         result = [item for item in result if _normalized_relevance_text(item.get("company")) != company]
         result.append(grouped)
     ordered = sorted(result, key=lambda item: _experience_chronology_key(item, 0))
@@ -2207,17 +2353,27 @@ def _assert_tailoring_ready(
     profile: dict[str, Any],
     job: dict[str, Any],
     selected_variant: dict[str, Any] | None,
+    *, check_evidence: bool = True,
 ) -> None:
     if _profile_timeline_issues(profile):
         raise TailoringReadinessError(
             "The candidate profile has an inconsistent same-employer role progression. "
             "Confirm the exact role end date before generating another package."
         )
-    if not _role_variant_requirement_satisfied(job, selected_variant):
+    if not resume_pipeline.enabled(profile) and not _role_variant_requirement_satisfied(job, selected_variant):
         raise TailoringReadinessError(
             "No candidate-confirmed resume variant matches this architecture role. "
             "Complete the Software Architect resume variant before generating the package."
         )
+    if check_evidence and selected_variant is not None and resume_quality.enabled(profile):
+        from resume_content_rules import variant_evidence_gaps
+        gaps = variant_evidence_gaps(profile, selected_variant["resume"], job)
+        if gaps:
+            ids = ", ".join(gap["evidence_id"] for gap in gaps)
+            raise TailoringReadinessError(
+                "Resume variant omits relevant confirmed evidence: " + ids +
+                ". Generate an evidence-update preview and review the revised selection before activation."
+            )
 
 
 def _ranked_evidence(
@@ -2789,6 +2945,42 @@ def _restore_previous_package(
         os.replace(backup_dir, package_dir)
 
 
+def _evidence_proposal_gaps(
+    profile: dict[str, Any],
+    job: dict[str, Any],
+    selection: dict[str, Any],
+    prior_evidence_ids: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    """Confirmed evidence a per-job proposal adds: the variant's topic gaps, then prior reviewer additions."""
+    from resume_content_rules import evidence_updates_for_issues, variant_evidence_gaps
+    gaps = variant_evidence_gaps(profile, selection, job)
+    for evidence_id in prior_evidence_ids:
+        if not isinstance(evidence_id, str) or any(g["evidence_id"] == evidence_id for g in gaps):
+            continue
+        proposal = resume_quality.evidence_proposal(profile, job, selection, gaps)
+        gaps.extend(evidence_updates_for_issues(profile, proposal, [evidence_id]))
+    return gaps
+
+
+def _evidence_proposal_record(
+    profile: dict[str, Any],
+    selection: dict[str, Any],
+    proposal: dict[str, Any],
+    gaps: list[dict[str, Any]],
+    review_rounds: int,
+) -> dict[str, Any]:
+    """Manifest fields for a per-job evidence proposal; only evidence actually shown counts as added."""
+    shown = {normalized_text(b) for b in resume_quality._unique_bullets(proposal)}
+    added = [gap for gap in gaps if normalized_text(gap["public_text"]) in shown]
+    removed = resume_quality.evidence_omissions(profile, selection, proposal)
+    return {
+        "evidence_proposal_applied": bool(added or removed),
+        "proposed_evidence_updates": added,
+        "proposed_evidence_omissions": removed,
+        "content_review_revision_rounds": review_rounds,
+    }
+
+
 def prepare_application_package(
     job_id: str,
     *,
@@ -2798,7 +2990,22 @@ def prepare_application_package(
     render_pdfs: bool = True,
     include_cover_letter: bool = False,
     cover_letter_draft: dict[str, Any] | None = None,
+    resume_summary_draft: dict[str, Any] | None = None,
+    resume_selection: dict[str, Any] | None = None,
+    summary_planner=None,
+    accept_evidence_proposals: bool = False,
+    prior_evidence_ids: Sequence[str] = (),
 ) -> ApplicationPackage:
+    """Build, verify and record the application package for one job.
+
+    ``accept_evidence_proposals`` (unattended packaging only) lets this one
+    package use the per-job evidence proposal the owner preview would show:
+    confirmed public evidence the selected variant omits, plus evidence the
+    independent reviewer names, for up to MAX_CONTENT_REVIEW_ROUNDS. The
+    confirmed variant in the profile is never changed. ``prior_evidence_ids``
+    re-applies the reviewer additions of an earlier package of this job so a
+    reused summary still matches its selection.
+    """
     if type(include_cover_letter) is not bool:
         raise TypeError("include_cover_letter must be a boolean")
     if cover_letter_draft is not None and not include_cover_letter:
@@ -2824,8 +3031,71 @@ def prepare_application_package(
                 "Do not regenerate its application package."
             )
         profile = _load_profile(profile_path)
-        resume_payload, selected_variant = _resume_for_job(profile, job)
-        _assert_tailoring_ready(profile, job, selected_variant)
+        blueprint_plan, summary_info = None, None
+        fixed_blocks = isinstance(profile.get("resume_blocks"), dict) and profile["resume_blocks"].get("enabled") is True
+        if fixed_blocks:
+            if resume_selection is None:
+                raise TailoringReadinessError(
+                    "Choose a confirmed resume flavor and project set before generating this package."
+                )
+            if resume_summary_draft is not None:
+                raise TailoringReadinessError("Fixed resume blocks do not accept generated summary drafts.")
+            try:
+                blocks_catalog = resume_blocks.catalog(profile)
+                resume_payload = resume_blocks.build(profile, resume_selection)
+                blocks_variant = next(v for v in blocks_catalog["variants"] if v["id"] == resume_selection["variant_id"])
+                fixed_digest = resume_blocks.content_digest(profile, resume_selection)
+            except (resume_blocks.ResumeBlocksError, KeyError, StopIteration) as exc:
+                raise TailoringReadinessError(str(exc) or "The selected fixed resume blocks are invalid.") from None
+            selected_variant = None
+            summary_info = {"source": "fixed", "variant_id": blocks_variant["id"]}
+        elif resume_selection is not None:
+            raise TailoringReadinessError("This profile does not have an enabled fixed resume catalog.")
+        elif resume_pipeline.enabled(profile):
+            try:
+                blueprint_plan = resume_pipeline.plan(profile, job)
+            except resume_pipeline.BlueprintError as exc:
+                raise TailoringReadinessError(str(exc)) from None
+            resume_payload, selected_variant = blueprint_plan.payload, None
+        else:
+            resume_payload, selected_variant = _resume_for_job(profile, job)
+        quality = False if fixed_blocks else resume_quality.enabled(profile) and blueprint_plan is None
+        propose = bool(accept_evidence_proposals) and quality and selected_variant is not None
+        if not fixed_blocks:
+            _assert_tailoring_ready(profile, job, selected_variant, check_evidence=not propose)
+        quality_report, pdf_checks, summary_review, proposal = {}, {}, None, None
+        if blueprint_plan is not None:
+            try:
+                summary_text, summary_info = resume_pipeline.summarize(
+                    profile, job, blueprint_plan, planner=summary_planner, draft=resume_summary_draft)
+            except resume_quality.ResumeQualityError as exc:
+                raise TailoringReadinessError(str(exc)) from None
+            resume_payload["summary"] = summary_text
+        elif quality:
+            try:
+                selection = resume_payload
+                gaps = _evidence_proposal_gaps(profile, job, selection, prior_evidence_ids) if propose else None
+                resume_payload, summary_review, _, review_rounds = resume_quality.reviewed_summary(
+                    profile, job, selection, resume_summary_draft=resume_summary_draft,
+                    planner=summary_planner, gaps=gaps)
+                resume_payload["summary"] = summary_review["text"]
+                if propose:
+                    proposal = _evidence_proposal_record(profile, selection, resume_payload, gaps, review_rounds)
+            except resume_quality.ResumeQualityError as exc:
+                raise TailoringReadinessError(str(exc)) from None
+        elif resume_summary_draft is not None:
+            raise ValueError("Summary drafts require the enabled owner quality flow")
+        languages = (resume_payload.get("additional") or {}).get("languages")
+        language_list_ok = fixed_blocks and isinstance(languages, list) and bool(languages) and all(
+            (isinstance(item, str) and bool(item.strip())) or
+            (isinstance(item, dict) and isinstance(item.get("name"), str) and bool(item["name"].strip()))
+            for item in languages
+        )
+        if not (isinstance(languages, str) and languages.strip(" \t\r\n|\u00b7;,") or language_list_ok):
+            raise TailoringReadinessError(
+                "Languages are required in every resume. Confirm the candidate's languages "
+                "before generating an application package; do not infer proficiency levels."
+            )
         safe_job_id = str(job_id)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", safe_job_id):
             raise ValueError("job_id contains unsafe path characters")
@@ -2835,8 +3105,9 @@ def prepare_application_package(
         package_dir = output_root / f"{safe_job_id}-{_slug(job.get('company') or '')}-{_slug(job.get('title') or '')}"
         _assert_direct_output_child(package_dir, output_root)
         cover_source = resume_payload if selected_variant is not None else profile
-        variant_max_pages = selected_variant.get("max_pages") if selected_variant is not None else None
-        if not render_pdfs and variant_max_pages is not None:
+        variant_max_pages = (blocks_variant["max_pages"] if fixed_blocks else
+                             selected_variant.get("max_pages") if selected_variant is not None else None)
+        if not render_pdfs and (variant_max_pages is not None or quality or blueprint_plan is not None or fixed_blocks):
             raise RuntimeError("A page-limited confirmed resume variant requires PDF rendering")
 
         output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -2872,8 +3143,78 @@ def prepare_application_package(
                 letter_payload,
             )
         resume_page_count: int | None = None
+        blueprint_fields: dict[str, Any] = {}
+        fixed_fields: dict[str, Any] = {}
         if render_pdfs:
-            resume_page_count = _render_pdf("resume", staged_resume_json, staged_resume_pdf)
+            if fixed_blocks:
+                def render_fixed_payload(payload):
+                    _write_private_json(staged_resume_json, payload)
+                    _render_pdf("resume", staged_resume_json, staged_resume_pdf)
+                    from resume_pdf_audit import resume_layout_metrics
+                    return resume_layout_metrics(staged_resume_pdf)
+                try:
+                    resume_payload, layout_report = resume_blocks.fit(
+                        resume_payload, render_fixed_payload, blocks_variant["max_pages"])
+                    render_fixed_payload(resume_payload)
+                    resume_page_count = layout_report["pages"]
+                    from resume_pdf_audit import audit_resume_pdf, render_review_pages
+                    pdf_checks = audit_resume_pdf(staged_resume_pdf, resume_payload,
+                                                  max_pages=blocks_variant["max_pages"])
+                    render_review_pages(staged_resume_pdf, staging_dir / "review-pages")
+                except (resume_blocks.ResumeBlocksError, ValueError) as exc:
+                    raise TailoringReadinessError(str(exc)) from None
+                except ImportError:
+                    raise TailoringReadinessError("Mandatory PDF verification dependencies are unavailable") from None
+                fixed_fields = {
+                    "resume_selection": copy.deepcopy(resume_selection),
+                    "resume_blocks_sha256": fixed_digest,
+                    "layout": layout_report,
+                }
+            elif blueprint_plan is not None:
+                def render_blueprint_payload(payload):
+                    _write_private_json(staged_resume_json, payload)
+                    _render_pdf("resume", staged_resume_json, staged_resume_pdf)
+                    from resume_pdf_audit import resume_layout_metrics
+                    return resume_layout_metrics(staged_resume_pdf)
+                try:
+                    resume_payload, layout_report = resume_pipeline.fit(
+                        blueprint_plan, resume_payload, profile, job, render_blueprint_payload)
+                    render_blueprint_payload(resume_payload)
+                    resume_page_count = layout_report["pages"]
+                    from resume_pdf_audit import audit_resume_pdf, render_review_pages
+                    pdf_checks = audit_resume_pdf(staged_resume_pdf, resume_payload, max_pages=2)
+                    render_review_pages(staged_resume_pdf, staging_dir / "review-pages")
+                except (resume_quality.ResumeQualityError, ValueError) as exc:
+                    raise TailoringReadinessError(str(exc)) from None
+                except ImportError:
+                    raise TailoringReadinessError("Mandatory PDF verification dependencies are unavailable") from None
+                card = resume_pipeline.assess(blueprint_plan, resume_payload, profile, layout_report=layout_report,
+                                              summary_info=summary_info, audit=pdf_checks)
+                blueprint_fields = resume_pipeline.manifest_fields(
+                    blueprint_plan, resume_payload, layout_report=layout_report, summary_info=summary_info, card=card)
+            elif quality:
+                def render_quality_payload(payload):
+                    _write_private_json(staged_resume_json, payload)
+                    _render_pdf("resume", staged_resume_json, staged_resume_pdf)
+                    from resume_pdf_audit import resume_layout_metrics
+                    return resume_layout_metrics(staged_resume_pdf)
+                try:
+                    resume_payload, quality_report = resume_quality.fit_resume(
+                        resume_payload, profile, job, render_quality_payload, variant_max_pages)
+                    resume_page_count = quality_report["pages"]
+                    from resume_pdf_audit import audit_resume_pdf, render_review_pages
+                    pdf_checks = audit_resume_pdf(staged_resume_pdf, resume_payload,
+                                                 max_pages=quality_report["max_pages"])
+                    render_review_pages(staged_resume_pdf, staging_dir / "review-pages")
+                    quality_report.update(resume_quality.selection_report(resume_payload, profile, job))
+                    from resume_content_rules import audit_resume_content
+                    quality_report["content_checks"] = audit_resume_content(resume_payload, profile, job)
+                except (resume_quality.ResumeQualityError, ValueError) as exc:
+                    raise TailoringReadinessError(str(exc)) from None
+                except ImportError:
+                    raise TailoringReadinessError("Mandatory PDF verification dependencies are unavailable") from None
+            else:
+                resume_page_count = _render_pdf("resume", staged_resume_json, staged_resume_pdf)
             _enforce_resume_page_limit(
                 resume_page_count,
                 variant_max_pages,
@@ -2890,21 +3231,28 @@ def prepare_application_package(
         _write_private_json(
             staged_manifest_json,
             {
-                "manifest_version": 1,
+                "manifest_version": 4 if fixed_blocks else 3 if blueprint_plan is not None else 2 if quality else 1,
                 "job_id": job_id,
                 "job_title": str(job.get("title") or ""),
-                "tailoring_mode": "confirmed_variant" if selected_variant is not None else "legacy_fallback",
+                "tailoring_mode": "fixed_blocks" if fixed_blocks else "confirmed_variant" if selected_variant is not None else "legacy_fallback",
+                "bullet_ordering": "fixed_blocks_v1" if fixed_blocks else "responsibility_evidence_v2" if quality else "responsibility_evidence_v1",
                 "selected_variant_id": selected_variant.get("id") if selected_variant is not None else None,
                 "profile_sha256": _profile_digest(profile),
                 "resume_pages": resume_page_count,
                 "cover_letter_included": include_cover_letter,
+                **({"resume_quality": quality_report, "summary_review": {**summary_review,
+                    "review_source": "provided_reviewed_draft" if resume_summary_draft is not None else "independent_model"}} if quality else {}),
+                **(proposal or {}),
+                **blueprint_fields,
+                **fixed_fields,
+                **({"summary_review": {"text": resume_payload.get("summary", ""), "source": "fixed"}}
+                   if fixed_blocks else {}),
                 "quality_checks": {
+                    **pdf_checks,
                     "timeline_consistent": True,
-                    "role_variant_required": _requires_confirmed_role_variant(job),
-                    "role_variant_requirement_satisfied": _role_variant_requirement_satisfied(
-                        job,
-                        selected_variant,
-                    ),
+                    "role_variant_required": False if fixed_blocks else blueprint_plan is None and _requires_confirmed_role_variant(job),
+                    "role_variant_requirement_satisfied": True if fixed_blocks else blueprint_plan is not None or _role_variant_requirement_satisfied(
+                        job, selected_variant),
                 },
             },
         )
@@ -2933,7 +3281,9 @@ def prepare_application_package(
             package_path=str(package_dir),
             platform=job.get("source"),
             application_type="linkedin_unknown" if "linkedin" in (job.get("url") or "").lower() else "external_unknown",
-            application_url=job.get("url"),
+            # An aggregator card's own page is a dead end for applying: the
+            # employer's posting recorded at collection time is the form.
+            application_url=scraper.official_apply_url(job) or job.get("url"),
             notes=("Resume and cover letter generated" if include_cover_letter else "Resume generated")
             + "; awaiting explicit Proceed to apply approval.",
             commit=False,
@@ -2964,7 +3314,10 @@ def prepare_application_package(
 
 
 def render_research_dry_run(job_id: str, *, db_path: Path | str = DEFAULT_DB_PATH) -> str:
-    """Run live research without sending Telegram or mutating application state."""
+    """Run live research without sending Telegram or mutating application state.
+
+    The only write is the research cache row (``job_research``).
+    """
     resolved_db = Path(db_path).resolve()
     conn = sqlite3.connect(f"file:{resolved_db.as_posix()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -2975,7 +3328,15 @@ def render_research_dry_run(job_id: str, *, db_path: Path | str = DEFAULT_DB_PAT
     if row is None:
         raise KeyError(f"Job not found: {job_id}")
     job = dict(row)
-    return build_research_brief_message(job, research_job(job))
+    try:
+        cache_conn: sqlite3.Connection | None = sqlite3.connect(resolved_db, timeout=30)
+    except sqlite3.Error:
+        cache_conn = None
+    try:
+        return build_research_brief_message(job, research_job(job, conn=cache_conn))
+    finally:
+        if cache_conn is not None:
+            cache_conn.close()
 
 
 def save_cover_draft_context(

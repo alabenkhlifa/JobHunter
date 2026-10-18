@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from jobhunter_service.presentation import ACTION_HINT, DEFAULT_PRESENTATION, plain_html, render_digest
+from jobhunter_service.presentation import ACTION_HINT, DEFAULT_PRESENTATION, digest_markup, plain_html, render_digest
 from jobhunter_service.scheduler import Scheduler
 from test_service_core import confirm
 from test_service_orchestration import system, queue
@@ -25,14 +25,33 @@ def role(number, **extra):
 
 def legacy(jobs, queued):
     return '\n\n'.join([f'Job matches: {len(jobs)} selected, {queued} queued',
-        *(f"{job['title']} — {job['company']}\n{job['location']}\n{job['url']}\n/details {job['id']}" for job in jobs),
+        *(f"{number}. {job['title']} — {job['company']}\n{job['location']}\n{job['url']}\n/details {job['id']}" for number, job in enumerate(jobs, 1)),
         ACTION_HINT])
 
 
 @pytest.mark.parametrize('presentation', [None, {}, DEFAULT_PRESENTATION, {'style': 'standard'}])
-def test_default_digest_is_byte_for_byte_legacy(presentation):
+def test_default_digest_adds_stable_role_numbers_and_preserves_information(presentation):
     jobs = [role(1, salary='EUR 70000/year', ai_verdict_reason='Confirmed skills match'), role(2)]
     assert render_digest(jobs, 17, presentation=presentation, markets=MARKETS) == legacy(jobs, 17)
+
+
+def test_digest_buttons_are_bounded_and_have_only_candidate_navigation_operations():
+    markup = digest_markup(f'job-{number}' for number in range(20))
+    rows = markup['inline_keyboard']
+    assert len(rows) == 12
+    assert [button['text'] for button in rows[0]] == ['1 Details', '1 Interested', '1 Prepare']
+    assert [button['callback_data'] for button in rows[0]] == [
+        'jh:job:details:job-0', 'jh:job:interested:job-0', 'jh:job:prepare:job-0']
+    assert all(len(button['callback_data'].encode('utf-8')) <= 64 for row in rows for button in row)
+    assert all('submit' not in button['callback_data'] and 'upload' not in button['callback_data'] for row in rows for button in row)
+
+
+def test_invalid_duplicate_and_long_ids_cannot_create_invalid_telegram_callbacks():
+    assert digest_markup([]) is None
+    assert digest_markup(['x' * 128, '../owner', 'private:job', None]) is None
+    rows = digest_markup(['job-1', 'job-1', 'job-2'], numbered=False)['inline_keyboard']
+    assert len(rows) == 2
+    assert rows[0][0]['text'] == 'Details'
 
 
 @pytest.mark.parametrize('style,salary,reason,grouped', list(itertools.product(
@@ -86,6 +105,7 @@ def test_grouping_uses_unique_market_match_and_preserves_review_order_inside_gro
     assert text.index('/details job-1') < text.index('/details job-3') < text.index('/details job-2')
     assert text.index('Market: Other locations') < text.index('/details job-4') < text.index('/details job-5')
     assert text.count('Market: Other locations') == 1
+    assert '1. Role 1' in text and '2. Role 2' in text and '3. Role 3' in text
 
 
 def test_invalid_optional_flags_and_templates_cannot_enable_features():

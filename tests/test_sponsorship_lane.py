@@ -27,7 +27,7 @@ def conn(tmp_path):
 
 def insert(conn, job_id, *, score=60, description=SILENT, **over):
     job = {"id": job_id, "title": "Backend Architect", "company": "Acme",
-           "location": "Dubai, United Arab Emirates", "url": f"https://example.com/{job_id}",
+           "location": "Madrid, Spain", "url": f"https://example.com/{job_id}",
            "source": "LinkedIn", "score": score, "description": description}
     job.update(over)
     scraper.save_job(conn, job)
@@ -107,7 +107,7 @@ def test_offered_without_any_quote_is_downgraded_and_reported(conn):
 
 
 def test_reviewer_relocation_quote_cannot_create_visa_offer(conn):
-    description = "We offer relocation support to Dubai or Madrid."
+    description = "We offer relocation support to Madrid or Madrid."
     insert(conn, "relocation", description=description)
     # Simulate a pre-read that missed the text, so the reviewer upgrade path runs.
     conn.execute(
@@ -128,7 +128,7 @@ def test_reviewer_relocation_quote_cannot_create_visa_offer(conn):
 
 
 def test_old_relocation_offer_is_downgraded_when_read(conn):
-    description = "We offer relocation support to Dubai or Madrid."
+    description = "We offer relocation support to Madrid or Madrid."
     insert(conn, "old-relocation", description=description)
     conn.execute(
         """UPDATE jobs SET sponsorship_signal = 'offered', sponsorship_evidence = ?,
@@ -141,7 +141,7 @@ def test_old_relocation_offer_is_downgraded_when_read(conn):
 
     assert candidate["sponsorship_signal"] != "offered"
     assert candidate["ai_sponsorship"] == "implied"
-    digest = scraper.format_digest_message([dict(candidate, market="dubai")], 0, [], today=NOW)
+    digest = scraper.format_digest_message([dict(candidate, market="madrid")], 0, [], today=NOW)
     assert "Visa unconfirmed" in digest
     assert "Visa offered" not in digest
 
@@ -193,24 +193,24 @@ def test_feedback_examples_are_recent_deduped_and_carry_job_facts(conn):
     assert examples[0] == {
         "id": "hated", "action": "skip", "reason": "wrong stack, .NET",
         "title": "Backend Developer (.NET)", "company": "Acme",
-        "location": "Dubai, United Arab Emirates", "tech_required": "c#, .net",
+        "location": "Madrid, Spain", "tech_required": "c#, .net",
         "min_experience": -1, "score": 60, "date": examples[0]["date"],
     }
     assert scraper.get_feedback_examples(conn, limit=1) == examples[:1]
 
 
 @pytest.mark.parametrize("sponsorship,evidence,expected_market", [
-    ("offered", "", "dubai"),
-    ("offered", "invented offer", "dubai"),
-    ("offered", OFFER, "jeddah"),
-    ("implied", "", "dubai"),
-    ("doubtful", "", "dubai"),
+    ("offered", "", "madrid"),
+    ("offered", "invented offer", "madrid"),
+    ("offered", OFFER, "barcelona"),
+    ("implied", "", "madrid"),
+    ("doubtful", "", "madrid"),
 ])
 def test_plan_and_record_select_the_same_market(conn, monkeypatch, sponsorship, evidence, expected_market):
     import jobhunter_queue
     monkeypatch.setitem(scraper.CONFIG, "delivery", {"per_market": 3, "cap": 1})
     insert(conn, "strong", score=90)
-    insert(conn, "visa", location="Jeddah", score=60, description=OFFER)
+    insert(conn, "visa", location="Barcelona", score=60, description=OFFER)
     verdicts = [verdict("strong", rank=1), verdict("visa", sponsorship=sponsorship, evidence=evidence, rank=2)]
     plan_notes, record_notes = [], []
     before = conn.total_changes
@@ -254,7 +254,7 @@ def test_generic_plan_on_read_only_db_does_not_create_context_table(conn, monkey
     import sqlite3
     from pathlib import Path
     monkeypatch.setitem(scraper.CONFIG, "matching", {"preset": "generic", "preferred_roles": ["architect"]})
-    monkeypatch.setitem(scraper.CONFIG, "markets", [{"name": "Dubai", "locations": ["Dubai"], "work_authorization": "authorized", "relocation_required": False}])
+    monkeypatch.setitem(scraper.CONFIG, "markets", [{"name": "Madrid", "locations": ["Madrid"], "work_authorization": "authorized", "relocation_required": False}])
     insert(conn, "role")
     before = Path(scraper.CONFIG["db_path"]).read_bytes()
     with sqlite3.connect(f"{Path(scraper.CONFIG['db_path']).as_uri()}?mode=ro", uri=True) as read_only:
@@ -267,11 +267,11 @@ def test_verified_offer_below_regular_threshold_survives_record_and_delivery_sel
     import jobhunter_queue
     monkeypatch.setitem(scraper.CONFIG, "delivery", {"per_market": 3, "cap": 1})
     insert(conn, "strong", score=90)
-    insert(conn, "visa", score=40, location="Jeddah", description=OFFER)
+    insert(conn, "visa", score=40, location="Barcelona", description=OFFER)
     verdicts = [verdict("strong", rank=1), verdict("visa", sponsorship="offered", evidence=OFFER, rank=2)]
     plan = scraper.plan_reviewed_digest(conn, verdicts)
     written = scraper.record_review(conn, verdicts)
     selected = jobhunter_queue.select_ranked(scraper.reviewed_queue(conn, written), cap=1)
     assert [job["id"] for job in selected] == ["visa"]
     assert selected[0]["score"] == 40
-    assert plan["markets"]["jeddah"]["selected"] == 1
+    assert plan["markets"]["barcelona"]["selected"] == 1

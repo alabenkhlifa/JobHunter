@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Job scraper for Dubai market with Telegram notifications."""
+"""Job scraper for configured markets with Telegram notifications."""
 
 import argparse
 from copy import deepcopy
@@ -28,6 +28,7 @@ from urllib3.util.retry import Retry
 
 import job_scoring
 import jobhunter_matching
+import jobhunter_sources
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -43,15 +44,9 @@ CONFIG = {
         "solutions architect",
     ],
     "regions": {
-        "Dubai": ["Dubai"],
-        "Madrid": ["Madrid, Spain"],
         "Valencia": ["Valencia, Spain"],
-        "Jeddah": ["Jeddah"],
-        "Riyadh": ["Riyadh"],
-        # One country-wide query rather than a city list: LinkedIn resolves
-        # "Switzerland" fine, and five city generators would multiply the
-        # scrape time for the same postings.
-        "Switzerland": ["Switzerland"],
+        "Madrid": ["Madrid, Spain"],
+        "Barcelona": ["Barcelona, Spain"],
     },
     # Defined once, in job_scoring, so the scraper filters on the same list
     # the rubric knocks out on and tools/eval_scoring.py measures with.
@@ -65,6 +60,9 @@ CONFIG = {
         "mobile developer", "mobile engineer", "ios developer", "android developer",
         "etl developer", "etl engineer", "data scientist", "data analyst",
         "support engineer", "application support", "technical support", "l1 ", "l2 ",
+        # Seen on the Spain boards: a sales-side "value engineer" and QA under
+        # another name, each costing a detail fetch before the rubric dropped it.
+        "value engineer", "quality engineer",
         "scrum master", "project manager", "product manager", "delivery manager",
         "pre-sales", "presales", "sales engineer", "account manager",
         # Seen in the replayed batch: vendor-product and research titles.
@@ -180,11 +178,20 @@ CONFIG = {
     "sponsored_score_threshold": 35,
     # Stamped on every verdict. Bump it when the review rules in the skill
     # change: a hold judged under an older rubric competes again as unseen.
-    "review_rubric": "2026-09-12",
+    "review_rubric": "2026-10-18-language-uncertainty",
+    # Sources are chosen per profile from its configured locations: each
+    # one searches only the countries it covers (source_countries), so
+    # removing Spain from the markets stops the Spain boards and adding Dubai
+    # starts Foundit. A profile config lists display names here to leave a
+    # source out even where it would run, e.g. ["SpainJobs.io"].
+    "disabled_sources": [],
     # What the reviewer judges against before any feedback example. Plain
     # text for the model; the code never parses it.
     "review_preferences": {
         "languages": ["French", "English", "Arabic"],
+        "language_uncertainty_policy": "An unclear or unstated Spanish-language requirement is informational "
+                                       "only. Do not hold or reject on that uncertainty alone; assess the "
+                                       "role against the other criteria.",
         "target_roles": ["Software Architect", "Application/Cloud Solutions Architect (hands-on)",
                          "Tech Lead", "Senior Backend Engineer"],
         "primary_stacks": ["Java", "Spring Boot", "Node.js/NestJS", "TypeScript"],
@@ -330,6 +337,7 @@ def init_db():
     init_application_tracking(conn)
     init_feedback_tracking(conn)
     ensure_review_columns(conn)
+    ensure_source_columns(conn)
     # Migration for existing databases
     for ddl in [
         "ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'",
@@ -363,6 +371,23 @@ REVIEW_COLUMNS = (
 def ensure_review_columns(conn):
     """Add the verdict-stamp and sponsorship pre-read columns where missing."""
     for ddl in REVIEW_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {ddl}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+    conn.commit()
+
+
+# What the Spain boards know that LinkedIn does not: the employer's own
+# posting behind an aggregator card, and what the board says about Spanish.
+SOURCE_COLUMNS = (
+    "apply_url TEXT DEFAULT ''",
+    "language_requirement TEXT DEFAULT ''",
+)
+
+
+def ensure_source_columns(conn):
+    for ddl in SOURCE_COLUMNS:
         try:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {ddl}")
         except sqlite3.OperationalError:
@@ -816,8 +841,9 @@ def save_job(conn, job):
            (id, title, company, location, url, source, score, date_posted, date_scraped, notified,
             description, tech_required, tech_nice_to_have, min_experience, salary, work_model,
             score_breakdown, recruiter_name, recruiter_company, recruiter_profile_url,
-            company_website, credibility_notes, sponsorship_signal, sponsorship_evidence)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            company_website, credibility_notes, sponsorship_signal, sponsorship_evidence,
+            apply_url, language_requirement)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             job["id"],
             job["title"],
@@ -842,6 +868,8 @@ def save_job(conn, job):
             metadata["company_website"],
             metadata["credibility_notes"],
             *job_scoring.sponsorship_signal(job.get("description", "")),
+            str(job.get("apply_url") or "").strip(),
+            str(job.get("language_requirement") or "").strip(),
         ),
     )
     conn.commit()
@@ -1721,9 +1749,25 @@ def readable_text(el):
     return "\n".join(out).strip()
 
 
+def _board_get(session):
+    """The rate-limited GET handed to board modules; resolved late so tests can patch it."""
+    def get(url, **kwargs):
+        return rate_limited_get(session, url, **kwargs)
+    return get
+
+
 def fetch_job_description(session, job):
     """Fetch the full job description from the job detail page."""
     try:
+        board = jobhunter_sources.by_name(job.get("source"))
+        if board is not None:
+            # Board modules return "" on failure and may enrich the job with
+            # apply_url / language_requirement; see jobhunter_sources.base.
+            try:
+                return jobhunter_sources.module_for(board).fetch_description(session, job, get=_board_get(session))
+            except Exception:  # noqa: BLE001 - one odd page must not end the night
+                log.exception(f"{board.name}: description fetch failed for {job.get('url')}")
+                return ""
         if job["source"] == "Foundit":
             # Use Foundit's job detail API
             job_id = job["id"].replace("foundit-", "")
@@ -2160,7 +2204,8 @@ def extract_min_experience(text):
 
 SALARY_LOCATION_GROUPS = {
     "uae": ("united arab emirates", "uae", "dubai", "abu dhabi", "sharjah"),
-    "spain": ("spain", "madrid", "barcelona"),
+    "spain": ("spain", "espa\u00f1a", "espana", "madrid", "barcelona", "valencia", "val\u00e8ncia",
+              "sevilla", "seville", "m\u00e1laga", "malaga", "bilbao", "zaragoza"),
     "netherlands": ("netherlands", "amsterdam", "rotterdam"),
     "saudi_arabia": ("saudi arabia", "ksa", "riyadh", "jeddah"),
     "uk": ("united kingdom", "uk", "london"),
@@ -2188,7 +2233,8 @@ def _salary_location_label(text, match_start):
     if not match:
         return ""
     label = match.group(1).strip()
-    if label.lower() in {"salary", "pay", "base pay", "compensation", "package", "benefits"}:
+    if label.lower() in {"salary", "pay", "base pay", "compensation", "package", "benefits", "salary range",
+                         "salario", "sueldo", "banda salarial", "rango salarial", "beneficios"}:
         return ""
     return label
 
@@ -2206,7 +2252,10 @@ def _salary_matches_job_location(label, job_location):
 _SALARY_PAY_CONTEXT = re.compile(
     r"\b(?:salar(?:y|ies)|base pay|base compensation|total compensation|"
     r"compensation|remuneration|wages?|pay|per month|monthly|per year|"
-    r"per annum|annual pay)\b|/(?:month|mo|year|yr)\b",
+    r"per annum|annual pay|gross|"
+    r"salario|sueldo|retribuci[o\u00f3]n|remuneraci[o\u00f3]n|banda salarial|rango salarial|"
+    r"brut[oa]s?|anual(?:es)?|mensual(?:es)?|al a\u00f1o|al mes|por a\u00f1o|por mes|pagas)\b"
+    r"|/(?:month|mo|year|yr|a\u00f1o|mes)\b",
     re.IGNORECASE,
 )
 _SALARY_BENEFIT_CONTEXT = re.compile(
@@ -2234,15 +2283,36 @@ def _salary_has_pay_context(text, start, end):
     return pay_distance is not None and (benefit_distance is None or pay_distance < benefit_distance)
 
 
+# Regex fragments shared by the salary patterns. Amounts may use English
+# (45,000) or European (45.000 / 45.000,00) grouping, or a k suffix; the
+# currency may sit on either side of the amount and Spanish period words
+# (brutos anuales, al mes, /mes) count as the pay period.
+_SALARY_CURRENCY = r"(?:(?:aed|usd|sar|chf|gbp|eur(?:os?)?)(?![a-z])|us\$|\$|\u00a3|\u20ac)"
+_SALARY_NUMBER = r"(?:\d{1,3}(?:[.,]\d{3})+(?:,\d{2})?(?!\d)|\d{4,}|\d+(?:[.,]\d+)?[kK](?![a-z]))"
+_SALARY_RANGE_SEP = r"\s*(?:-|\u2013|\u2014|to|a|hasta)\s*"
+_SALARY_PERIOD = (
+    r"(?:\s*(?:per\s+(?:month|year|annum)|p\.?[am]\.?(?![a-z])|monthly|annually"
+    r"|(?:gross\s*)?/\s*(?:month|year|mo|yr|a\u00f1o|mes)\b"
+    r"|gross(?:\s+(?:per\s+)?(?:year|annual(?:ly)?|month))?"
+    r"|brut[oa]s?(?:\s+(?:anuales?|mensuales?|al\s+(?:a\u00f1o|mes)))?"
+    r"|anuales?|mensuales?|(?:al|por)\s+(?:a\u00f1o|mes)))?"
+)
+_SALARY_LABEL = (
+    r"(?:salary|compensation|pay|package|salario|sueldo|retribuci[o\u00f3]n|"
+    r"remuneraci[o\u00f3]n|banda\s+salarial|rango\s+salarial)"
+)
+
+
 def extract_salary(text, job_location=""):
     """Extract pay for the job's location, excluding nearby benefit allowances."""
+    cur, num, sep, period = _SALARY_CURRENCY, _SALARY_NUMBER, _SALARY_RANGE_SEP, _SALARY_PERIOD
     patterns = [
-        # Currency then amount: "AED 25,000 - 40,000" or "$90k - $120k" (min 4 digits or k suffix)
-        r'(?:aed|usd|sar|us\$|\$|£|€)\s*(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:aed|usd|sar|us\$|\$|£|€)?\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK]))?\s*(?:per\s+(?:month|year|annum)|p\.?[am]\.?|monthly|annually|\/\s*(?:month|year|mo|yr))?',
-        # Amount then currency: "25,000 - 40,000 AED"
-        r'(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*)?(?:aed|usd|sar|us\$|\$|£|€)\s*(?:per\s+(?:month|year|annum)|monthly|annually)?',
-        # "salary: AED 25,000" or "compensation: 25,000 - 40,000"
-        r'(?:salary|compensation|pay|package)\s*(?:range)?[\s:]+(?:aed|usd|sar|us\$|\$|£|€)?\s*(\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK])\s*(?:[-–to]+\s*(?:aed|usd|sar|us\$|\$|£|€)?\s*(?:\d{1,3}(?:,\d{3})+|\d{4,}|\d+[kK]))?\s*(?:per\s+(?:month|year|annum)|p\.?[am]\.?|monthly|annually|\/\s*(?:month|year|mo|yr))?',
+        # Currency then amount: "AED 25,000 - 40,000", "$90k - $120k", "EUR 50,000 - 60,000 per year"
+        rf"{cur}\s*{num}(?:{sep}{cur}?\s*{num})?{period}",
+        # Amount then currency: "25,000 - 40,000 AED", "45.000 - 55.000 \u20ac brutos anuales", "3.500 \u20ac/mes"
+        rf"{num}\s*{cur}?(?:{sep}{num}\s*)?{cur}{period}",
+        # "salary: AED 25,000", "Salario: 50.000\u20ac - 60.000\u20ac", "compensation: 25,000 - 40,000"
+        rf"{_SALARY_LABEL}\s*(?:range)?[\s:]+{cur}?\s*{num}\s*{cur}?(?:{sep}{cur}?\s*{num}\s*{cur}?)?{period}",
     ]
     matches = []
     for pattern in patterns:
@@ -2414,6 +2484,18 @@ def send_telegram_document(token, chat_id, file_path, caption=None):
         return False
 
 
+def official_apply_url(job):
+    """The employer's own posting behind an aggregator card, when it differs from the listing."""
+    apply_url = str(job.get("apply_url") or "").strip()
+    if not apply_url or apply_url == str(job.get("url") or "").strip():
+        return ""
+    try:
+        parsed = urlsplit(apply_url)
+    except ValueError:
+        return ""
+    return apply_url if parsed.scheme.lower() in ("http", "https") and parsed.netloc else ""
+
+
 def format_job_message(job):
     score = job["score"]
 
@@ -2486,8 +2568,14 @@ def format_job_message(job):
         lines.append(f"\U0001f310 Company site: {metadata['company_website']}")
     if metadata["credibility_notes"]:
         lines.append(f"\U0001f50e Credibility: {metadata['credibility_notes']}")
+    if job.get("language_requirement"):
+        # The note already names its source ("board: ...").
+        lines.append(f"\U0001f5e3 {job['language_requirement']}")
 
     lines.extend(["", f"\U0001f517 {job['url']}"])
+    apply_url = official_apply_url(job)
+    if apply_url:
+        lines.append(f"\U0001f3e2 Employer posting: {apply_url}")
 
     return "\n".join(lines)
 
@@ -2496,11 +2584,12 @@ def format_job_message(job):
 # match job_scoring.market_region's return values directly -- NOT
 # CONFIG["regions"]'s capitalized keys, a different casing convention for
 # a different purpose (scrape-time region search vs. display grouping).
-DIGEST_MARKET_ORDER = ("dubai", "madrid", "valencia", "jeddah", "riyadh", "switzerland")
+DIGEST_MARKET_ORDER = ("valencia", "madrid", "barcelona")
 DIGEST_MARKET_LABELS = {
     "dubai": "\U0001f1e6\U0001f1ea DUBAI",
     "madrid": "\U0001f1ea\U0001f1f8 MADRID",
     "valencia": "\U0001f1ea\U0001f1f8 VALENCIA",
+    "barcelona": "\U0001f1ea\U0001f1f8 BARCELONA",
     "jeddah": "\U0001f1f8\U0001f1e6 JEDDAH",
     "riyadh": "\U0001f1f8\U0001f1e6 RIYADH",
     "switzerland": "\U0001f1e8\U0001f1ed SWITZERLAND",
@@ -2605,6 +2694,9 @@ def format_digest_message(sent, queued_count, queued_top_scores, *, today=None, 
             details = f"{score_icon} {score}/100 · <b>{visa}</b>"
             if job_scoring.employer_fit(job) != job_scoring.DIRECT_EMPLOYER:
                 details += " · recruiter"
+            apply_url = official_apply_url(job)
+            if apply_url:
+                details += f' · <a href="{html.escape(apply_url, quote=True)}">employer posting</a>'
             lines.extend([details, ""])
             number += 1
 
@@ -2743,10 +2835,51 @@ def notify_new_jobs(token, chat_id, jobs, *, conn=None):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-SCRAPERS = [
-    ("LinkedIn", scrape_linkedin),
-    ("Foundit", scrape_foundit),
-]
+def _board_scraper(board):
+    """Adapt a board module's scrape() to the (session, keyword, location) generator contract."""
+    def scrape(session, keyword, location):
+        yield from jobhunter_sources.module_for(board).scrape(
+            session, keyword, location, get=_board_get(session), config=CONFIG)
+    scrape.__name__ = f"scrape_{board.key}"
+    return scrape
+
+
+def _scrapers():
+    boards = jobhunter_sources.boards()
+    first = [(b.name, _board_scraper(b)) for b in boards if b.high_priority]
+    rest = [(b.name, _board_scraper(b)) for b in boards if not b.high_priority]
+    return [*first, ("LinkedIn", scrape_linkedin), *rest, ("Foundit", scrape_foundit)]
+
+
+# High-priority Spain boards, LinkedIn, the other boards, then Foundit Gulf.
+SCRAPERS = _scrapers()
+
+# job_scoring country codes each non-board source can search; None searches
+# anywhere. Boards declare theirs on Board.countries.
+SOURCE_COUNTRIES = {"LinkedIn": None, "Foundit": frozenset({"uae", "ksa"})}
+
+
+def source_countries(name):
+    """Country codes a source can search: None for anywhere, empty when unknown."""
+    board = jobhunter_sources.by_name(name)
+    if board is not None:
+        return board.countries
+    return SOURCE_COUNTRIES.get(name, frozenset())
+
+
+def source_regions(name):
+    """CONFIG["regions"] narrowed to the locations a source can search.
+
+    A region left without a location is dropped, so a source whose
+    countries the profile never names gets nothing to search.
+    """
+    countries = source_countries(name)
+    regions = {}
+    for region, locations in CONFIG["regions"].items():
+        kept = [loc for loc in locations if countries is None or job_scoring.market_country(loc) in countries]
+        if kept:
+            regions[region] = kept
+    return regions
 
 
 def parse_args():
@@ -2775,24 +2908,56 @@ def parse_args():
 
 
 def build_collection_buckets(session):
-    """One LinkedIn bucket per region, one Foundit bucket per Gulf country."""
+    """One bucket per source and region; Foundit buckets are per Gulf country.
+
+    Sources are chosen per profile from its configured locations: a source
+    only searches the locations in the countries it covers (source_regions),
+    and one with none of them is skipped with a logged line. Removing Spain
+    from the markets stops the Spain boards; adding Dubai starts Foundit.
+    LinkedIn searches every location.
+
+    Boards with keyword search get one generator per keyword and city like
+    LinkedIn. A board whose search reads whole descriptions, or has none,
+    lists each city newest-first instead (keyword None) and keeps the titles
+    jobhunter_sources.base.title_matches_search accepts: cheaper than eight
+    loose queries per city, and no narrower than LinkedIn's own search.
+    """
     buckets = {}
+    disabled = {str(name).casefold() for name in CONFIG.get("disabled_sources", ())}
     for scraper_name, scraper_fn in SCRAPERS:
-        regions = CONFIG["regions"]
-        if scraper_name.lower() == "foundit":
-            # The Gulf board returns country-wide pages. Spain and
-            # Switzerland are searched through LinkedIn only.
-            regions = {}
-            for locations in CONFIG["regions"].values():
+        if scraper_name.casefold() in disabled:
+            log.info(f"{scraper_name}: disabled by config")
+            continue
+        regions = source_regions(scraper_name)
+        if not regions:
+            countries = source_countries(scraper_name)
+            where = f" in {', '.join(sorted(countries))}" if countries is not None else ""
+            log.info(f"{scraper_name}: no configured location{where}; skipped")
+            continue
+        board = jobhunter_sources.by_name(scraper_name)
+        keywords = CONFIG["keywords"] if board is None or board.keyword_search else [None]
+        if board is not None:
+            # A board lists cities, not a whole country: a Spanish location
+            # without a city listing (Seville) has nothing to fetch.
+            listed = {}
+            for region, locations in regions.items():
                 for location in locations:
-                    country = FOUNDIT_LOCATION_MAP.get(location, location)
-                    if country in ("United Arab Emirates", "Saudi Arabia"):
-                        regions[country] = [country]
+                    if jobhunter_sources.base.city_of(location):
+                        listed.setdefault(region, []).append(location)
+                    else:
+                        log.info(f"{scraper_name}: no city listing for {location!r}; skipped")
+            regions = listed
+        if scraper_name.lower() == "foundit":
+            # The Gulf board returns country-wide pages, so the profile's
+            # cities collapse into one bucket per country.
+            countries = [_COUNTRY_DISPLAY[job_scoring.market_country(location)]
+                         for locations in regions.values() for location in locations]
+            regions = {country: [country] for country in countries}
         for region, locations in regions.items():
             buckets[f"{scraper_name}/{region}"] = {
                 "matches": 0,
                 "generators": [scraper_fn(session, keyword, location)
-                               for keyword in CONFIG["keywords"] for location in locations],
+                               for keyword in keywords for location in locations],
                 "pending_jobs": [],
             }
     return buckets
@@ -2890,6 +3055,12 @@ def evaluate_job(job, *, conn, session, seen_titles, skip_counts):
     log.info(f"Fetching details: {job['title']}")
     desc = fetch_job_description(session, job)
     job["description"] = desc
+    if not desc and jobhunter_sources.by_name(job.get("source")) is not None:
+        # A board page that could not be read tonight (challenge, outage,
+        # markup change) is not saved: saving would mark it seen with a
+        # title-only score and it would never be fetched again.
+        log.warning(f"{job['source']}: no description for {job['url']}; left unsaved for a retry")
+        return None
     if country:
         resolved = resolve_description_city(desc, country)
         if not resolved:
@@ -2926,8 +3097,16 @@ def evaluate_job(job, *, conn, session, seen_titles, skip_counts):
     if job["min_experience"] > max_exp:
         return save_knockout(conn, job, f"wants {job['min_experience']}+ years, over the {max_exp} cap")
 
-    job["salary"] = extract_salary(desc, job.get("location", ""))
+    # Boards hand over the employer-published figure separately (never an
+    # estimate); it counts only when the body itself names no salary.
+    job["salary"] = extract_salary(desc, job.get("location", "")) or str(job.get("salary_text") or "").strip()
     job["work_model"] = detect_work_model(desc)
+    if job["work_model"] == "on-site":
+        # jobhunter_sources.base.spanish_location keeps a board's own
+        # remote/hybrid badge as a location suffix.
+        suffix = re.search(r"\((remote|hybrid)\)\s*$", str(job.get("location") or ""), re.I)
+        if suffix:
+            job["work_model"] = suffix.group(1).lower()
     score, breakdown = score_job(job)
     job["score"] = score
     job["score_breakdown"] = ", ".join(breakdown)
@@ -3096,7 +3275,11 @@ def main():
                     if state["matches"] >= target:
                         break
 
-                    result = evaluate_job(job, conn=conn, session=session, seen_titles=seen_titles, skip_counts=skip_counts)
+                    try:
+                        result = evaluate_job(job, conn=conn, session=session, seen_titles=seen_titles, skip_counts=skip_counts)
+                    except Exception as e:  # noqa: BLE001 - one bad card must not end the night
+                        log.exception(f"{bucket}: evaluation failed for {job.get('url')}: {e}")
+                        continue
                     if result and result["score"] >= CONFIG["score_threshold"]:
                         new_jobs.append(result)
                         state["matches"] += 1

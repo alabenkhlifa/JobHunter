@@ -16,6 +16,8 @@ from dotenv import load_dotenv
 
 import scraper
 import jobhunter_interest_flow as interest_flow
+import resume_blocks
+import resume_choices
 
 # Setup
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -300,6 +302,58 @@ def report_cover_draft_required(callback_query_id):
     send_message(COVER_DRAFT_REQUIRED_MESSAGE)
 
 
+def fixed_profile():
+    """An absent catalog retains legacy behavior; a malformed enabled catalog fails closed."""
+    if not PROFILE_PATH.is_file():
+        return None
+    profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    data = profile.get("resume_blocks")
+    if isinstance(data, dict) and data.get("enabled") is True:
+        resume_blocks.catalog(profile)
+        return profile
+    return None
+
+
+def send_resume_choices(job_id, profile, *, restart=False):
+    conn = get_db()
+    try:
+        message, keyboard = (resume_choices.start(conn, job_id, profile) if restart else
+                             resume_choices.card(conn, job_id, profile))
+    finally:
+        conn.close()
+    return send_message(message, reply_markup=keyboard)
+
+
+def handle_resume_choice(token, callback_query_id=None):
+    """Only the latest job-bound card may advance or generate a resume."""
+    conn = get_db()
+    try:
+        profile = fixed_profile()
+        if profile is None:
+            raise resume_choices.ChoiceError("Resume choices changed. Choose Apply again.")
+        job_id, selection = resume_choices.choose(conn, token, profile)
+        if application_already_submitted(job_id) or not has_delivered_research(job_id):
+            raise resume_choices.ChoiceError("This research card is no longer active. Choose Interested again.")
+        if selection is None:
+            return send_resume_choices(job_id, profile)
+        acknowledge(callback_query_id, "Generating your selected resume")
+        sent = handle_apply(job_id, resume_selection=selection)
+        if not sent:
+            message, keyboard = resume_choices.retry(conn, job_id, profile)
+            send_message("🔄 <b>Review or retry your selection</b>\n\n" + message, reply_markup=keyboard)
+        return sent
+    except (resume_choices.ChoiceError, ValueError) as exc:
+        acknowledge(callback_query_id, "Use the latest resume card")
+        send_message("ℹ️ " + html.escape(str(exc)))
+        return False
+    except Exception as exc:
+        log.warning("Resume choice failed (%s)", type(exc).__name__)
+        send_message("⚠️ <b>Resume choice could not finish</b>\n\nChoose Apply again to reopen the picker.")
+        return False
+    finally:
+        conn.close()
+
+
 def current_package_includes_cover_letter(job_id):
     """Read the current package so a retry cannot replace its cover with a resume-only run."""
     db = get_db()
@@ -353,7 +407,11 @@ def handle_interested(job_id, callback_query_id=None):
 
     mark_interested(job_id)
     try:
-        research = interest_flow.research_job(job)
+        research_conn = get_db()
+        try:
+            research = interest_flow.research_job(job, conn=research_conn)
+        finally:
+            research_conn.close()
         message = interest_flow.build_research_brief_message(job, research)
     except Exception as exc:
         report_action_failure(callback_query_id, "Research unavailable", "⚠️ The research brief could not be prepared. Retry Interested before Apply.")
@@ -369,13 +427,23 @@ def handle_interested(job_id, callback_query_id=None):
             return False
         acknowledge(callback_query_id, "✓ Research brief sent")
         log.info(f"Interested: {job['title']} @ {job['company']} - sent research brief")
+        try:
+            profile = fixed_profile()
+            if profile is not None:
+                if not send_resume_choices(job_id, profile, restart=True):
+                    send_message("⚠️ <b>Resume picker was not delivered</b>\n\nChoose Apply on the research card to reopen it.")
+                    return False
+        except (ValueError, OSError) as exc:
+            log.warning("Resume picker unavailable after research (%s)", type(exc).__name__)
+            send_message("⚠️ <b>Resume picker unavailable</b>\n\nThe approved catalog needs checking. Your research card is saved.")
+            return False
     else:
         report_action_failure(callback_query_id, "Research delivery failed", "⚠️ The research card was not delivered. Retry Interested before Apply.")
         log.warning("Interested research brief was not delivered; retry before preparing a package")
     return sent
 
 
-def handle_apply(job_id, callback_query_id=None, *, include_cover_letter=False, cover_letter_draft=None):
+def handle_apply(job_id, callback_query_id=None, *, include_cover_letter=False, cover_letter_draft=None, resume_summary_draft=None, resume_selection=None):
     job = get_job(job_id)
     if not job:
         report_action_failure(callback_query_id, "Job not found", "⚠️ This job is no longer in JobHunter. Request its details again.")
@@ -386,6 +454,23 @@ def handle_apply(job_id, callback_query_id=None, *, include_cover_letter=False, 
     if not has_delivered_research(job_id):
         report_action_failure(callback_query_id, "Open the research brief first", "⚠️ The research brief has not been delivered for this job. Choose Interested before Apply.")
         log.warning("Apply requested without a delivered research card for job %s", job_id)
+        return False
+    try:
+        profile = fixed_profile()
+        if profile is not None and resume_selection is None:
+            if include_cover_letter:
+                # A later explicit cover request reuses the candidate's last completed choice.
+                package_path = _saved_resume_selection(job_id)
+                if package_path is None:
+                    send_message("📄 <b>Choose your resume first</b>\n\nComplete the resume picker, then request the cover letter again.")
+                    return send_resume_choices(job_id, profile, restart=True)
+                resume_selection = package_path
+            else:
+                acknowledge(callback_query_id, "Choose your resume flavor")
+                return send_resume_choices(job_id, profile, restart=True)
+    except (ValueError, OSError) as exc:
+        log.warning("Resume catalog unavailable (%s)", type(exc).__name__)
+        send_message("⚠️ <b>Resume choices unavailable</b>\n\nThe approved catalog needs checking before generation.")
         return False
     if not include_cover_letter and current_package_includes_cover_letter(job_id):
         acknowledge(callback_query_id, "Cover retry needs the same draft")
@@ -418,8 +503,16 @@ def handle_apply(job_id, callback_query_id=None, *, include_cover_letter=False, 
         }
         if cover_letter_draft is not None:
             package_options["cover_letter_draft"] = cover_letter_draft
+        if resume_summary_draft is not None:
+            package_options["resume_summary_draft"] = resume_summary_draft
+        if resume_selection is not None:
+            package_options["resume_selection"] = resume_selection
         package = interest_flow.prepare_application_package(job_id, **package_options)
     except interest_flow.TailoringReadinessError as exc:
+        if resume_selection is not None:
+            acknowledge(callback_query_id, "Review your project selection")
+            send_message("⚠️ <b>Resume needs a different selection</b>\n\n" + html.escape(str(exc)))
+            return False
         sent = send_message(
             interest_flow.build_tailoring_blocked_message(job, str(exc)),
             reply_markup=interest_flow.tailoring_blocked_keyboard(job_id, job.get("url")),
@@ -440,7 +533,7 @@ def handle_apply(job_id, callback_query_id=None, *, include_cover_letter=False, 
             + retry_apply_instruction(job_id, include_cover_letter=True)
         )
         return False
-    documents = [("Resume", package.resume_pdf, "Tailored resume")]
+    documents = [("Resume", package.resume_pdf, "📄 Your selected resume" if resume_selection else "Tailored resume")]
     if include_cover_letter:
         documents.append(("Cover letter", package.cover_pdf, "Tailored cover letter"))
     for label, path, caption in documents:
@@ -464,9 +557,24 @@ def handle_apply(job_id, callback_query_id=None, *, include_cover_letter=False, 
         )
         log.warning("Document delivery state could not be saved (%s)", type(exc).__name__)
         return False
+    layout_note = ""
+    if resume_selection is not None:
+        try:
+            manifest = json.loads(package.manifest_json.read_text(encoding="utf-8"))
+            layout = manifest.get("layout") or {}
+            layout_note = f"\n\n📐 <b>{manifest.get('resume_pages', '?')} page(s)</b> · Fixed summary and project blocks."
+            if layout.get("page_two_sparse"):
+                layout_note += "\n⚠️ Page two is mostly empty. Choose fewer projects or the one-page variant if you prefer."
+        except (OSError, ValueError, AttributeError):
+            layout_note = "\n\n📐 Review every page before proceeding."
+    ready_keyboard = interest_flow.package_ready_keyboard(job_id)
+    if resume_selection is not None:
+        ready_keyboard["inline_keyboard"].append([
+            {"text": "🧩 Change resume choices", "callback_data": f"apply:{job_id}"}
+        ])
     sent = send_message(
-        build_documents_delivered_message(job, include_cover_letter=include_cover_letter),
-        reply_markup=interest_flow.package_ready_keyboard(job_id),
+        build_documents_delivered_message(job, include_cover_letter=include_cover_letter) + layout_note,
+        reply_markup=ready_keyboard,
     )
     if sent:
         acknowledge(callback_query_id, "✓ Documents delivered")
@@ -481,6 +589,25 @@ def handle_apply(job_id, callback_query_id=None, *, include_cover_letter=False, 
     else:
         log.warning("Package ready card was not delivered for job %s", job_id)
     return sent
+
+
+def _saved_resume_selection(job_id):
+    """Reuse only this job's recorded, fixed-block package for a requested cover letter."""
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT package_path FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1", (job_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return None
+    directory = Path(row[0]).resolve()
+    if directory.parent != OUTPUT_DIR.resolve():
+        return None
+    try:
+        manifest = json.loads((directory / "tailoring_manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return manifest.get("resume_selection") if manifest.get("job_id") == job_id and manifest.get("tailoring_mode") == "fixed_blocks" else None
 
 
 def handle_ignore(job_id, callback_query_id):
@@ -577,6 +704,11 @@ def dispatch_callback_data(callback_data, callback_query_id=None):
     if not separator:
         answer_callback(callback_query_id, "Invalid callback")
         return 1
+    if action == "resume_choice":
+        if not re.fullmatch(r"[0-9a-f]{32}", payload):
+            answer_callback(callback_query_id, "Invalid resume choice")
+            return 1
+        return 0 if handle_resume_choice(payload, callback_query_id) else 3
     if action == "skip_reason":
         reason_code, reason_separator, job_id = payload.partition(":")
         if not reason_separator or reason_code not in SKIP_REASON_LABELS:
@@ -666,6 +798,7 @@ def main(argv=None):
     parser.add_argument("--callback-query-id", metavar="ID", help="Optional callback query ID if it has not been answered")
     parser.add_argument("--cover-letter", action="store_true", help="With --apply, also generate a cover letter when needed")
     parser.add_argument("--cover-draft", metavar="PATH", help="Private reviewed JSON draft for --apply --cover-letter")
+    parser.add_argument("--resume-summary-draft", metavar="PATH", help="Private reviewed summary JSON for --apply")
     args = parser.parse_args(argv)
 
     if args.cover_letter and not args.apply:
@@ -674,6 +807,8 @@ def main(argv=None):
         parser.error("--cover-letter requires a reviewed JSON draft: --cover-draft data/cover-drafts/JOB_ID.json")
     if args.cover_draft and not (args.apply and args.cover_letter):
         parser.error("--cover-draft requires --apply and --cover-letter")
+    if args.resume_summary_draft and not args.apply:
+        parser.error("--resume-summary-draft requires --apply")
     if args.callback_data is not None:
         return dispatch_callback_data(args.callback_data, args.callback_query_id)
     if args.callback_query_id:
@@ -694,6 +829,15 @@ def main(argv=None):
             except (OSError, ValueError):
                 parser.error("--cover-draft is not readable JSON")
         options = {"include_cover_letter": args.cover_letter}
+        if args.resume_summary_draft:
+            summary_path = Path(args.resume_summary_draft).resolve()
+            summary_root = (OUTPUT_DIR.parent / "resume-drafts").resolve()
+            if not summary_path.is_relative_to(summary_root) or summary_path.suffix != ".json" or not summary_path.is_file() or summary_path.stat().st_size > 20000:
+                parser.error("--resume-summary-draft requires a private JSON file under data/resume-drafts and 20 KB")
+            try:
+                options["resume_summary_draft"] = json.loads(summary_path.read_text())
+            except (OSError, ValueError):
+                parser.error("--resume-summary-draft is not readable JSON")
         if draft is not None:
             options["cover_letter_draft"] = draft
         return 0 if handle_apply(args.apply, **options) else 1

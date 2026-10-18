@@ -34,7 +34,8 @@ def test_handle_interested_marks_job_and_sends_research_brief(monkeypatch):
     }
 
     monkeypatch.setattr(callback_handler, "get_job", lambda job_id: job if job_id == "li-1" else None)
-    monkeypatch.setattr(callback_handler.interest_flow, "research_job", lambda job: callback_handler.interest_flow.build_default_research(job))
+    monkeypatch.setattr(callback_handler, "get_db", lambda: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(callback_handler.interest_flow, "research_job", lambda job, **kwargs: callback_handler.interest_flow.build_default_research(job))
     monkeypatch.setattr(callback_handler, "mark_interested", lambda job_id: calls.append(("mark", job_id)))
     monkeypatch.setattr(callback_handler, "record_research_delivery", lambda job_id: calls.append(("research_delivered", job_id)))
     monkeypatch.setattr(callback_handler, "answer_callback", lambda callback_id, text=None: calls.append(("answer", callback_id, text)))
@@ -48,8 +49,8 @@ def test_handle_interested_marks_job_and_sends_research_brief(monkeypatch):
     sent = [(call[1], call[2]) for call in calls if call[0] == "send"]
     assert len(sent) == 1
     assert "Research" in sent[0][0]
-    assert "No published range; no ExampleCo pay data" in sent[0][0]
-    assert "Ask:</b> Base salary, currency, pay period and bonus/equity terms" in sent[0][0]
+    assert "No independent company evidence" in sent[0][0]
+    assert "Questions to Ask" in sent[0][0]
     assert "OpenClaw" not in sent[0][0]
     buttons = [button for row in sent[0][1]["inline_keyboard"] for button in row]
     assert {button["text"] for button in buttons} >= {"✅ Apply", "🚫 Ignore", "📄 Details"}
@@ -75,9 +76,10 @@ def test_interested_does_not_report_success_when_research_card_delivery_fails(mo
     calls = []
     job = {"id": "li-1", "title": "Backend Engineer", "company": "ExampleCo", "location": "Dubai"}
     monkeypatch.setattr(callback_handler, "get_job", lambda job_id: job)
+    monkeypatch.setattr(callback_handler, "get_db", lambda: sqlite3.connect(":memory:"))
     monkeypatch.setattr(callback_handler, "mark_interested", lambda job_id: calls.append(("mark", job_id)))
     monkeypatch.setattr(callback_handler, "record_research_delivery", lambda job_id: calls.append(("research_delivered", job_id)))
-    monkeypatch.setattr(callback_handler.interest_flow, "research_job", lambda job: callback_handler.interest_flow.build_default_research(job))
+    monkeypatch.setattr(callback_handler.interest_flow, "research_job", lambda job, **kwargs: callback_handler.interest_flow.build_default_research(job))
     monkeypatch.setattr(callback_handler, "send_message", lambda text, reply_markup=None: False)
     monkeypatch.setattr(callback_handler, "answer_callback", lambda callback_id, text=None: calls.append(("answer", callback_id, text)))
 
@@ -86,6 +88,22 @@ def test_interested_does_not_report_success_when_research_card_delivery_fails(mo
     assert ("research_delivered", "li-1") not in calls
     assert ("answer", "callback-1", "Research delivery failed") in calls
     assert callback_handler.main(["--interested", "li-1"]) == 1
+
+
+def test_interested_closes_research_connection_when_research_fails(monkeypatch):
+    callback_handler = load_callback_handler(monkeypatch)
+    conn = sqlite3.connect(":memory:")
+    monkeypatch.setattr(callback_handler, "get_db", lambda: conn)
+    monkeypatch.setattr(callback_handler, "get_job", lambda job_id: {"id": job_id, "title": "Engineer", "company": "Example"})
+    monkeypatch.setattr(callback_handler, "mark_interested", lambda job_id: None)
+    monkeypatch.setattr(callback_handler.interest_flow, "research_job",
+                        lambda job, **kwargs: (_ for _ in ()).throw(RuntimeError("failure")))
+    monkeypatch.setattr(callback_handler, "send_message", lambda *args, **kwargs: True)
+    monkeypatch.setattr(callback_handler, "answer_callback", lambda *args, **kwargs: None)
+
+    assert callback_handler.handle_interested("li-1") is False
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
 
 
 def test_research_gate_is_persisted_and_reset_by_a_new_interest_or_pause(monkeypatch, tmp_path):

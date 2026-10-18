@@ -55,11 +55,24 @@ class Store:
                     chat_id TEXT NOT NULL, part INTEGER NOT NULL DEFAULT 0,
                     message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
                     message_id INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+                    kind TEXT NOT NULL DEFAULT 'digest', reply_markup TEXT,
+                    last_error TEXT,
                     UNIQUE(run_id, chat_id, part));
                 CREATE TABLE IF NOT EXISTS delivery_jobs (
                     run_id TEXT NOT NULL, user_id INTEGER NOT NULL, job_id TEXT NOT NULL,
+                    position INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(run_id,job_id));
             ''')
+            # Additive upgrades preserve pending deliveries and their receipts.
+            for table, additions in {
+                'deliveries': {'kind': "TEXT NOT NULL DEFAULT 'digest'",
+                               'reply_markup': 'TEXT', 'last_error': 'TEXT'},
+                'delivery_jobs': {'position': 'INTEGER NOT NULL DEFAULT 0'},
+            }.items():
+                columns = {row['name'] for row in db.execute(f'PRAGMA table_info({table})')}
+                for name, definition in additions.items():
+                    if name not in columns:
+                        db.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
         os.chmod(self.path, 0o600)
 
     @contextmanager

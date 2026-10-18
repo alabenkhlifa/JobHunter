@@ -448,7 +448,7 @@ def test_apply_resume_variant_preserves_exact_content_order_and_omits_metadata()
     assert [item["degree"] for item in result["education"]] == ["Degree B", "Degree A"]
     assert "summary" not in result
     assert "skills" not in result
-    assert "additional" not in result
+    assert result["additional"] == {"languages": "English"}
     for metadata in (
         "resume_variants",
         "id",
@@ -618,6 +618,26 @@ def test_resume_variant_does_not_inherit_unspecified_master_sections():
         "name": "Candidate",
         "headline": "Confirmed Java Backend Engineer",
     }
+
+
+@pytest.mark.parametrize("omit_additional", [False, True])
+def test_resume_variant_always_inherits_only_confirmed_master_languages(omit_additional):
+    variant = _variant(
+        omit_sections=["additional"] if omit_additional else [],
+        resume={"headline": "Java Backend Engineer", "additional": {"languages": "English"}},
+    )
+    languages = "Arabic (Native) | English (C1) | French (C1)"
+    profile = _v2_profile(
+        resume_variants=[variant],
+        additional={"languages": languages, "interests": "Private interests", "teaching": "Private notes"},
+    )
+    original = copy.deepcopy(profile)
+
+    resume = apply_resume_variant(profile, select_resume_variant(profile, "Java services"))
+
+    assert resume["additional"] == {"languages": languages}
+    assert profile == original
+    assert resume["headline"] == variant["resume"]["headline"]
 
 
 @pytest.mark.parametrize("identity_field", ["name", "email", "phone", "linkedin", "location"])

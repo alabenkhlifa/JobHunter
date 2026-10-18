@@ -43,6 +43,20 @@ Before enabling application-package generation, place your existing resume in an
 
 Resume Refiner can also store candidate-confirmed role-family variants, such as JVM-backend or software-architect versions. A variant is a complete public resume snapshot containing the exact approved headline, summary, skills, certifications, experience selection, education, ordering, section omissions, matching terms, optional title-scoped `role_terms`, and optional page limit. JobHunter combines it only with the current identity and contact fields; unspecified master-profile sections are not inherited. Draft or unconfirmed variants are ignored. Most jobs use evidence ranking when no variant matches, but architecture-titled jobs pause until a matching role-scoped variant is confirmed. Package generation also pauses for obvious inconsistent role chronology rather than guessing a date.
 
+The current resume path is driven by `resume_blueprints` and evidence `facets`. Each confirmed evidence item carries `facets` (`project`, `kind`, `stack`, `domains`) that describe its confirmed `public_text` without changing it. A candidate-confirmed blueprint per role family (`backend`, `lead`, `architect`, `platform`) fixes the headline wording per seniority, the fallback summary, the skills, the certification order, the page target, which evidence kinds lead a project, how many bullets each project gets and which side roles appear. For a posting, `resume_pipeline.py` chooses the blueprint for the title's role family, selects and orders confirmed evidence against the posting's needs, fits the page target (tighter spacing, policy-listed irrelevant certifications, then the weakest non-opening bullets and whole weak projects; when only the sidebar spills, skill tags the posting does not name go first, and a remaining sidebar overflow is reported rather than emptying the resume), reviews the model's two-sentence summary draft (the headline title with career years and the blueprint's `summary_stack`, then one named project story in the shape of the confirmed summary) with the blueprint summary for that headline as fallback, also when the review blocks the draft, audits the PDF and scores the package on six rubric dimensions. The private manifest (version 3) records `resume_score`, `score_flags` and `resume_needs_review`; the autopilot hands off packages below its `min_resume_score`. Profiles without confirmed blueprints keep the variant path above. `tools/migrate_profile_blueprints.py` adds facets, indexed wording, engagement roles and blueprints from a private updates file (dry run by default; it refuses wording that is not already confirmed), and `tools/eval_resume_packages.py` scores the pipeline against real postings from a database copy.
+
+The owner can opt into `resume_quality` after reviewing a complete replacement variant. Keep `enabled: false` while its `activation_variant_id` is a draft. The enabled flow uses approved full bullet wording, optional separately approved short versions linked by `achievement_id`, and a summary drafted then independently checked against the selected evidence. Career years use the union of month-accurate employment dates. Source facts, client dates, certifications and skills remain in the private master profile.
+
+Fitting measures actual PDFs: remove duplicate skill tags, compact spacing, try approved short wording, then omit only unprotected items with no posting relevance during overflow. Certification omission candidates and relevance tags belong to the candidate's policy; `job_overrides` preserves explicit choices for a particular job. Prefer one page but retain relevant achievements on two, subject to the confirmed variant's hard cap. Confirmed, public Volunteering appears only when its relevance terms match and the variant includes it. Text, emphasis, links, mandatory sections, margins, overlap and page limits must pass actual PDF checks before recording `package_generated`; failures preserve the previous package and stage. PyMuPDF is required for this flow.
+
+One-page results also undergo a measured fill pass targeting 92% of the main column's usable height. It tries approved full wording and, only with explicit `fill_same_employer_projects` permission, relevant projects from reviewed employment groups already included. Each addition must still fit one page without changing font sizes. The manifest records additions, both columns' occupied heights, and when no more relevant content fits. Explicit employer exclusions remain intact.
+
+With `group_bullets_by_client: true`, employer headings contain employment metadata only, and every project bullet stays beneath its named customer. Customer work is never lifted into employer-level highlights; the fill pass measures this final customer layout. Selected MaibornWolff projects are ordered by job relevance, with client dates breaking ties and no project-order caption. Employer order and source dates remain unchanged. Employer and education headings are text-only; no logos are rendered.
+
+Reviewed projects can declare up to three `opening_evidence_ids` to preserve their ownership and scope before smaller achievements. These must reference confirmed public evidence from the same project. One-page expansion tries the opening together, and cloud infrastructure work remains eligible without a backend keyword. Omitted variant facts are never imported into an already selected project snapshot.
+
+Use `resume_quality.py --profile <private_profile.json> --variant <draft_id> --job-json <private_job.json> --output <private_preview.pdf>` to produce a review-only PDF, manifest and page images without application or Telegram changes. On the Pi it reuses the owner's existing restricted Hermes model provider. A reviewed summary JSON can be replayed with `--summary-draft` and is bound to the profile and selection digest. See setup.md for activation and rollback.
+
 For the full setup guide, see [`setup.md`](setup.md).
 
 ## Hermes Agent setup
@@ -100,6 +114,23 @@ python scraper.py --collect-only
 ```
 
 LinkedIn uses `linkedin_time_range: "r172800"` (past two days). `min_matching_jobs: 0` disables the per-bucket match limit so collection reads all available pages up to `max_pages`; a positive value restores early stopping. A match-count limit cuts an arbitrary slice from date-filtered postings.
+
+### Sources
+
+Collection runs one bucket per source and configured region (an invited profile's market; Foundit gets one per country, United Arab Emirates or Saudi Arabia), and the sources are chosen per profile from its configured locations (`regions` in `CONFIG`, or an invited profile's `markets`). Every source declares the countries it can search, and it is called only when the profile has at least one location in one of them. Sources run in this order:
+
+| Source | Countries | How it is read | What it adds |
+|---|---|---|---|
+| Spain Dev Jobs | Spain (Valencia, Madrid and Barcelona listings) | city listing, newest first, titles pre-filtered | employer posting link (`apply_url`), board's Spanish/English reading, visa and relocation badges, employer-published salary |
+| SpainJobs.io | Spain (Valencia, Madrid and Barcelona listings) | the site's own JSON listing per city, newest first, titles pre-filtered | employer ATS link, `spanishRequirement`/ad language reading, visa and relocation status, employer-published salary |
+| LinkedIn | anywhere | one search per keyword and city | — |
+| Foundit (Foundit Gulf) | United Arab Emirates, Saudi Arabia | JSON API, one search per keyword and country | — |
+
+Each board module follows the contract in `jobhunter_sources/base.py`: a page generator plus a description fetcher that may enrich the job with `apply_url` (the employer's own posting, shown as "employer posting" on cards and used as the application form URL) and `language_requirement` (what the board says about Spanish: a stated requirement or a Spanish-written ad knocks the posting out in scoring; a "no Spanish required" note is only a claim for the reviewer to check). Boards never contribute estimated salaries: only figures the employer wrote are stored. Duplicates across boards and LinkedIn collapse on normalised title, company and country. Sources run in the order above inside each round of the round-robin, so a posting both sources show at the same page depth is kept as the board's copy; a copy LinkedIn surfaces earlier (or one stored on a previous night) wins. Scoring knocks out postings written only in Spanish or requiring fluent Spanish (`language barrier: Spanish`), like German and Italian, and reads a board's own language note the same way ("board: ad written in Spanish", "board: Turkish required"); "no Spanish required", "Spanish is a plus" and "English or Spanish" are not barriers. A board page that cannot be read on a given night is left unsaved and fetched again the next night instead of being stored with a title-only score.
+
+A source with no configured location in its countries logs one line, such as `Foundit: no configured location in ksa, uae; skipped`, and is not called. Removing Spain from a profile's markets stops the Spain boards; adding Dubai starts Foundit. The Spain boards also need a city listing: a Spanish location without one (for example Seville) logs `<board>: no city listing for 'Seville, Spain'; skipped`. Invited profiles go through the same selection. A candidate with a UAE or Saudi location (Dubai, Abu Dhabi, Riyadh, Jeddah or the country name) gets Foundit and LinkedIn; other Gulf countries get LinkedIn only. A configured location matches a posting when every comma-separated part of it appears, in any order, so "Dubai, United Arab Emirates" also matches Foundit's "United Arab Emirates, Dubai". A candidate with Valencia, Madrid or Barcelona gets the Spain boards and LinkedIn; a Spain-wide or other Spanish destination ("Spain", "Seville, Spain") gets LinkedIn only, each board logging `<board>: no city listing for ...; skipped`. Anyone else gets LinkedIn only. `disabled_sources` in a profile config lists exact source names to skip on top of this: "Spain Dev Jobs", "SpainJobs.io", "LinkedIn", "Foundit".
+
+The pre-delivery availability check recognises each board's job URL (`Board.hosts`, `Board.job_path`, `Board.selectors`), so a board posting is verified on its own page before it is sent.
 
 The owner's Hermes collector reviews up to 40 candidates: promised-visa postings first, then a floor of three per market, then the strongest remaining candidates. `review_preferences` and recent feedback examples guide the review; `review_preferences.languages` includes French, English and Arabic. Sponsored postings enter review from `sponsored_score_threshold` (35), while other postings need 45. Holds older than two days or an earlier `review_rubric` compete again but still require a new approval. Verified visa offers lead delivery, followed by market floors and shared unused places, up to 12 jobs. Invited profiles retain their existing allocation and work-authorization policy.
 
@@ -186,9 +217,17 @@ The submit helper records `submission_attempted`. Confirm the exact role's recei
 | Path | Purpose |
 |---|---|
 | `scraper.py` | Job collection, scoring, DB utilities, Telegram helpers |
+| `jobhunter_sources/` | Spain job boards (one module per board; contract in `base.py`) |
 | `callback_handler.py` | Telegram button handler |
 | `render_pdf.py` | Resume and cover-letter PDF renderer |
 | `resume_refiner.py` | Refined-profile validation, confirmed-evidence handling, and safe atomic profile updates |
+| `resume_pipeline.py` | Blueprint resume path: plan, summary, page fit, score, manifest fields |
+| `resume_evidence.py` | Evidence facets, posting needs, scoring and deterministic selection |
+| `resume_blueprints.py` | Role-family blueprints: validation, choice and renderer payload |
+| `resume_layout.py` | Page planner that fits a blueprint's page target without changing wording |
+| `resume_scorecard.py` | Rubric scorer behind `resume_score` and `resume_needs_review` |
+| `tools/eval_resume_packages.py` | Scores generated packages for real postings from a database copy |
+| `tools/migrate_profile_blueprints.py` | Adds facets, indexed wording and blueprints to a private profile |
 | `jobhunter_auto_apply/` | Approval-gated browser apply helpers |
 | `jobhunter_integrations/google_tracker.py` | Open-source-safe Google Sheets/Drive tracker sync CLI |
 | `jobhunter_integrations/gmail_watcher.py` | Open-source-safe Gmail watcher CLI for recruiter/ATS replies |
@@ -220,7 +259,9 @@ Recommended permissions:
 
 Recommended formatting includes wrapped text, taller rows, frozen headers, `dd/mm/yyyy hh:mm`-style dates, and a non-white color for every application row: green for `submitted`/`offer_received`, red for `rejected`/failures, orange for blockers, blue for application progression/interviews/package states, amber for assessments/actions, purple for `interested`, grey for closed/skipped states, and light blue-grey for new or unknown statuses.
 
-The tracker preserves its 14 columns in the order shown above. The reference palette is header `#E2ECFD`, submitted `#D7EED3`, interested `#E6DBF7`, preparation/progression `#D5E4FC`, blocked `#F7E1C3`, and rejected `#F3D4CD`. Status colors cover the full row from A through N.
+The tracker preserves its 14 columns in the order shown above. The reference palette is header `#E2ECFD`, submitted `#D7EED3`, interested `#E6DBF7`, preparation/progression `#D5E4FC`, blocked `#F7E1C3`, rejected `#F3D4CD`, and closed `#B7C2CC`. Status colors cover the full row from A through N.
+
+`python -m jobhunter_integrations.listing_monitor` checks every offer present in the configured tracker except rows already `closed` or `rejected`. Confirmed closures appear as `closed` in slate gray, retain the previous application status in Notes, and send a Telegram alert only after verified Sheet synchronization. Submissions, timestamps, documents and recruiter outcomes remain in the database. Timeouts, login walls and unsupported sources remain unverified and are retried; they never prove closure. A locked SQLite ledger retries failed syncs and alerts without resending acknowledged notifications. `--dry-run` checks without changing the database, Sheet or Telegram; `--use-recorded-closures` imports previously audited database closures during initial setup. The Pi schedules the monitor at 17:00 daily Africa/Tunis.
 
 Authorize the tracker using the existing Desktop client and configured jobs account:
 
@@ -278,6 +319,16 @@ JOBHUNTER_TRACKER_SYNC_TIMEOUT=120
 Auto-sync failures are logged but do not block application progress; SQLite remains the source of truth.
 
 When enabled, the mail monitor retries tracker sync after every scheduled check, including checks with no new replies. An unsuccessful retry is reported through the cron job's failure delivery. Back up the tracker token and `tracker_drive_files.json`, `tracker_sync_state.json`, and `tracker_before_sync.json` from the private state directory in encrypted recovery.
+
+## Auto-apply (autopilot)
+
+Optional unattended applying for jobs that match a policy. Off by default.
+
+- **What it does**: a nightly review run records `send`/`hold`/`reject` verdicts for policy candidates (same rules as the digest review); an apply run then picks jobs with effective score ≥ `min_score` and verdict `send`, within role/location/company filters and a daily cap, checks they are still open, researches salary and company, builds the package and form answers, and has the agent fill and submit the external ATS form. Each submit is recorded as `submitted` only after a verified receipt, synced to the Sheet, and reported on Telegram with the expected salary and company summary. Hard stops (CAPTCHA, phone/identity checks, "no AI" questions, unanswerable required fields, LinkedIn Easy Apply, unverified receipt, …) record `blocked_auto_apply` and send the normal research card for a manual finish.
+- **Policy file**: `~/.jobhunter/state/auto_apply.json` (0600, outside the repo). Defaults: disabled, `mode: rehearsal`, `min_score` 75, `min_resume_score` 60, `max_per_day` 3, roles `senior_software_engineer`, `lead_software_engineer`, Spain. Manage it only through `python -m jobhunter_autopilot.cli config show|set K=V|enable|disable|pause|resume|live|rehearsal|reset|defaults set K=V`.
+- **Telegram**: with the Hermes `auto-apply` skill installed, plain phrases work: "auto apply settings", "set auto apply min score 80", "auto apply max 5 per day", "auto apply only Madrid and Valencia", "never auto apply to Acme", "enable auto apply", "pause auto apply", "auto apply go live", "my notice period is 1 month".
+- **Cron**: two Hermes cron jobs, `jobhunter-autopilot-review` (20:00) and `jobhunter-autopilot-apply` (20:40), with pre-run scripts `jobhunter_autopilot_review_batch.py` and `jobhunter_autopilot_plan.py`. See [setup.md](setup.md#auto-apply-autopilot).
+- **Rehearsal → live**: `enable` starts in rehearsal (forms filled, final submit refused by the policy gate, screenshot kept). Check a few rehearsals, then `live` with `max_per_day=1`, and raise the cap later.
 
 ## Safety model
 

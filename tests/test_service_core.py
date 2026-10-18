@@ -27,7 +27,7 @@ class Telegram:
             raise PermissionError("Actor does not control that channel")
         return destination
 
-    def send_message(self, chat_id, message):
+    def send_message(self, chat_id, message, reply_markup=None):
         chat_id = str(chat_id)
         self.sends.append((chat_id, message))
         if chat_id in self.fail_chats:
