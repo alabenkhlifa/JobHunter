@@ -249,6 +249,11 @@ _COMPANY_LEGAL_SUFFIXES = {"inc", "llc", "ltd", "limited", "gmbh", "corp", "corp
                            "sl", "sa", "slu", "sau", "sll", "bv", "ag", "plc", "sas", "sarl"}
 # Dotted Spanish forms tokenize to letters: "S.L." -> ("s", "l").
 _COMPANY_LEGAL_TAILS = (("s", "l", "u"), ("s", "a", "u"), ("s", "l"), ("s", "a"))
+# Explicit employer tenants cover group-branded ATS pages whose headings omit
+# the listed subsidiary. Never infer an employer from a partial hostname.
+_ATS_EMPLOYER_TENANTS = {
+    "careers-en-axa.icims.com": {("axa",), ("axa", "group", "operations")},
+}
 
 
 def _strip_legal_suffix(words: list[str]) -> list[str]:
@@ -269,7 +274,7 @@ def _strip_legal_suffix(words: list[str]) -> list[str]:
 
 
 def _page_identifies_company(url: str, title: str, headings: list[str], company: str | None) -> bool:
-    """Require employer evidence from the rendered page or its Ashby tenant."""
+    """Require rendered employer evidence or a recognized employer ATS tenant."""
     words = _strip_legal_suffix(list(_title_tokens(company or "")))
     if not words:
         return False
@@ -280,6 +285,8 @@ def _page_identifies_company(url: str, title: str, headings: list[str], company:
                for index in range(len(actual) - len(expected) + 1)):
             return True
     parsed = urlsplit(url)
+    if parsed.scheme == "https" and expected in _ATS_EMPLOYER_TENANTS.get(parsed.hostname, set()):
+        return True
     if parsed.hostname == "jobs.ashbyhq.com":
         tenant = parsed.path.strip("/").split("/", 1)[0]
         return "".join(_title_tokens(tenant)) == "".join(expected)
@@ -470,8 +477,16 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     const aria = el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || el.id || '';
     return aria.trim();
   };
+  const widgetFor = (el) => {
+    if (el.tagName !== 'SELECT' || !el.id) return null;
+    const widget = document.getElementById(el.id + '_icimsDropdown');
+    return widget && widget.getAttribute('role') === 'combobox' &&
+      widget.closest('form') === el.form && visible(widget) ? widget : null;
+  };
   const presented = (el) => visible(el) || (
     el.type === 'file' && !el.matches(':disabled') && [...(el.labels || [])].some(visible)
+  ) || (
+    !el.matches(':disabled') && !!widgetFor(el)
   );
   const formFor = (el) => el.form ? (el.form.id || `form-${[...document.forms].indexOf(el.form)}`) : '';
   const questionFor = (el) => { try {
@@ -496,6 +511,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       return [...document.querySelectorAll('input[type=radio]')].some(other => other.name === el.name && other.checked);
     }
     if (el.type === 'checkbox') return el.checked;
+    if (widgetFor(el) && ['', '-1', '-999'].includes(el.value)) return false;
     return !!(el.value || '').trim();
   };
   return {
@@ -522,7 +538,9 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       autocomplete: el.getAttribute('autocomplete') || '',
       value: (el.type === 'radio' || el.type === 'checkbox') ? (el.value || '') : '',
       disabled: !!el.disabled || el.matches(':disabled'),
-      required: !!el.required || el.getAttribute('aria-required') === 'true',
+      required: !!el.required || el.getAttribute('aria-required') === 'true' ||
+        (!!widgetFor(el) && (widgetFor(el).getAttribute('aria-required') === 'true' || el.getAttribute('i_required') === 'true')),
+      widget_id: widgetFor(el)?.id || '',
       value_present: valuePresent(el),
       invalid: el.getAttribute('aria-invalid') === 'true' || !el.checkValidity(),
       options: el.tagName === 'SELECT' ? [...el.options].slice(0, 25).map(o => o.text.trim()).filter(Boolean) : []
@@ -603,7 +621,9 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
 
 def _inspection_from_data(data: dict[str, Any], blocklist_terms: tuple[str, ...]) -> PageInspection:
     text = data.get("text") or ""
-    lower = text.lower()
+    # The standard passive badge does not ask the user to solve a challenge.
+    # Visible challenge frames are checked separately, including inside forms.
+    lower = re.sub(r"(?im)^\s*protected by hcaptcha privacy\s*\|\s*terms\s*$", "", text).lower()
     blockers = [term for term in blocklist_terms if term.lower() in lower]
     if data.get("challenge_visible") and "human verification" not in blockers:
         blockers.append("human verification")

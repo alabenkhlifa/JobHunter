@@ -584,3 +584,27 @@ def test_spanish_legal_suffix_still_identifies_employer():
     from jobhunter_auto_apply.engine import _page_identifies_company
     assert _page_identifies_company("https://x.test/apply", "Empleo | Acme Labs", [], "Acme Labs S.L.")
     assert _page_identifies_company("https://jobs.ashbyhq.com/acmelabs/1", "", [], "Acme Labs, S.A.")
+
+
+@pytest.mark.parametrize('url,company,expected', [
+    ('https://careers-en-axa.icims.com/jobs/14848/candidate', 'AXA Group Operations', True),
+    ('https://careers-en-axa.icims.com/jobs/14848/candidate', 'AXA', True),
+    ('https://careers-en-axa.icims.com/jobs/14848/candidate', 'Other Employer', False),
+    ('http://careers-en-axa.icims.com/jobs/14848/candidate', 'AXA Group Operations', False),
+    ('https://careers-en-axa.icims.com.evil.test/jobs/14848', 'AXA Group Operations', False),
+    ('https://evil.test/careers-en-axa.icims.com', 'AXA Group Operations', False),
+    ('https://other.icims.com/jobs/14848', 'AXA Group Operations', False),
+])
+def test_group_branded_ats_identity_is_bound_to_the_exact_employer_tenant(url, company, expected):
+    from jobhunter_auto_apply.engine import _page_identifies_company
+    assert _page_identifies_company(url, 'Candidate Profile - Software Engineer Tech Lead', [], company) is expected
+
+
+@pytest.mark.parametrize('text,visible,blocked', [
+    ('Protected by hCaptcha Privacy | Terms', False, False),
+    ('Protected by hCaptcha Privacy | Terms', True, True),
+    ('Please solve hCaptcha to continue', False, True),
+])
+def test_passive_badge_is_distinct_from_a_challenge(text, visible, blocked):
+    page = inspect_page(FakeClient({**_rendered_form(), 'text': text, 'challenge_visible': visible}))
+    assert bool(page.blockers) is blocked

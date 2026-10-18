@@ -116,7 +116,7 @@ def test_inspection_and_upload_use_the_same_embedded_form(browser, tmp_path):
         client.evaluate("document.querySelector('#cv')")
 
 
-@pytest.mark.parametrize('mode', ['hidden', 'cross_origin', 'ambiguous', 'nested', 'challenge'])
+@pytest.mark.parametrize('mode', ['hidden', 'cross_origin', 'ambiguous', 'nested', 'challenge', 'passive_badge'])
 def test_frame_boundaries_and_challenges_remain_enforced(browser, mode):
     open_page, routes, base = browser
     attributes = 'hidden' if mode == 'hidden' else ''
@@ -129,6 +129,8 @@ def test_frame_boundaries_and_challenges_remain_enforced(browser, mode):
         html = '<!doctype html><iframe id="outer" src="/wrapper" width="900" height="700"></iframe>'
     if mode == 'challenge':
         routes['/candidate'] += '<iframe src="/captcha-delivery.com/challenge" width="300" height="200"></iframe>'
+    if mode in {'challenge', 'passive_badge'}:
+        routes['/candidate'] += '<p>Protected by hCaptcha Privacy | Terms</p>'
     client = open_page(html)
     inspection = inspect_page(client)
     if mode in {'hidden', 'cross_origin', 'ambiguous'}:
@@ -142,3 +144,28 @@ def test_frame_boundaries_and_challenges_remain_enforced(browser, mode):
         assert not inspection.safe_to_continue
     if mode == 'ambiguous':
         assert 'multiple embedded application forms' in inspection.blockers
+    if mode == 'passive_badge':
+        assert not inspection.blockers
+
+
+@pytest.mark.parametrize('hidden', [False, True])
+def test_visible_custom_dropdown_exposes_its_required_backing_select(browser, hidden):
+    open_page, routes, _ = browser
+    widget = '''<label for="country">Country</label><select id="country" style="display:none" i_required="true">
+      <option value="-999">Please select a country</option><option value="TN">Tunisia</option></select>
+      <a id="country_icimsDropdown" role="combobox" aria-required="true">Please select a country</a>'''
+    if hidden:
+        widget = '<div hidden>' + widget + '</div>'
+    routes['/candidate'] = FORM.replace('</form>', widget + '</form>')
+    client = open_page('<!doctype html><iframe id="form" src="/candidate" width="800" height="600"></iframe>')
+    inspection = inspect_page(client)
+    country = next((item for item in inspection.inputs if item['id'] == 'country'), None)
+    if hidden:
+        assert country is None
+        assert 'Country' not in inspection.missing_required
+    else:
+        assert country['widget_id'] == 'country_icimsDropdown'
+        assert country['required'] and not country['value_present']
+        assert 'Country' in inspection.missing_required
+        client.evaluate("document.getElementById('country').value = 'TN'")
+        assert 'Country' not in inspect_page(client).missing_required
