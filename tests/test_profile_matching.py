@@ -68,6 +68,39 @@ def test_final_review_holds_uncertain_authorization(authorization, sponsorship, 
     assert bool(selected) is expected
 
 
+@pytest.mark.parametrize("sponsorship,expected", [
+    ("offered", True), ("implied", True), ("no_info", True),
+    ("excluded", False), ("doubtful", False), ("", False),
+])
+def test_unconfirmed_sponsorship_is_an_explicit_per_market_opt_in(sponsorship, expected):
+    strict = market(authorization="sponsorship_required")
+    relaxed = matching.validate_markets([dict(strict, accept_unconfirmed_sponsorship=True)])[0]
+    posting = job(market="france", ai_verdict="send", ai_sponsorship=sponsorship, ai_rank=1)
+    assert bool(job_scoring.select_sendable([posting], markets=[relaxed])) is expected
+    assert matching.review_sendable(posting, [strict]) is (sponsorship == "offered")
+    assert relaxed["work_authorization"] == "sponsorship_required"
+
+
+@pytest.mark.parametrize("description", ["No visa sponsorship.", "Local candidates only.", "No relocation."])
+def test_unconfirmed_sponsorship_does_not_override_explicit_posting_restrictions(description):
+    policies = [dict(market(authorization="sponsorship_required", relocation=True),
+                     accept_unconfirmed_sponsorship=True)]
+    posting = job(description=description, ai_sponsorship="no_info")
+    assert matching.eligibility_reason(posting, policies)
+    assert not matching.review_sendable(posting, policies)
+
+
+def test_unconfirmed_sponsorship_preference_does_not_resolve_unknown_work_authorization():
+    policies = [dict(market(authorization="unknown"), accept_unconfirmed_sponsorship=True)]
+    assert not matching.review_sendable(job(ai_sponsorship="no_info"), policies)
+
+
+@pytest.mark.parametrize("value", [None, 1, "true", []])
+def test_unconfirmed_sponsorship_preference_requires_a_boolean(value):
+    with pytest.raises(ValueError, match="accept_unconfirmed_sponsorship"):
+        matching.validate_markets([dict(market(), accept_unconfirmed_sponsorship=value)])
+
+
 def test_relocation_and_work_permission_are_independent():
     posting = job(description="No relocation. Local candidates only. No visa sponsorship.")
     assert evaluate(posting, config())["passed"]

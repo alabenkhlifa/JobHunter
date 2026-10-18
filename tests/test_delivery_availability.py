@@ -316,6 +316,23 @@ def test_fresh_open_listing_cannot_override_current_work_authorization(setup, au
     assert client.sends == checker.calls == []
 
 
+@pytest.mark.parametrize('state', ['open', 'unknown', 'closed'])
+def test_opted_in_unconfirmed_sponsorship_still_requires_an_open_listing(setup, state):
+    service, client, queue, checker = setup
+    action = service.propose(123, {'search': {'markets': [{'name': 'France', 'locations': ['France'],
+        'work_authorization': 'sponsorship_required', 'relocation_required': False,
+        'accept_unconfirmed_sponsorship': True}]}})
+    service.confirm(123, action['action_id'])
+    path = enqueue(service, queue)
+    change(path, "UPDATE jobs SET ai_sponsorship='no_info'")
+    checker.state = state
+    result = queue.drain()
+    assert checker.calls
+    assert bool(client.sends) is (state == 'open')
+    assert bool(result['sent']) is (state == 'open')
+    assert job_state(path)[0][0] == (1 if state == 'open' else 0)
+
+
 def test_run_and_global_check_budgets_leave_unchecked_digests_pending(setup, monkeypatch):
     service, client, queue, checker = setup
     enqueue(service, queue, count=3)

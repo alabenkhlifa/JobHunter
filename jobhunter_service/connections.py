@@ -20,6 +20,26 @@ from .account_state import connection_matches
 PROVIDERS = ('linkedin', 'gmail', 'tracker')
 CHECK_TTL = 1800
 CHECK_TIMEOUT = 20
+LINKEDIN_SIGNIN_EXPRESSION = """(() => {
+    const hosts = ['linkedin.com', 'www.linkedin.com'];
+    if (location.protocol !== 'https:' || !hosts.includes(location.hostname) ||
+        /^\\/(login|uas|checkpoint|authwall|signup|challenge)(\\/|$)/.test(location.pathname) ||
+        document.querySelector('input[type=password]')) return false;
+    if (document.querySelector('.global-nav__me, #global-nav a[href*=\"/mynetwork/\"]')) return true;
+    // Current LinkedIn navigation no longer uses the global-nav IDs/classes.
+    // Require all three member destinations in one navigation landmark, and
+    // validate parsed URLs so external or lookalike links cannot certify login.
+    return Array.from(document.querySelectorAll('nav,[role=navigation]')).some(nav => {
+        const paths = Array.from(nav.querySelectorAll('a[href]')).map(link => {
+            try {
+                const url = new URL(link.getAttribute('href'), location.href);
+                return url.protocol === 'https:' && hosts.includes(url.hostname) ? url.pathname : '';
+            } catch { return ''; }
+        });
+        return ['mynetwork', 'messaging', 'notifications'].every(route =>
+            paths.some(path => new RegExp('^/' + route + '(/|$)').test(path)));
+    });
+})()"""
 
 
 def google_configured(path, public_url):
@@ -219,12 +239,7 @@ def _linkedin_check(port):
         try:
             # Read only a boolean. Never inspect cookies, form values, messages,
             # identity text, or verification challenges; never navigate/click.
-            signed_in = client.evaluate("""Boolean(
-                location.protocol === 'https:' &&
-                ['linkedin.com','www.linkedin.com'].includes(location.hostname) &&
-                !/^\\/(login|uas|checkpoint|authwall|signup|challenge)(\\/|$)/.test(location.pathname) &&
-                !document.querySelector('input[type=password]') &&
-                document.querySelector('.global-nav__me, #global-nav a[href*=\"/mynetwork/\"]'))""")
+            signed_in = client.evaluate(LINKEDIN_SIGNIN_EXPRESSION)
             if signed_in is True:
                 return 'connected'
         finally:

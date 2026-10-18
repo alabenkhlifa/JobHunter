@@ -4,6 +4,7 @@ Run with JOBHUNTER_BROWSER_TESTS=1 and Playwright available to Node (NODE_PATH
 can point to an existing installation). All users, cookies and pages are synthetic.
 """
 import asyncio
+import json
 import os
 from pathlib import Path
 import shutil
@@ -24,6 +25,32 @@ pytestmark = pytest.mark.skipif(
     os.environ.get('JOBHUNTER_BROWSER_TESTS') != '1',
     reason='requires opt-in JOBHUNTER_BROWSER_TESTS=1, Node Playwright and browsers',
 )
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_linkedin_signin_detection_with_real_dom(tmp_path, engine):
+    from jobhunter_service.connections import LINKEDIN_SIGNIN_EXPRESSION
+    modern = ('<nav><a href="/mynetwork">Network</a><a href="/messaging/">Messages</a>'
+              '<a href="https://www.linkedin.com/notifications/?filter=all">Notifications</a></nav>')
+    cases = [
+        {'name': 'current navigation', 'path': '/feed/', 'html': modern, 'expected': True},
+        {'name': 'role navigation', 'path': '/feed/',
+         'html': modern.replace('<nav>', '<div role="navigation">').replace('</nav>', '</div>'), 'expected': True},
+        {'name': 'legacy navigation', 'path': '/feed/', 'html': '<nav id="global-nav"><div class="global-nav__me"></div></nav>', 'expected': True},
+        {'name': 'login password', 'path': '/feed/', 'html': modern + '<input type="password">', 'expected': False},
+        {'name': 'content links', 'path': '/feed/', 'html': modern.replace('<nav>', '<article>').replace('</nav>', '</article>'), 'expected': False},
+        {'name': 'partial navigation', 'path': '/feed/', 'html': '<nav><a href="/messaging/">Messages</a></nav>', 'expected': False},
+        {'name': 'split navigation', 'path': '/feed/', 'html': '<nav><a href="/mynetwork">Network</a></nav><nav><a href="/messaging/">Messages</a><a href="/notifications/">Notifications</a></nav>', 'expected': False},
+        {'name': 'foreign destination', 'path': '/feed/', 'html': modern.replace('href="/mynetwork"', 'href="https://linkedin.com.example.test/mynetwork"'), 'expected': False},
+        {'name': 'verification challenge', 'path': '/checkpoint/challenge/', 'html': modern, 'expected': False},
+        {'name': 'login page', 'path': '/login', 'html': modern, 'expected': False},
+        {'name': 'auth wall', 'path': '/authwall', 'html': modern, 'expected': False},
+        {'name': 'unknown interface', 'path': '/feed/', 'html': '<main>Public page</main>', 'expected': False},
+    ]
+    result = subprocess.run(['node', str(Path(__file__).with_name('browser_signin_check.cjs')), engine],
+        input=json.dumps({'expression': LINKEDIN_SIGNIN_EXPRESSION, 'cases': cases}),
+        text=True, capture_output=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize('engine', ['chromium', 'webkit'])

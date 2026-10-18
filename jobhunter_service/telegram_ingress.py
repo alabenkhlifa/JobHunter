@@ -18,6 +18,7 @@ import stat
 import time
 
 from .telegram import _private_actor
+from .job_intents import parse_job_callback
 
 
 MAX_UPDATE_BYTES = 65536
@@ -53,12 +54,16 @@ def _validate_update(update, owner_id):
         if (not isinstance(bot, dict) or bot.get('is_bot') is not True
                 or type(bot.get('id')) is not int or not 0 < bot['id'] < 2**63):
             raise PermissionError('The callback must belong to a bot message in the sender\'s private chat.')
+        navigation = False
+        if isinstance(callback.get('data'), str) and callback['data'].startswith('jh:job:'):
+            parse_job_callback(callback['data'])
+            navigation = True
         if (not isinstance(callback.get('id'), str) or not 1 <= len(callback['id']) <= 256
                 or not isinstance(callback.get('data'), str)
                 or not 1 <= len(callback['data'].encode('utf-8')) <= 64
                 or not (callback['data'].startswith(('jh:confirm:', 'jh:application:'))
                         or _ONBOARD_CALLBACK.fullmatch(callback['data'])
-                        or _RETRY_CALLBACK.fullmatch(callback['data']))):
+                        or _RETRY_CALLBACK.fullmatch(callback['data']) or navigation)):
             raise ValueError('A supported JobHunter callback is required.')
     else:
         text = message.get('text')

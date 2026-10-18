@@ -155,6 +155,69 @@ def test_stop_keeps_browser_profile_for_future_login(broker):
     assert not broker._runner.relays
 
 
+def test_restart_clears_stale_singleton_links_and_retains_saved_login(broker, tmp_path):
+    broker.execute("start", "u11")
+    profile = broker.config.data_root / "u11" / "browser-profile"
+    saved = profile / "synthetic-cookie-store"
+    saved.write_bytes(b"synthetic-only")
+    external = tmp_path / "external-cookie"
+    external.write_bytes(b"external-synthetic-only")
+    for name, target in (("SingletonLock", "old-container-8"),
+                         ("SingletonSocket", "/tmp/old-chromium/SingletonSocket"),
+                         ("SingletonCookie", external)):
+        (profile / name).symlink_to(target)
+    # A live session must keep its locks, even when start is requested again.
+    broker.execute("start", "u11")
+    assert all((profile / name).is_symlink() for name in
+               ("SingletonLock", "SingletonSocket", "SingletonCookie"))
+    broker.execute("stop", "u11")
+    broker.execute("start", "u11")
+    assert not any(path.name.startswith("Singleton") for path in profile.iterdir())
+    assert saved.read_bytes() == b"synthetic-only"
+    assert external.read_bytes() == b"external-synthetic-only"
+
+
+def test_expired_session_removes_container_before_clearing_profile_locks(broker):
+    broker.execute("start", "u11")
+    profile = broker.config.data_root / "u11" / "browser-profile"
+    (profile / "SingletonLock").symlink_to("old-container-8")
+    broker._runner.containers["u11"]["Config"]["Labels"]["jobhunter.expires_at"] = str(time.time() - 1)
+    original = broker._clear_profile_locks
+    def clear(volume):
+        assert not broker._runner.containers and not broker._runner.relays
+        original(volume)
+    broker._clear_profile_locks = clear
+    assert broker.execute("start", "u11")["status"] == "running"
+    assert not (profile / "SingletonLock").is_symlink()
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_unexpected_singleton_entry_fails_without_removing_profile_data(broker, kind):
+    profile = broker.config.data_root / "u11" / "browser-profile"
+    profile.mkdir()
+    (profile / "SingletonLock").symlink_to("old-container-8")
+    entry = profile / "SingletonCookie"
+    if kind == "file":
+        entry.write_bytes(b"retain-synthetic-data")
+    else:
+        entry.mkdir()
+    with pytest.raises(BrokerFailure, match="configuration"):
+        broker.execute("start", "u11")
+    assert entry.exists() and (profile / "SingletonLock").is_symlink()
+    assert not broker._runner.containers
+
+
+def test_capacity_failure_does_not_touch_waiting_candidates_profile_locks(broker):
+    broker.execute("start", "u11")
+    profile = broker.config.data_root / "u22" / "browser-profile"
+    profile.mkdir()
+    lock = profile / "SingletonLock"
+    lock.symlink_to("old-container-8")
+    with pytest.raises(BrokerFailure, match="capacity"):
+        broker.execute("start", "u22")
+    assert lock.is_symlink()
+
+
 def test_expired_browser_is_reaped_before_new_candidate_starts(broker):
     broker._runner.containers["u11"] = container(expiry=time.time() - 1, root=broker.config.data_root)
     assert broker.execute("start", "u22")["profile_id"] == "u22"

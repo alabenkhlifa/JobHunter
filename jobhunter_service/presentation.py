@@ -1,5 +1,8 @@
 """Pure text presentation for job digests and existing escaped mail alerts."""
 from html.parser import HTMLParser
+from itertools import islice
+
+from .job_intents import JOB_ID, MAX_DIGEST_JOBS, OPERATIONS
 
 
 DEFAULT_PRESENTATION = {
@@ -9,7 +12,27 @@ DEFAULT_PRESENTATION = {
     'group_by_market': False,
 }
 ACTION_HINT = ('Source listing checked; application form not yet verified. '
-               'Use /interested <job_id> to track a role, then /apply <job_id> to prepare documents.')
+               'Choose Details, Interested or Prepare below, or say "details for job 1". '
+               'Prepare creates your resume; upload and final submission need separate confirmation.')
+
+
+def digest_markup(selected_ids, *, numbered=True):
+    """Telegram-safe navigation only, bounded to the candidate digest limit."""
+    rows = []
+    seen = set()
+    for number, job_id in enumerate(islice(selected_ids, MAX_DIGEST_JOBS), 1):
+        if not isinstance(job_id, str) or not JOB_ID.fullmatch(job_id) or job_id in seen:
+            continue
+        seen.add(job_id)
+        row = []
+        for operation in OPERATIONS:
+            callback = f'jh:job:{operation}:{job_id}'
+            if len(callback.encode('utf-8')) <= 64:
+                label = operation.title()
+                row.append({'text': f'{number} {label}' if numbered else label, 'callback_data': callback})
+        if row:
+            rows.append(row)
+    return {'inline_keyboard': rows} if rows else None
 
 
 def _options(value):
@@ -31,8 +54,8 @@ def _optional_text(value, unknown, limit=360):
     return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
 
 
-def _job_text(job, options):
-    heading = f"{job['title']} — {job['company']}"
+def _job_text(job, options, number):
+    heading = f"{number}. {job['title']} — {job['company']}"
     if options['style'] == 'compact':
         lines = [f"{heading} | {job['location']}"]
     else:
@@ -56,17 +79,17 @@ def render_digest(jobs, queued, *, presentation=None, markets=None):
     if options['group_by_market']:
         from jobhunter_matching import resolve_market
         groups = {}
-        for job in jobs:
+        for number, job in enumerate(jobs, 1):
             market = resolve_market(job.get('location'), markets or [])
             label = _optional_text(market.get('name'), 'Other locations') if market else 'Other locations'
             # First appearance retains the earliest reviewed rank per market;
             # the original reviewed order is preserved inside every group.
-            groups.setdefault(label, []).append(job)
+            groups.setdefault(label, []).append((number, job))
         for label, members in groups.items():
             blocks.append(f'Market: {label}')
-            blocks.extend(_job_text(job, options) for job in members)
+            blocks.extend(_job_text(job, options, number) for number, job in members)
     else:
-        blocks.extend(_job_text(job, options) for job in jobs)
+        blocks.extend(_job_text(job, options, number) for number, job in enumerate(jobs, 1))
     blocks.append(ACTION_HINT)
     return '\n\n'.join(blocks)
 

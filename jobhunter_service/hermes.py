@@ -67,7 +67,8 @@ keywords list; matching preferred_roles/excluded_roles/preferred_technologies/
 excluded_technologies lists, preset generic, seniority min_years/max_years/
 preferred_min_years/preferred_max_years and excluded_titles, weights, feedback_enabled;
 markets [{name, locations:[], work_authorization:authorized|sponsorship_required|unknown,
-relocation_required:boolean, salary_target:{amount:positive number,currency:three uppercase letters,
+relocation_required:boolean, accept_unconfirmed_sponsorship:boolean optional (default false),
+salary_target:{amount:positive number,currency:three uppercase letters,
 period:month|year} optional}]; delivery {per_market,cap}. Schedule fields:
 timezone (IANA), time HH:MM, weekdays [0..6, Monday=0], enabled boolean. Telegram:
 destinations [{chat_id:string,label:string,kind:private|channel}], optional presentation
@@ -76,6 +77,8 @@ Absent presentation defaults to standard with all three flags false. Propose onl
 requested presentation fields and preserve the candidate's other preferences.
 These options change the job digest layout, never matching, verification, channels,
 or application approval. Do not propose arbitrary templates, HTML, or parse modes.
+accept_unconfirmed_sponsorship accepts listings silent about sponsorship when requested;
+it never changes actual work authorization or permits explicit sponsorship exclusions.
 Salary and match reasons may only display existing listing/review data, never invented values.
 Accounts: gmail
 {enabled:boolean,account:email}, tracker {enabled:boolean,account:email,viewer_email:email,
@@ -89,7 +92,10 @@ confirmation:draft,confidentiality:public|private,visibility:resume|cover-letter
 where experience_id references an existing experience ID. Visibility may be a
 list containing resume and cover-letter; interview-only cannot be combined.
 Preserve existing fields. Stable local experience/evidence IDs such as exp-1
-and fact-1 may be created for new entries, but never invent candidate, actor,
+and fact-1 may be created for new entries. Resume experience and evidence_bank
+patches update or add records by ID; omitted records are retained. Include only
+the records being reviewed and keep their existing IDs. Omission or an empty
+list does not delete saved experience or evidence. Never invent candidate, actor,
 job, destination, action IDs, paths, credentials or connection links. Candidate
 facts and wording still require exact confirmation; IDs do not confirm facts.
 For application activity explain the available explicit commands /jobs,

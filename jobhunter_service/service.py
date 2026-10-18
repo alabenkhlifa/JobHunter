@@ -27,6 +27,25 @@ def merge(old, patch):
     return result
 
 
+def _merge_resume_records(current, updates, field):
+    """Sparse interviews update stable IDs without deleting other records."""
+    if not isinstance(updates, list) or any(not isinstance(item, dict) for item in updates):
+        raise ValueError(f'Resume {field} must contain record objects.')
+    supplied_ids = [item['id'] for item in updates if isinstance(item.get('id'), str)]
+    if len(supplied_ids) != len(set(supplied_ids)):
+        raise ValueError(f'Resume {field} contains duplicate IDs.')
+    result = copy.deepcopy(current)
+    indexes = {item['id']: index for index, item in enumerate(result)
+               if isinstance(item, dict) and isinstance(item.get('id'), str)}
+    for item in updates:
+        item_id = item.get('id')
+        if isinstance(item_id, str) and item_id in indexes:
+            result[indexes[item_id]] = merge(result[indexes[item_id]], item)
+        elif item not in result:
+            result.append(copy.deepcopy(item))
+    return result
+
+
 def validate_presentation(value):
     """Normalize explicitly supplied presentation preferences; never templates."""
     if not isinstance(value, dict) or set(value) - set(PRESENTATION_DEFAULTS):
@@ -332,15 +351,17 @@ class JobHunterService:
                 raise ValueError('Invalid spreadsheet ID.')
         return settings
 
-    def propose(self, actor_id, patch):
+    def propose(self, actor_id, patch, *, replace_resume_lists=False):
         with self.mutation(actor_id):
-            return self._propose(actor_id, patch)
+            return self._propose(actor_id, patch, replace_resume_lists=replace_resume_lists)
 
-    def _propose(self, actor_id, patch, *, onboarding_action=None):
+    def _propose(self, actor_id, patch, *, onboarding_action=None, replace_resume_lists=False):
         from . import onboarding
         member = self._member(actor_id)
         if not isinstance(patch, dict) or not patch:
             raise ValueError('A settings change is required.')
+        if type(replace_resume_lists) is not bool:
+            raise ValueError('Resume list replacement must be explicitly selected by a trusted caller.')
         patch = copy.deepcopy(patch)
         current = json.loads(member['settings'])
         with self.store.connect() as db:
@@ -361,18 +382,39 @@ class JobHunterService:
                 # fresh guided profile by including enabled=true in a patch.
                 if merge(current, patch)['schedule'].get('enabled'):
                     patch.setdefault('schedule', {})['enabled'] = False
-        updated = self._validate(actor_id, merge(current, patch))
+        updated = merge(current, patch)
+        if isinstance(patch.get('resume'), dict) and not replace_resume_lists:
+            for field in ('experience', 'evidence_bank'):
+                if field in patch['resume']:
+                    updated['resume'][field] = _merge_resume_records(
+                        current['resume'].get(field, []), patch['resume'][field], field)
+        updated = self._validate(actor_id, updated)
         if state is not None and current['schedule']['enabled'] and updated['schedule']['enabled']:
             before, after = onboarding.subjects(current, source), onboarding.subjects(updated, source)
             if before != after:
                 raise ValueError('Your search is running. First request and confirm a pause before changing guided setup settings.')
-        def canonical_patch(supplied, applied):
-            return {field: canonical_patch(value, applied[field]) if isinstance(value, dict) else copy.deepcopy(applied[field])
-                    for field, value in supplied.items()}
+        def canonical_patch(supplied, applied, path=()):
+            result = {}
+            for field, value in supplied.items():
+                child_path = (*path, field)
+                if isinstance(value, dict):
+                    result[field] = canonical_patch(value, applied[field], child_path)
+                elif child_path in {('resume', 'experience'), ('resume', 'evidence_bank')} and not replace_resume_lists:
+                    # Preview/confirm only the requested records. Retained
+                    # facts neither inflate the preview nor gain confirmation.
+                    by_id = {item['id']: item for item in applied[field] if isinstance(item.get('id'), str)}
+                    result[field] = [copy.deepcopy(by_id.get(item.get('id'), item))
+                                     if isinstance(item.get('id'), str) else copy.deepcopy(item) for item in value]
+                else:
+                    result[field] = copy.deepcopy(applied[field])
+            return result
         patch = canonical_patch(patch, updated)
         encoded = json.dumps(patch, ensure_ascii=False, indent=2)
         if len(encoded) > 20000:
             raise ValueError('Confirm smaller sections of this change separately.')
+        if replace_resume_lists:
+            # This is an operator/API choice, never a model-supplied patch key.
+            metadata['resume_list_replacement'] = True
         action_id = secrets.token_urlsafe(18)
         with self.store.connect() as db:
             db.execute('INSERT INTO actions VALUES(?,?,?,?,?,0)',
@@ -411,6 +453,14 @@ class JobHunterService:
                 action = json.loads(row['payload'])
                 settings = action['settings']
                 proposed_resume = action['patch'].get('resume', {})
+                if not action.get('resume_list_replacement'):
+                    # Pending previews from before sparse record merging must
+                    # not erase current facts when they are later confirmed.
+                    current_resume = json.loads(member_row['settings'])['resume']
+                    for field in ('experience', 'evidence_bank'):
+                        if field in proposed_resume:
+                            settings['resume'][field] = _merge_resume_records(
+                                current_resume.get(field, []), settings['resume'][field], field)
                 for field in ('evidence_bank', 'resume_variants'):
                     proposed_ids = {item.get('id') for item in proposed_resume.get(field, [])}
                     for item in settings.get('resume', {}).get(field, []):
@@ -468,11 +518,17 @@ class JobHunterService:
             (root / name).mkdir(parents=True, exist_ok=True, mode=0o700)
         private_json(root / 'config.json', settings['search'])
         if settings['resume']:
-            from resume_refiner import atomic_update_profile
             target = root / 'master-profile.json'
             if target.exists():
-                if json.loads(target.read_text()) != settings['resume']:
-                    atomic_update_profile(target, settings['resume'], candidate_confirmed=True)
+                previous_resume = json.loads(target.read_text())
+                if previous_resume != settings['resume']:
+                    # This is a complete confirmed snapshot. The refiner's
+                    # additive merge would retain removed experiences/evidence
+                    # and make the runner reject the materialized profile.
+                    stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+                    backup = target.with_name(f'{target.name}.backup-{stamp}-{secrets.token_hex(4)}')
+                    private_json(backup, previous_resume)
+                    private_json(target, settings['resume'])
             else:
                 private_json(target, settings['resume'])
         from .account_state import reconcile_account_settings

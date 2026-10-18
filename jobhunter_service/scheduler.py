@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import sqlite3
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .delivery import DeliveryQueue
+from .diagnostics import error_category
 from .scheduling import due_slot
 from .state import private_json
 
@@ -82,6 +84,7 @@ class Scheduler:
                 return False
             db.execute("UPDATE runs SET status='running',updated_at=? WHERE id=?", (time.time(), run['id']))
         user_id, run_id = run['user_id'], run['id']
+        stage = 'profile'
         try:
             member = self.service._member(user_id)
             settings = json.loads(member['settings'])
@@ -93,28 +96,34 @@ class Scheduler:
             directory = root / 'state' / 'runs' / run_id
             output = directory / 'collection-output.json'
             reviewed = directory / 'review-output.json'
+            stage = 'collection'
             self._child('collect', '--profile', member['profile_id'], '--data-root', str(self.service.root),
                         '--run-id', run_id, '--revision', str(run['revision']),
                         '--max-pages', str(settings['search'].get('max_pages', 2)), '--output', str(output))
             manifest = json.loads(output.read_text())
             if not manifest['candidates']:
-                self.client.send_message(user_id, 'Some eligible descriptions exceeded the review limit and remain queued.' if manifest.get('omitted_candidates') else 'No eligible job matches were found for this run.')
+                stage = 'status_queue'
+                self.delivery.enqueue_notice(user_id, run_id, 'Some eligible descriptions exceeded the review limit and remain queued.' if manifest.get('omitted_candidates') else 'Your search completed. No eligible job matches were found for this run.')
             else:
                 from .runner import review_prompt
                 envelope_path = directory / 'review-input.json'
                 if envelope_path.exists():
                     envelope = json.loads(envelope_path.read_text())
                 else:
+                    stage = 'ai_review'
                     envelope = self.planner(review_prompt(manifest), {'type': 'object', 'required': [
                         'profile_id', 'run_id', 'revision', 'config_digest', 'manifest_digest', 'verdicts']})
                     private_json(envelope_path, envelope)
+                stage = 'review_validation'
                 self._child('review', '--profile', member['profile_id'], '--data-root', str(self.service.root),
                             '--input', str(envelope_path), '--output', str(reviewed))
                 prepared = directory / 'delivery-output.json'
+                stage = 'delivery_preparation'
                 self._child('prepare-delivery', '--profile', member['profile_id'], '--data-root', str(self.service.root),
                             '--run-id', run_id, '--revision', str(run['revision']), '--output', str(prepared))
                 result = json.loads(prepared.read_text())
                 if result['selected_ids']:
+                    stage = 'digest_queue'
                     # The final recipient list is still validated at enqueue.
                     current = self.service._member(user_id)
                     if current['revision'] != run['revision']:
@@ -124,13 +133,23 @@ class Scheduler:
                         result['selected_ids'])
                 else:
                     evidence = result.get('availability', {})
-                    self.client.send_message(user_id, 'No source listings could be verified. Uncertain checks remain queued for retry.' if evidence.get('unknown') or evidence.get('unchecked') else 'The review completed; no source listings cleared your current requirements.')
+                    stage = 'status_queue'
+                    queued = result.get('queued_count', 0)
+                    message = ('Your search and review completed. No source listings could be verified. Uncertain checks remain queued for retry.'
+                               if evidence.get('unknown') or evidence.get('unchecked') else
+                               f'Your search and review completed. No jobs were approved for this run; {queued} remain queued for review. To update missing profile experience, first request and confirm a search pause, then review your experience here. Confirm the changes and complete the review before resuming searches.')
+                    self.delivery.enqueue_notice(user_id, run_id, message)
             status, error = 'complete', None
-        except Exception:
-            status, error = 'failed', 'Run failed or became stale; inspect private run state.'
+        except Exception as failure:
+            diagnostic = {'stage': stage, 'category': error_category(failure)}
+            status, error = 'failed', json.dumps(diagnostic, sort_keys=True)
+            logging.getLogger('jobhunter').warning('Run %s failed during %s (%s).', run_id, stage, diagnostic['category'])
             try:
-                self.service._member(user_id)
-                self.client.send_message(user_id, 'Your JobHunter run could not complete. Previously queued deliveries are retained. Your next scheduled run is still enabled.')
+                current = self.service._member(user_id)
+                # A stale revision cannot send status for superseded preferences.
+                if current['revision'] == run['revision']:
+                    self.delivery.enqueue_notice(user_id, run_id, 'Your JobHunter search could not complete. Your profile and previously queued deliveries are retained.'
+                        + (' Your next scheduled run is still enabled.' if json.loads(current['settings'])['schedule']['enabled'] else ''))
             except Exception:
                 pass
         with self.service.store.connect() as db:

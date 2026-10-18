@@ -110,10 +110,10 @@ def test_digest_parts_wait_for_complete_destination_before_notified(tmp_path, mo
     monkeypatch.setattr(scheduler.delivery, '_preflight', lambda *args: 'open')
     scheduler.delivery.enqueue(123, 'run1', 'x' * 6500, ['same-id'])
     real_send = client.send_message
-    def only_first(chat, message):
+    def only_first(chat, message, reply_markup=None):
         if client.sends:
             raise RuntimeError('Temporary outage')
-        return real_send(chat, message)
+        return real_send(chat, message, reply_markup=reply_markup)
     client.send_message = only_first
     assert scheduler.delivery.drain()['sent'] == 1
     assert job_state(root) == (0, 'delivery_pending')
@@ -144,6 +144,7 @@ def test_scheduler_collection_review_and_acknowledged_delivery(tmp_path):
             raise AssertionError('No review for omitted candidates')
     scheduler._child = child
     assert scheduler.run_next()
+    assert scheduler.delivery.drain()['sent'] == 1
     assert 'remain queued' in client.sends[-1][1]
     assert not planner.called
     assert not scheduler.run_next()

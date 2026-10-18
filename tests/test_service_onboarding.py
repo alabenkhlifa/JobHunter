@@ -120,6 +120,17 @@ def test_acknowledged_unknown_work_authorization_remains_unknown(service):
     assert service.snapshot(123)['settings']['search']['markets'][0]['work_authorization'] == 'unknown'
 
 
+def test_unconfirmed_sponsorship_preference_is_visible_without_changing_work_rights(service):
+    configure(service)
+    confirm(service, 123, {'search': {'markets': [{'name': 'France', 'locations': ['France'],
+        'work_authorization': 'sponsorship_required', 'relocation_required': True,
+        'accept_unconfirmed_sponsorship': True}]}})
+    detail = step_state(service, 'markets')['detail']
+    assert 'employer sponsorship required' in detail
+    assert 'unconfirmed sponsorship accepted; explicit exclusions still apply' in detail
+    assert service.snapshot(123)['settings']['search']['markets'][0]['work_authorization'] == 'sponsorship_required'
+
+
 def test_fresh_combined_model_proposal_cannot_enable_schedule(service):
     result = configure(service)
     assert result['settings']['schedule']['enabled'] is False

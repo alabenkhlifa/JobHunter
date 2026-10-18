@@ -198,6 +198,26 @@ def test_review_enforces_destination_authorization(tmp_path, monkeypatch, author
     assert result["selected_ids"] == expected
 
 
+@pytest.mark.parametrize("sponsorship,expected", [("no_info", ["same-id"]), ("doubtful", [])])
+def test_opted_in_unknown_sponsorship_survives_review_and_keeps_its_label(tmp_path, monkeypatch, sponsorship, expected):
+    directory, store = create_profile(tmp_path, 123, "sponsorship_required")
+    with store.connect() as db:
+        settings = json.loads(db.execute("SELECT settings FROM members WHERE user_id=123").fetchone()[0])
+        settings["search"]["markets"][0]["accept_unconfirmed_sponsorship"] = True
+        db.execute("UPDATE members SET settings=? WHERE user_id=123", (json.dumps(settings),))
+    private_json(directory / "config.json", settings["search"])
+    monkeypatch.setattr(runner, "_scrape", lambda p, r, pages: put_job(p, r, description="React product engineering."))
+    manifest = runner.collect("u123", tmp_path, "run1")
+    prompt = runner.review_prompt(manifest)
+    assert "do not hold solely" in prompt[0]["content"]
+    assert json.loads(prompt[1]["content"])["search_policy"]["markets"][0]["accept_unconfirmed_sponsorship"] is True
+    result = runner.apply_review("u123", tmp_path, envelope(manifest, sponsorship=sponsorship))
+    assert result["selected_ids"] == expected
+    assert job_row(directory)["ai_sponsorship"] == sponsorship
+    if expected:
+        assert "Visa not mentioned" in result["message"]
+
+
 def test_cli_rejects_paths_outside_own_run_directory(profile, capsys):
     root, directory, _ = profile
     args = ["collect", "--profile", "u123", "--data-root", str(root), "--output"]

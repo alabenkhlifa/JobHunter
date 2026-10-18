@@ -50,7 +50,8 @@ def validate_markets(markets):
     for market in markets:
         if not isinstance(market, dict):
             raise ValueError("each market must be an object")
-        unknown = set(market) - {"name", "locations", "work_authorization", "relocation_required", "salary_target"}
+        unknown = set(market) - {"name", "locations", "work_authorization", "relocation_required",
+                                 "accept_unconfirmed_sponsorship", "salary_target"}
         if unknown:
             raise ValueError(f"unknown market fields: {', '.join(sorted(unknown))}")
         name = market.get("name")
@@ -70,6 +71,10 @@ def validate_markets(markets):
             raise ValueError("market.relocation_required must be an explicit boolean")
         normalized = {"name": name.strip(), "locations": locations,
                       "work_authorization": authorization, "relocation_required": relocation}
+        if "accept_unconfirmed_sponsorship" in market:
+            if type(market["accept_unconfirmed_sponsorship"]) is not bool:
+                raise ValueError("market.accept_unconfirmed_sponsorship must be a boolean")
+            normalized["accept_unconfirmed_sponsorship"] = market["accept_unconfirmed_sponsorship"]
         if "salary_target" in market:
             normalized["salary_target"] = validate_salary_target(market["salary_target"])
         result.append(normalized)
@@ -258,7 +263,13 @@ def review_sendable(job, markets):
         market = matched[0] if len(matched) == 1 else None
     if market is None or market["work_authorization"] == "unknown":
         return False
-    return market["work_authorization"] == "authorized" or job.get("ai_sponsorship") == "offered"
+    if market["work_authorization"] == "authorized":
+        return True
+    sponsorship = job.get("ai_sponsorship")
+    return sponsorship == "offered" or (
+        market.get("accept_unconfirmed_sponsorship", False)
+        and sponsorship in {"implied", "no_info"}
+    )
 
 
 def excluded_reason(job, matching):

@@ -1022,6 +1022,7 @@ def record_review(conn, verdicts, *, report=None):
     for entry in validated_verdicts(
         verdicts, eligible, report=report, descriptions=descriptions,
         verified_evidence=verified_evidence,
+        preserve_doubtful=any(m.get("accept_unconfirmed_sponsorship") for m in CONFIG.get("markets", [])),
     ):
         status_update = ", status = 'rejected'" if entry["ai_verdict"] == "reject" else ""
         conn.execute(
@@ -1056,7 +1057,8 @@ def _note(report, job_id, note):
         report.append({"job_id": job_id, "note": note})
 
 
-def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None, verified_evidence=None):
+def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None, verified_evidence=None,
+                       preserve_doubtful=False):
     """Accepted review entries in queue field shape; nothing is written here.
 
     One rejected entry is dropped on its own, but a batch that breaks its own
@@ -1069,6 +1071,8 @@ def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None, ve
     offered / no_info / excluded: legacy implied and doubtful become no_info,
     and `offered` must carry an `evidence` quote found in the posting, or it
     is downgraded -- a promise the reviewer cannot point to is a guess.
+    Opted-in uncertain sponsorship keeps doubtful separate from silence so a
+    specific barrier cannot pass the destination's no_info delivery allowance.
     """
     seen_ids = set()
     seen_ranks = set()
@@ -1101,7 +1105,7 @@ def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None, ve
             continue
         evidence = ""
         if descriptions is not None:
-            if sponsorship in _LEGACY_SPONSORSHIP:
+            if sponsorship in _LEGACY_SPONSORSHIP and not (preserve_doubtful and sponsorship == "doubtful"):
                 _note(report, job_id, f"legacy read {sponsorship} recorded as no_info")
                 sponsorship = _LEGACY_SPONSORSHIP[sponsorship]
             if sponsorship == "offered":

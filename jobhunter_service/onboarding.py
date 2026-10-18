@@ -117,6 +117,8 @@ def descriptions(settings, values, connections):
     for market in values['markets']:
         value = f"{_line(market['name'])}: {authorization[market['work_authorization']]}"
         value += '; relocation ' + ('required' if market['relocation_required'] else 'not required')
+        if market.get('accept_unconfirmed_sponsorship'):
+            value += '; unconfirmed sponsorship accepted; explicit exclusions still apply'
         if market.get('salary_target'):
             target = market['salary_target']
             value += f"; salary preference {target['amount']} {target['currency']}/{target['period']}"

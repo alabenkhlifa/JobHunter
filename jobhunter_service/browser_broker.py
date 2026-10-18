@@ -340,6 +340,27 @@ class BrowserBroker:
             raise BrokerFailure("configuration")
         return path
 
+    def _clear_profile_locks(self, volume: Path) -> None:
+        # Called under the broker lock only after all old browsers are gone.
+        # Chromium's singleton links refer to the old container hostname and
+        # /tmp, so retaining them can block a new container indefinitely.
+        # Unlink the links themselves; never follow them into saved login data.
+        descriptor = os.open(volume, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            stale = []
+            for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                try:
+                    info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISLNK(info.st_mode):
+                    raise BrokerFailure("configuration")
+                stale.append(name)
+            for name in stale:
+                os.unlink(name, dir_fd=descriptor)
+        finally:
+            os.close(descriptor)
+
     def _validate_network(self) -> None:
         try:
             values = json.loads(self._docker(["network", "inspect", NETWORK]))
@@ -409,6 +430,7 @@ class BrowserBroker:
                 raise BrokerFailure("capacity")
             volume = self._volume(profile_id)
             documents = self._documents(profile_id)
+            self._clear_profile_locks(volume)
             uid, gid = self._identity()
             expiry = self._clock() + self.config.ttl_seconds
             arguments = [
