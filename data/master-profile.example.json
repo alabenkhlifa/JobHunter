@@ -205,6 +205,9 @@
     "citizenship": "Country or citizenship value if confirmed",
     "notice_period": "Example: 1 month",
     "current_work_location": "City, Country",
+    "gender": "ask_user",
+    "preferred_language": "ask_user",
+    "data_sharing_scope": "ask_user",
     "allow_contact_for_other_vacancies": "yes/no",
     "requires_visa_sponsorship": "ask_user"
   },

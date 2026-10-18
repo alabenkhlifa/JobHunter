@@ -39,6 +39,9 @@ before selecting the jobs actually sent.
 - **Notifications**: Telegram Bot API (HTML parse mode)
 - **Designed for**: local/Hermes operation with optional cron and Chromium CDP for browser apply flows
 
+- Reuse confirmed private `application_defaults` before asking repeated form questions. The answer planner supports `gender` (explicit choice only), `preferred_language` (for example `en_US`, separate from spoken-language proficiency), and `data_sharing_scope` (`current_opening` means only the opening being applied to). Match the question's meaning and available choices; never infer a demographic answer or broaden sharing when the narrow option is absent. Contact about future vacancies is a separate preference.
+- When the owner confirms reusable answers or asks to remember answers from a reviewed form, merge stable preferences with `resume_refiner.atomic_update_profile` (backup, preserve other fields), and cache the exact reusable question with `scraper.cache_application_answer(..., confirmed=True)`. Keep provenance and application-specific answers in ignored `data/application-answers/<job_id>.json`. Referral sources, employer-specific prose and acceptance of that site's terms stay scoped to that application; never turn them into global defaults. Passwords, verification codes and tokens never belong in the profile or answer cache; ATS passwords stay in the encrypted credential vault.
+
 ## Dedicated application mailbox
 
 - Use `jobhunter_integrations.gmail_auth check --refresh` to verify the configured jobs mailbox and offline access. Do not infer authorization from a browser login or the presence of a token file. Setup and recovery are documented in `setup.md`; no Himalaya is required.

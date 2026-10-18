@@ -65,7 +65,8 @@ def test_missing_application_defaults_are_marked_missing():
     profile = {key: value for key, value in PROFILE.items() if key != "application_defaults"}
     answers = _answers(profile=profile, research=None)
     for key in ("notice_period", "requires_visa_sponsorship", "work_authorization", "citizenship",
-                "allow_contact_for_other_vacancies", "salary_expectation"):
+                "allow_contact_for_other_vacancies", "salary_expectation", "gender", "preferred_language",
+                "data_sharing_scope"):
         assert answers[key]["value"] is None and answers[key]["source"] == "missing", key
     assert "notice_period" in module.missing_answers(answers)
 
@@ -286,3 +287,79 @@ def test_load_answers_from_file_and_profile(tmp_path):
     profile.write_text(json.dumps(PROFILE))
     loaded = module.load_answers(str(db), "j", profile_path=profile, jobs_mailbox=MAILBOX)
     assert loaded["salary_expectation"]["value"] == "62000" and loaded["email"]["value"] == MAILBOX
+
+
+def _preference_answers():
+    return _answers(profile={**PROFILE, "application_defaults": {
+        **PROFILE["application_defaults"], "gender": "Male", "preferred_language": "en_US",
+        "data_sharing_scope": "current_opening",
+    }})
+
+
+@pytest.mark.parametrize("required", [True, False])
+@pytest.mark.parametrize("label", ["Gender", "Your gender", "Género", "Genre"])
+def test_saved_gender_preference_is_used_without_inferring_other_eeo_answers(required, label):
+    plan = plan_fields(_inspection([
+        _field(label, tag="select", required=required, options=["Female", "Male", "Prefer not to disclose"]),
+        _field("Sexual orientation", id="other", tag="select", options=["Prefer not to disclose"]),
+    ]), _preference_answers())
+    assert [(f["answer_key"], f["value"]) for f in plan["fill"]] == [
+        ("gender", "Male"), ("decline_to_answer", "Prefer not to disclose")]
+
+
+@pytest.mark.parametrize("options,expected", [
+    (["Female", "Male"], "Male"), (["Female"], None), (["Mujer", "Hombre"], "Hombre"),
+])
+def test_gender_matching_does_not_match_male_inside_female(options, expected):
+    plan = plan_fields(_inspection([_field("Gender", tag="select", options=options)]), _preference_answers())
+    assert [f["value"] for f in plan["fill"]] == ([expected] if expected else [])
+    assert bool(plan["hard_stops"]) is (expected is None)
+
+
+@pytest.mark.parametrize("label,options,expected", [
+    ("Preferred language", ["Spanish", "English - US (en_US)", "French"], "English - US (en_US)"),
+    ("Language preference", ["English (UK)", "English (US)"], "English (US)"),
+    ("Idioma preferido", ["Español", "Inglés"], "Inglés"),
+    ("Langue préférée", ["Français", "Anglais"], "Anglais"),
+    ("Preferred language", ["French", "English (UK)"], None),
+])
+def test_communication_language_uses_saved_preference_not_spoken_languages(label, options, expected):
+    plan = plan_fields(_inspection([_field(label, tag="select", options=options)]), _preference_answers())
+    assert [f["value"] for f in plan["fill"]] == ([expected] if expected else [])
+    assert bool(plan["hard_stops"]) is (expected is None)
+
+
+@pytest.mark.parametrize("narrow", ["Only for the opening I am applying to", "Only for this role",
+                                    "This application only", "Solo para esta vacante"])
+def test_saved_sharing_scope_selects_narrow_radio_without_changing_future_contact(narrow):
+    fields = [_field(option, type="radio", name="sharing", id=f"scope-{i}", value=str(i),
+                     question="I agree to share my data")
+              for i, option in enumerate(["Internationally across the Group", "Nationally", narrow])]
+    fields.append(_field("May we contact you about future vacancies?", id="future", tag="select", options=["No", "Yes"]))
+    plan = plan_fields(_inspection(fields), _preference_answers())
+    assert not plan["hard_stops"]
+    assert [(f["answer_key"], f["value"]) for f in plan["fill"]] == [
+        ("data_sharing_scope", narrow), ("allow_contact_for_other_vacancies", "Yes")]
+    assert plan["fill"][0]["selector"] == '[id="scope-2"]'
+
+
+@pytest.mark.parametrize("field", [
+    _field("I agree to share my data", tag="select", options=["Internationally", "Nationally"]),
+    _field("I agree to share my profile with other companies", type="checkbox"),
+])
+def test_saved_sharing_scope_never_broadens_to_other_available_choices(field):
+    plan = plan_fields(_inspection([field]), _preference_answers())
+    assert not plan["fill"] and plan["hard_stops"]
+
+
+def test_private_preferences_load_for_another_job_without_changing_public_resume(tmp_path):
+    from resume_refiner import project_public_resume
+    prefs = {key: _preference_answers()[key]["value"] for key in ("gender", "preferred_language", "data_sharing_scope")}
+    profile = {**PROFILE, "application_defaults": {**PROFILE["application_defaults"], **prefs}}
+    assert project_public_resume(profile) == project_public_resume(PROFILE)
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(profile))
+    answers = module.load_answers(str(tmp_path / "jobs.db"), "another-job", profile_path=path, jobs_mailbox=MAILBOX)
+    for key, value in prefs.items():
+        assert answers[key] == {"value": value, "source": "application_defaults", "kind": "choice"}
+    assert answers["referral_source"]["value"] == "Job board"
