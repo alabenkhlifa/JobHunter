@@ -633,6 +633,23 @@ employers or locations, or override its retry policy after failed lookups.
    an unlabeled field. If a custom widget fails, pause and report the blocker;
    do not manipulate site-specific React internals to bypass it.
 
+### Owner-approved manual LinkedIn Easy Apply
+
+LinkedIn Easy Apply is allowed in the owner-driven manual flow after the owner's
+explicit **Proceed to apply** for that application and upload approval. This is
+preparation approval, not submission approval: obtain **separate final-submit approval**
+after reviewing the completed application. Verify the exact job ID, role and employer
+against the visible Easy Apply dialog at every step; a listing or unbound dialog
+is not a verified form. Use only truthful, confirmed answers; ask for unknown or
+sensitive answers. Upload the reviewed resume from the permanent package and preserve
+`applications.package_path`. Stop for CAPTCHA, phone/identity verification or anti-bot
+challenges and let the owner complete them manually before resuming. Verify the
+exact-role portal receipt and tracker state before reporting submission.
+
+This allowance never applies to unattended autopilot: its LinkedIn Easy Apply gate
+and answer-planner hard stops remain in force. Never use `--policy-run` or standing
+autopilot approval to authorize manual preparation or final submission.
+
 ### Autopilot exception
 
 The explicit-approval rules above have one exception: the autopilot (skill
@@ -645,13 +662,14 @@ in that night's autopilot plan, only values from the plan's `answers`, and only
 the engine's `--policy-run` commands, which the policy gate can refuse (exit 4).
 `mode: rehearsal` fills forms but never submits; only `live` submits.
 Everything else in this skill still applies: no fabricated or guessed answers,
-no CAPTCHA/phone/identity bypass, no answers where the employer forbids AI, no
-LinkedIn Easy Apply, a verified receipt before `submitted`, and no retry after
+no CAPTCHA/phone/identity bypass, no answers where the employer forbids AI,
+no unattended LinkedIn Easy Apply, a verified receipt before `submitted`, and no retry after
 `submission_attempted`. Any hard stop records `blocked_auto_apply` and hands the
 job back: an "Apply by hand" card with the link and the tailored resume when he
-must apply himself (multi-step form, unverified form, Easy Apply, CAPTCHA,
+must take over (multi-step form, unverified form, Easy Apply, CAPTCHA,
 anti-bot site; see the auto-apply hard-stop list), else the manual flow above
-through its research card. Outside the autopilot
+through its research card. An Easy Apply handoff may resume only through the
+owner-approved manual flow above, never through autopilot. Outside the autopilot
 crons, Interested, Apply, Proceed and final-submit approval stay separate,
 explicit decisions; never use `--policy-run` or the autopilot policy to skip
 them.

@@ -57,6 +57,23 @@ When missing fields appear, inspect local profile data and cached confirmed answ
 
 Routine email-code verification for an already-approved application must use the dedicated mailbox reader automatically; do not delegate code retrieval to the owner. The submit helper handles recognized email codes; `verify-email` resumes its pending step without resubmitting. For CAPTCHA, phone or identity-verification blockers, do not click/solve them. If the browser runs on a Raspberry Pi or remote desktop, first confirm it is visible there (on the Pi: `~/.hermes/scripts/jobhunter_autopilot.py browser status` exits 0 with `visible: true`; a headless browser shows nothing over VNC), put the page in front (`... browser open <job_id>`), then instruct the user to connect with a phone VNC client over the VPN, complete the challenge manually, and report back before continuing. Never relaunch Chromium with other flags or another profile; restart its service instead.
 
+### Owner-approved manual LinkedIn Easy Apply
+
+LinkedIn Easy Apply is allowed in the owner-driven manual flow after the owner's
+explicit **Proceed to apply** for that application and upload approval. This is
+preparation approval, not submission approval: obtain **separate final-submit approval**
+after reviewing the completed application. Verify the exact job ID, role and employer
+against the visible Easy Apply dialog at every step; a listing or unbound dialog
+is not a verified form. Use only truthful, confirmed answers; ask for unknown or
+sensitive answers. Upload the reviewed resume from the permanent package and preserve
+`applications.package_path`. Stop for CAPTCHA, phone/identity verification or anti-bot
+challenges and let the owner complete them manually before resuming. Verify the
+exact-role portal receipt and tracker state before reporting submission.
+
+This allowance never applies to unattended autopilot: its LinkedIn Easy Apply gate
+and answer-planner hard stops remain in force. Never use `--policy-run` or standing
+autopilot approval to authorize manual preparation or final submission.
+
 ## Development rules
 
 - Treat the deployed Pi checkout as runtime code. Routine collection, research, resume generation and application preparation may write only ignored private state. Do not edit source, tests, skills, dependencies or Git metadata to work around a blocker. Report the exact failure; make an explicitly requested repair in a separate development checkout, test it, commit and push it, then deploy the reviewed revision.
