@@ -206,6 +206,8 @@ def validate_config(config):
         ("score_threshold", 45, 0, 100), ("max_job_age_days", 7, 1, 365),
         ("min_matching_jobs", 25, 1, 200), ("max_pages", 10, 1, 100),
     ):
+        if field == "max_job_age_days" and result.get(field, default) is None:
+            continue
         result[field] = _integer(result.get(field, default), field, low, high)
     delivery = result.setdefault("delivery", {})
     if not isinstance(delivery, dict) or set(delivery) - {"per_market", "cap"}:

@@ -304,24 +304,16 @@ employer 12, freshness 8.
    and the junk that used to reach review: DNS, building/interior architect,
    mobile/iOS/Android developer, ETL, data scientist, support, scrum master,
    project/product manager, pre-sales
-2. **Job age**: posted within last 7 days only
+2. **Job age**: no age cutoff. Older and undated offers remain eligible; verify the exact listing is still open before showing it.
 3. **Location**: only keeps jobs whose displayed location matches one of the
    configured regions
 4. **Local presence**: skips jobs requiring existing UAE/Saudi residency, an
    existing Swiss permit or EU/EFTA nationality, or that won't sponsor visas
 5. **Experience**: skips jobs requiring more than 7 years
-6. **Spanish language**: he speaks French, English and Arabic, not Spanish.
-   A body written only in Spanish (no substantial English part) or an explicit
-   fluent/native/C1 Spanish requirement is knocked out as `language barrier:
-   Spanish`, the same rule as German and Italian. "No Spanish required",
-   "Spanish is a plus", "English or Spanish" and "Spanish market/company/
-   payroll" are not barriers; a bare "Spanish required" without a speaking
-   or level context is not a fluency barrier. An unclear or unstated Spanish
-   requirement is informational only and cannot alone cause a hold or rejection.
-   A board's own note is read the
-   same way: "board: fluent Spanish required", "board: ad written in Spanish"
-   (SpainJobs.io shows Spanish ads translated into English, so the body rule
-   cannot see them) or "board: Turkish required" knock the posting out.
+6. **Language requirements**: only an explicitly stated mandatory requirement
+   for a language he does not speak is a barrier. Advert language, location,
+   translation and missing language information do not establish a requirement.
+   Optional skills and a choice including English, French or Arabic are not barriers.
 7. **Sponsorship pre-read**: `job_scoring.sponsorship_signal` reads every
    stored description once. A stated refusal ("we cannot sponsor", "must
    hold a valid permit") is `excluded` and never reaches review. A promise
@@ -358,7 +350,7 @@ For each candidate job, the scraper fetches the full description and extracts:
 4. For each new job passing hard filters and keyword score threshold:
    - Saves to SQLite database
    - Does **not** notify directly
-5. Hermes cron reviews unnotified candidates with an LLM against the local
+5. Hermes cron reviews eligible pending candidates with an LLM against the local
    candidate profile, `review_preferences` and `feedback_examples`.
    `review_preferences.languages` lists French, English and Arabic. These
    languages are not barriers for him, including French-language Swiss postings.
@@ -383,8 +375,7 @@ For each candidate job, the scraper fetches the full description and extracts:
    precede prior approvals, then holds. A hold older than two days, or judged
    under an older `review_rubric`, competes again as unseen: its old verdict
    is shown as `previous_verdict` with its reason, and `ai_verdict` is empty.
-   A posting within two days of leaving the freshness window is boosted so it
-   is read before it expires. Deduplication shares collection's rule: a
+   There is no age-expiry boost. Deduplication shares collection's rule: a
    normalized title of at most two words also needs an identical description
    fingerprint; distinct Architect roles remain separate. The collector
    retains `ai_verdict`, `ai_verdict_reason`, `ai_sponsorship`, `ai_rank`,
@@ -397,15 +388,11 @@ For each candidate job, the scraper fetches the full description and extracts:
    director-level scope, teams of ten or more, or budget ownership. Check
    work authorization, relocation, language and specialist requirements in
    the full text; distinguish explicit evidence from a sponsorship inference.
-   Language: he does not speak Spanish. Judge the Spanish requirement from the
-   full text of every posting. A posting written in English, a listing on an
-   English-speaking board, or a board's `language_requirement` note such as
-   "no Spanish required" is a claim, not evidence that Spanish is optional;
-   SpainJobs.io translates Spanish ads into English. Reject a
-   posting that explicitly requires fluent Spanish for the job. An unclear or
-   unstated Spanish requirement is informational only: note it when useful,
-   but do not hold, reject, or defer a role on that uncertainty alone. Continue
-   assessing the other criteria. Salary: only an
+   Language: evaluate only explicitly stated mandatory requirements in the
+   full posting. Do not infer a language requirement from the country, advert
+   language or missing information. A hold or rejection naming Spanish without
+   a stated requirement is refused by the recorder and must be reviewed again
+   against the other criteria. Salary: only an
    employer-published figure counts. The boards' estimates are never stored,
    and an aggregator's estimate must never be reported as the employer's.
    The same job often appears on several boards and on LinkedIn; collection
@@ -480,26 +467,23 @@ For each candidate job, the scraper fetches the full description and extracts:
    the global cap. It then allocates one job per market per
    round (Valencia, Madrid and Barcelona count separately), for a default floor of 3,
    then shares unused places up to a global cap of 12. A strong market can
-   receive more than 3. Current approvals retain their batch order; older
-   approvals follow by current score, without comparing ranks from unrelated
-   batches. Closed or unverified listings allow other approved candidates to
+   receive more than 3. New and stored approvals compete together by score;
+   a new low-scoring approval does not displace a stronger pending approval. Closed or unverified listings allow other approved candidates to
    fill their places within the bounded source-check budget.
-6. Jobs not selected this round are not discarded: a `hold` verdict, a `send`
-   dropped on its sponsorship read, and a `send` that loses the cap all leave
-   the job `status='new'`, `notified=0`, so it re-competes while it still
-   meets the current freshness and hard filters. These are checked before
-   ranking and again when persisting reviews. Freshness uses the posting date,
-   falling back to collection time for undated postings; jobs with no usable
-   date are excluded. Filtering does not change their stored status. Only an
-   explicit `reject` verdict sets `status='rejected'`. Backfill never promotes
-   a hold or extends freshness; a hold needs a fresh approval. Public source
-   checks must confirm the same job and current application availability.
-   Explicit closure or expiry sets an unsent job to `status='unavailable'`.
-   A timeout, blocked page, login challenge or ambiguous response remains
-   `unknown`, withheld for retry; do not reuse an old open check as proof.
-   These checks preserve application history and store evidence separately
-   from the AI verdict. To retry only the eligible approved queue without a
-   new review batch, pass an empty JSON array to `jobhunter_review.py`.
+6. Pending offers have no age cutoff, including previously notified offers
+   with no user decision and archived offers. Interested applications already
+   in progress, submitted applications (including matching copies), skipped,
+   rejected and unavailable jobs stay out. A prior notification is not an
+   application. Holds need a new approval; no hold is automatically promoted.
+   These rules are checked before ranking and when recording reviews.
+   Public source checks must confirm the same job and current application
+   availability on every delivery, including repeat recommendations.
+   Explicit closure or expiry marks pending new/archived jobs unavailable.
+   Timeouts, blocked pages, login challenges and ambiguous responses remain
+   unknown and are withheld for retry. Never reuse an old open check as proof.
+   Application history is preserved and availability evidence is separate
+   from the AI verdict. To retry the approved queue without a new review
+   batch, pass an empty JSON array to jobhunter_review.py.
 7. That digest is ONE message for the whole night, not one message per job
    (`scraper.format_digest_message` composes it). Jobs whose read is a
    verified `offered` open the digest under a `🎯 VISA SPONSORSHIP` heading,

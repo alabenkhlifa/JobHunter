@@ -126,7 +126,7 @@ def test_unavailable_listing_removal_refills_market_from_next_ranked_candidate()
 @pytest.mark.parametrize("changes", [
     {"ai_verdict": "hold"}, {"ai_verdict": "reject"}, {"ai_verdict": ""},
     {"ai_sponsorship": "doubtful"}, {"ai_sponsorship": "excluded"},
-    {"notified": 1}, {"status": "rejected"}, {"status": "applied"},
+    {"status": "interested"}, {"status": "rejected"}, {"status": "applied"},
 ])
 def test_ineligible_queue_states_never_backfill(changes):
     assert queue.select_reviewed_queue([approved(**changes)]) == []
@@ -148,7 +148,7 @@ def test_new_verdict_cannot_inject_missing_stale_job_or_modify_eligibility_field
     assert result[0]["market"] == "jeddah"
     assert result[0]["score"] == 50
     assert result[0]["description"] == candidate["description"]
-    assert queue.merge_reviewed_queue([dict(candidate, notified=1)], updates) == []
+    assert queue.merge_reviewed_queue([dict(candidate, status='skipped')], updates) == []
 
 
 @pytest.mark.parametrize("authorization, sponsorship, expected", [
@@ -226,3 +226,8 @@ def test_backfill_uses_today_validated_pool_without_extending_seven_day_window(t
         assert tuple(stored) == (0, 1)
     finally:
         conn.close()
+
+
+def test_stronger_old_approval_precedes_new_low_score_approval():
+    rows = [approved('old', score=91, notified=1, status='archived'), job('new', score=48)]
+    assert ids(queue.select_reviewed_queue(rows, [approved('new', ai_rank=1)], cap=1)) == ['old']

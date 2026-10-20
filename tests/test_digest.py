@@ -312,11 +312,11 @@ def test_send_digest_queued_count_excludes_the_selected_jobs_and_ineligible_ones
             fake_send.return_value = True
             scraper.send_digest("tok", "chat", conn, selected)
     _, queued_count, queued_top_scores = fake_format.call_args[0]
-    assert queued_count == 2
-    assert queued_top_scores == [60, 50]
+    assert queued_count == 3
+    assert queued_top_scores == [90, 60, 50]
 
 
-def test_list_queued_jobs_respects_limit_and_excludes_notified():
+def test_list_queued_jobs_respects_limit_and_includes_unanswered_notified():
     conn = make_conn([
         ("q1", {"score": 90}),
         ("q2", {"score": 80}),
@@ -324,7 +324,7 @@ def test_list_queued_jobs_respects_limit_and_excludes_notified():
         ("notified_already", {"score": 95, "notified": 1}),
     ])
     result = scraper.list_queued_jobs(conn, limit=2)
-    assert [r["score"] for r in result] == [90, 80]
+    assert [r["score"] for r in result] == [95, 90]
 
 
 def test_list_queued_jobs_includes_market():

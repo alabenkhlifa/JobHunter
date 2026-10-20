@@ -142,11 +142,12 @@ class DeliveryQueue:
                         break
                     except ValueError:
                         continue
-                if posted is None:
+                max_age = search.get('max_job_age_days')
+                if max_age is not None and posted is None:
                     return 'cancelled'
-                if posted.tzinfo is None:
+                if posted is not None and posted.tzinfo is None:
                     posted = posted.replace(tzinfo=timezone.utc)
-                if (now - posted).days > search['max_job_age_days']:
+                if max_age is not None and (now - posted).days > max_age:
                     return 'cancelled'
                 evaluation = job_scoring.evaluate(job, allowed_locations=search['allowed_locations'],
                     max_experience=search['max_experience'], matching=search['matching'],

@@ -23,7 +23,9 @@ def _limits(per_market, cap):
         raise ValueError("per_market and cap must be positive integers")
 
 
-def _pending(job):
+def _pending(job, markets=None):
+    if markets is None:
+        return job.get("status", "new") in ("new", "archived")
     return job.get("notified", 0) == 0 and job.get("status", "new") == "new"
 
 
@@ -114,6 +116,8 @@ def _days(value):
 
 
 def _days_left(job, *, now, max_age_days):
+    if max_age_days is None:
+        return None
     posted = _parse_when(job.get("date_posted")) or _parse_when(job.get("date_scraped"))
     if posted is None:
         return None
@@ -124,7 +128,7 @@ EXPIRY_BOOST = 10
 
 
 def candidate_review_order(candidates, markets=None, per_market=3, cap=40, *, now=None,
-                           rubric=None, hold_days=2, max_age_days=7, expiry_days=2):
+                           rubric=None, hold_days=2, max_age_days=None, expiry_days=2):
     """Order a current eligible review pool before its expensive AI cutoff.
 
     A posting that promises a visa comes first regardless of market or score.
@@ -143,7 +147,7 @@ def candidate_review_order(candidates, markets=None, per_market=3, cap=40, *, no
         markets = jobhunter_matching.validate_markets(markets)
     rows, seen_keys = [], set()
     for job in _index(candidates).values():
-        if not _pending(job) or job.get("ai_verdict") == "reject":
+        if not _pending(job, markets) or job.get("ai_verdict") == "reject":
             continue
         job["market"] = _market(job, markets)
         if job["market"] == "unknown":
@@ -189,7 +193,7 @@ def candidate_review_order(candidates, markets=None, per_market=3, cap=40, *, no
 
 
 def _sendable(job, markets):
-    if not _pending(job) or job.get("ai_verdict") != "send":
+    if not _pending(job, markets) or job.get("ai_verdict") != "send":
         return False
     if job["market"] == "unknown":
         return False
@@ -204,8 +208,8 @@ def merge_reviewed_queue(eligible_candidates, newly_reviewed=(), *, markets=None
     New verdicts supersede stored verdicts, including hold/reject. Only review
     fields are copied from updates; eligibility, location and description come
     from today's validated rows. Updates absent from that pool are ignored.
-    The current batch retains its AI order; old approvals follow by today's
-    score, since rank 1 from separate historical batches is not comparable.
+    Owner approvals compete together by score. Invited profiles retain their
+    existing batch order and policy; ranks from unrelated batches are not comparable.
     Returned ai_rank values are unique temporary delivery ranks, never DB edits.
     """
     if markets is not None:
@@ -225,7 +229,8 @@ def merge_reviewed_queue(eligible_candidates, newly_reviewed=(), *, markets=None
         job["queue_origin"] = "current_review" if update is not None else "stored_review"
         (current if update is not None else queued).append(job)
 
-    merged = sorted(current, key=_rank_order) + sorted(queued, key=_score_order)
+    merged = (sorted(current, key=_rank_order) + sorted(queued, key=_score_order)
+              if markets is not None else sorted(current + queued, key=lambda job: (-_score(job), *_rank_order(job))))
     for rank, job in enumerate(merged, 1):
         job["ai_rank"] = rank
     return merged

@@ -537,4 +537,4 @@ def recordcheck(conn, job, result):
         checked_at=excluded.checked_at,url=excluded.url,source_job_id=excluded.source_job_id,matched=excluded.matched""",
         tuple(result[key] for key in ("job_id", "state", "reason", "checked_at", "url", "source_job_id", "matched")))
     if result["state"] == "closed":
-        conn.execute("UPDATE jobs SET status='unavailable' WHERE id=? AND status IN ('new','delivery_pending')", (job["id"],))
+        conn.execute("UPDATE jobs SET status='unavailable' WHERE id=? AND status IN ('new','archived','delivery_pending')", (job["id"],))

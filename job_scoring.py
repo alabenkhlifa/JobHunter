@@ -365,6 +365,9 @@ def language_body_barrier(job):
     words = re.findall(r"\b\w+\b", str(job.get("description") or "").lower())
     english = sum(word in _ENGLISH_WORDS for word in words)
     for language, stopwords in _LANGUAGE_WORDS.items():
+        if language == "Spanish":
+            # The advert's language is not a stated requirement for the job.
+            continue
         vocabulary = set(stopwords.split())
         if (sum(word in vocabulary for word in words) >= _BODY_LANGUAGE_THRESHOLD
                 and english < _ENGLISH_PRESENCE):
@@ -376,8 +379,7 @@ def language_body_barrier(job):
 # language skills must stay optional even beside a required English skill.
 # "Spanish" is mostly an adjective in postings for Spain ("Spanish market",
 # "a Spanish bank with excellent benefits"); those nouns are excluded so only
-# the language is matched, and a Spanish sentence must also talk about
-# speaking or a level before it counts as a requirement.
+# the language is matched alongside an explicit requirement or proficiency level.
 _SPANISH_NOT_THE_LANGUAGE = (
     r"market|markets|company|companies|startup|start-up|team|teams|client|clients|customer|customers|user|users"
     r"|payroll|law|laws|labou?r|legal|legislation|regulation|regulations|bank|banks|banking|entity|entities|public"
@@ -395,9 +397,6 @@ _LANGUAGE_LEVEL = (r"fluent|fluency|c1|c2|native|mandatory|required|must|profici
                    r"|command of|verhandlungssicher|sehr gute|niveau|stufe"
                    # Spanish postings write the level in Spanish.
                    r"|nivel|alto|imprescindible|requerido|requerida|necesario|necesaria|nativo|nativa|biling[üu]e|dominio|fluido|fluida|avanzado|avanzada")
-_LANGUAGE_CONTEXT = re.compile(
-    r"\b(?:speak\w*|language|languages|fluen\w*|proficien\w*|native|bilingual|biling[üu]e|level|nivel|c1|c2|b2|idioma"
-    r"|idiomas|written|spoken|verbal|communicat\w*|command of|hablar|habla|hablado|conversational|dominio)\b", re.I)
 _LANGUAGE_OPTIONAL = re.compile(r"\b(?:plus|advantage|asset|nice[ -]to[ -]have|desirable|preferred|bonus|optional|valorable|deseable)\b", re.I)
 # "No Spanish required", "Spanish is not needed": the English-speaking boards
 # say this in the posting body, and the level words must not read it as a
@@ -420,8 +419,6 @@ def language_requirement_barrier(job):
         if _LANGUAGE_OPTIONAL.search(sentence) or _LANGUAGE_WAIVED.search(sentence):
             continue
         for language, names in _LANGUAGE_NAMES.items():
-            if language == "Spanish" and not _LANGUAGE_CONTEXT.search(sentence):
-                continue
             pattern = rf"\b(?:{names})\b.{{0,60}}\b(?:{_LANGUAGE_LEVEL})\b|\b(?:{_LANGUAGE_LEVEL})\b.{{0,60}}\b(?:{names})\b"
             if re.search(pattern, sentence, re.I):
                 return f"language barrier: {language}"
@@ -432,7 +429,8 @@ def language_requirement_barrier(job):
 # ``language_requirement`` ("board: fluent Spanish required", "board: ad
 # written in Spanish, Spanish requirement not stated", "...; Turkish
 # required"). SpainJobs.io machine-translates Spanish ads into English, so the
-# body rule cannot see them; the board's reading is the only trace.
+# body language is not evidence of a required language. Only explicit board
+# requirements below can establish a barrier.
 _BOARD_SPOKEN = ("english", "french", "arabic")
 _BOARD_LANGUAGE = re.compile(
     r"\b(?:fluent |native |professional |business |c1 |c2 )?([a-z]+) (?:is )?(?:required|needed|mandatory|imprescindible)\b")
@@ -448,8 +446,6 @@ def board_language_barrier(job):
     for clause in re.split(r"[;,.]", note):
         if _BOARD_NEGATED.search(clause):
             continue
-        if re.search(r"\bad (?:is )?written in spanish\b", clause):
-            return "language barrier: Spanish (board: ad written in Spanish)"
         for match in _BOARD_LANGUAGE.finditer(clause):
             language = match.group(1)
             if language in _BOARD_SPOKEN or language in _LANGUAGE_WORDS_NOT_LANGUAGES:

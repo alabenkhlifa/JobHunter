@@ -164,7 +164,7 @@ def test_a_page_wholly_older_than_the_freshness_window_is_the_last():
     old = listing(card(posted="3 weeks ago"), card("acme-cloud-architect-o1d2o3d", "Architect", posted="1 year ago"),
                   next_href="/jobs?city=madrid&sort=newest&page=2")
     get = serve({MADRID: Page(old)})
-    [page] = run(get)
+    [page] = run(get, max_job_age_days=7)
     assert len(page) == 2 and days_old(page[1]) > 364
     assert get.calls == [MADRID]
 
@@ -174,15 +174,23 @@ def test_a_page_that_crosses_the_freshness_window_still_turns():
                                       next_href="/jobs?city=madrid&sort=newest&page=2")),
                  f"{MADRID}&page=2": Page(listing(card("acme-cloud-lead-o4d5o6d", "Lead", posted="2 months ago"),
                                                   next_href="/jobs?city=madrid&sort=newest&page=3"))})
-    assert [len(page) for page in run(get)] == [2, 1]
+    assert [len(page) for page in run(get, max_job_age_days=7)] == [2, 1]
     assert len(get.calls) == 2
 
 
 def test_a_page_without_readable_dates_is_the_last():
     undated = Page(listing(card(posted="Sep 21"), next_href="/jobs?city=madrid&sort=newest&page=2"))
     get = serve({MADRID: undated, f"{MADRID}&page=2": undated})
-    [page] = run(get)
+    [page] = run(get, max_job_age_days=7)
     assert page[0]["date_posted"] == "" and get.calls == [MADRID]
+
+
+def test_default_collection_follows_older_pages_without_an_age_cutoff():
+    get = serve({MADRID: Page(listing(card(posted='1 year ago'),
+        next_href='/jobs?city=madrid&sort=newest&page=2')),
+        f'{MADRID}&page=2': Page(listing(card('acme-old-role-o4d5o6d', 'Lead', posted='2 years ago')))})
+    assert [len(page) for page in run(get)] == [1, 1]
+    assert len(get.calls) == 2
 
 
 def test_a_search_keyword_is_ignored_for_the_city_listing():

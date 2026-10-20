@@ -1,11 +1,9 @@
 """Cron A: hand the reviewer the autopilot's unjudged candidates and record its verdicts.
 
 The envelope is the nightly collector's shape, so the same job-hunter review
-rules apply; only freshness is lifted (``max_job_age_days: null``) because
-the autopilot also applies to older, still-open offers. Verdicts are stored
+rules apply, with no age cutoff for older, still-open offers. Verdicts are stored
 with the same UPDATE as ``scraper.record_review`` but validated against the
-autopilot's own eligible pool, which ``record_review`` would re-derive with
-the 7-day window and drop.
+autopilot's own eligible pool, including its separate role and status policy.
 """
 
 from __future__ import annotations
@@ -48,6 +46,8 @@ def review_pool(conn, policy, *, now=None, run_id=None):
 def _candidate(job, need):
     item = {field: job.get(field) for field in FIELD_NAMES}
     item["description"] = item.get("description") or ""
+    if scraper.unsupported_language_reason(item.get("ai_verdict_reason"), item["description"]):
+        item["ai_verdict_reason"] = ""
     item["previous_verdict"] = None
     if need in ("hold_expired", "stale_rubric"):
         # Like jobhunter_queue._expire_hold: the old verdict rides along, unjudged.

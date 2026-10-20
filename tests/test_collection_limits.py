@@ -318,6 +318,7 @@ def test_default_collection_does_not_stop_at_25_and_logs_skip_summary(collection
     import logging
     from datetime import datetime, timezone, timedelta
     state, fetch = collection
+    monkeypatch.setitem(scraper.CONFIG, 'max_job_age_days', 7)
     monkeypatch.setattr(sys, "argv", ["scraper.py", "--collect-only"])
     monkeypatch.setattr(scraper, "load_dotenv", lambda: None)
     monkeypatch.setattr(scraper, "load_profile_config", lambda _: scraper.CONFIG)

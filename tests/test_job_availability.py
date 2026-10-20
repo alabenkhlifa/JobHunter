@@ -406,13 +406,13 @@ def test_unknown_or_open_checks_preserve_job_state_and_application_history(tmp_p
         assert db.execute("SELECT state,matched FROM job_availability").fetchall() == [("closed", 1)]
 
 
-@pytest.mark.parametrize("status", ["new", "delivery_pending", "skipped", "rejected", "submitted", "interested"])
+@pytest.mark.parametrize("status", ["new", "archived", "delivery_pending", "skipped", "rejected", "submitted", "interested"])
 def test_only_pending_recommendations_become_unavailable(status):
     with closing(sqlite3.connect(":memory:")) as db, db:
         db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY,url TEXT,status TEXT)")
         db.execute("INSERT INTO jobs VALUES(?,?,?)", (LINKEDIN["id"], LINKEDIN["url"], status))
         availability.recordcheck(db, LINKEDIN, run(page(status="No longer accepting applications")))
-        assert db.execute("SELECT status FROM jobs").fetchone()[0] == ("unavailable" if status in {"new", "delivery_pending"} else status)
+        assert db.execute("SELECT status FROM jobs").fetchone()[0] == ("unavailable" if status in {"new", "archived", "delivery_pending"} else status)
         assert db.execute("SELECT state FROM job_availability").fetchone()[0] == "closed"
 
 

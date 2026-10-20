@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import datetime, timezone
 
+import pytest
 import scraper
 
 CONFIG_BACKUP = dict(scraper.CONFIG)
@@ -101,8 +102,8 @@ def test_record_review_leaves_a_hold_verdict_as_status_new_not_notified():
 
 
 def test_record_review_skips_a_job_id_not_in_todays_eligible_candidates():
-    # already notified -- not an eligible candidate today
-    conn = make_conn([("j1", {"notified": 1})])
+    # An explicit user decision must remain outside the pending pool.
+    conn = make_conn([("j1", {"status": "skipped", "notified": 1})])
     written = scraper.record_review(conn, [verdict("j1", "send")])
 
     row = conn.execute("SELECT ai_verdict FROM jobs WHERE id = 'j1'").fetchone()
@@ -211,3 +212,28 @@ def test_plan_reviewed_digest_names_the_empty_markets_without_writing_anything()
     assert plan["markets"]["barcelona"]["reviewable"] == 1
     rows = conn.execute("SELECT ai_verdict FROM jobs").fetchall()
     assert [row["ai_verdict"] for row in rows] == ["", ""]
+
+
+@pytest.mark.parametrize('decision', ['hold', 'reject'])
+@pytest.mark.parametrize('reason', ['Strong Java fit; Spanish working requirement unclear',
+                                  'Spanish not confirmed', 'Spanish required', 'Español no confirmado'])
+def test_unsupported_language_decisions_cannot_enter_plan_or_database(decision, reason):
+    conn = make_conn([('j1', {'description': 'Java and Spring services in an international team.'})])
+    entries = [verdict('j1', decision, reason=reason, sponsorship='no_info')]
+    notes = []
+    planned = scraper.plan_reviewed_digest(conn, entries, report=notes)
+    assert planned['markets']['madrid']['selected'] == 0
+    assert any('unsupported language' in note['note'] for note in notes)
+    notes = []
+    assert scraper.record_review(conn, entries, report=notes) == []
+    assert conn.execute('SELECT ai_verdict,status FROM jobs').fetchone()[:] == ('', 'new')
+    assert any('unsupported language' in note['note'] for note in notes)
+    conn.close()
+
+
+def test_explicit_language_requirement_and_unrelated_holds_remain_valid():
+    entries = [verdict('explicit', 'reject', reason='Fluent Spanish required', sponsorship='no_info'),
+               verdict('scope', 'hold', reason='Unclear hands-on engineering scope', sponsorship='no_info')]
+    accepted = scraper.validated_verdicts(entries, {'explicit': 'Madrid', 'scope': 'Madrid'},
+        descriptions={'explicit': 'Fluent Spanish required.', 'scope': 'Lead this team.'})
+    assert {row['id'] for row in accepted} == {'explicit', 'scope'}

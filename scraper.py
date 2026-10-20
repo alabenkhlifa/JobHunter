@@ -169,7 +169,7 @@ CONFIG = {
     # Roles demanding more required years than this never reach review; he
     # called the 8-year roles too senior, so the cap is one below them.
     "max_experience": 7,
-    "max_job_age_days": 7,
+    "max_job_age_days": None,
     # One number, the rubric's: a profile config may override it, but the
     # default it starts from must not drift from job_scoring.SEND_CUTOFF.
     "score_threshold": job_scoring.SEND_CUTOFF,
@@ -178,7 +178,7 @@ CONFIG = {
     "sponsored_score_threshold": 35,
     # Stamped on every verdict. Bump it when the review rules in the skill
     # change: a hold judged under an older rubric competes again as unseen.
-    "review_rubric": "2026-10-18-language-uncertainty",
+    "review_rubric": "2026-10-20-open-offers-explicit-language",
     # Sources are chosen per profile from its configured locations: each
     # one searches only the countries it covers (source_countries), so
     # removing Spain from the markets stops the Spain boards and adding Dubai
@@ -189,9 +189,8 @@ CONFIG = {
     # text for the model; the code never parses it.
     "review_preferences": {
         "languages": ["French", "English", "Arabic"],
-        "language_uncertainty_policy": "An unclear or unstated Spanish-language requirement is informational "
-                                       "only. Do not hold or reject on that uncertainty alone; assess the "
-                                       "role against the other criteria.",
+        "language_requirements": "Only explicitly stated mandatory language requirements are barriers. "
+                                 "Do not infer requirements from the advert language, country, or silence.",
         "target_roles": ["Software Architect", "Application/Cloud Solutions Architect (hands-on)",
                          "Tech Lead", "Senior Backend Engineer"],
         "primary_stacks": ["Java", "Spring Boot", "Node.js/NestJS", "TypeScript"],
@@ -423,7 +422,8 @@ def load_recent_duplicate_keys(conn, max_age_days, min_score):
     its description was even fetched. Deduplication exists to stop repeat
     sends; a row that was never sent has nothing to suppress.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+    # Repost deduplication has a bounded horizon independent of eligibility.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days or 7)).isoformat()
     rows = conn.execute(
         "SELECT title, company, location, description FROM jobs WHERE date_scraped >= ? AND score >= ? AND score > 0",
         (cutoff, min_score),
@@ -924,10 +924,11 @@ def prepare_review_candidate(job, *, now=None):
         if dated.tzinfo is None:
             dated = dated.replace(tzinfo=timezone.utc)
         break
-    if dated is None:
+    max_age = CONFIG.get("max_job_age_days")
+    if max_age is not None and dated is None:
         return candidate, "no usable posting or collection date"
     # Match collection's calendar-age boundary: eight days is too old for 7.
-    if (now - dated).days > CONFIG["max_job_age_days"]:
+    if max_age is not None and (now - dated).days > max_age:
         return candidate, "outside the job freshness window"
 
     years = extract_min_experience(candidate["description"])
@@ -966,6 +967,12 @@ def prepare_review_candidate(job, *, now=None):
     return candidate, reason
 
 
+def _digest_duplicate_key(job):
+    key = job_scoring.duplicate_key(job)
+    return (key, job_scoring.description_hash(job.get('description'))
+            if job_scoring.short_duplicate_title(key) else None)
+
+
 def get_review_candidates(conn, *, now=None):
     """All currently eligible candidates; callers rank before applying a cap."""
     conn.row_factory = sqlite3.Row
@@ -973,13 +980,32 @@ def get_review_candidates(conn, *, now=None):
     threshold = CONFIG["score_threshold"]
     sponsored_threshold = min(threshold, CONFIG.get("sponsored_score_threshold", threshold))
     rows = conn.execute(
-        "SELECT * FROM jobs WHERE notified = 0 AND status = 'new'" + ("" if generic else " AND score >= ?"),
+        "SELECT * FROM jobs WHERE " + (
+            "notified = 0 AND status = 'new'" if generic else "status IN ('new', 'archived')"
+        ) + ("" if generic else " AND score >= ?"),
         () if generic else (sponsored_threshold,),
     ).fetchall()
+    submitted_ids, submitted_keys = set(), set()
+    if not generic and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='applications'").fetchone():
+        from jobhunter_autopilot.store import POST_SUBMISSION_STAGES
+        for application in conn.execute("SELECT job_id, stage, submitted_at FROM applications"):
+            if application[2] or application[1] in POST_SUBMISSION_STAGES:
+                submitted_ids.add(application[0])
+        for row in conn.execute("SELECT * FROM jobs WHERE status IN ('submitted', 'applied')"):
+            submitted_ids.add(row['id'])
+        for row in conn.execute("SELECT * FROM jobs"):
+            if row['id'] in submitted_ids:
+                submitted_keys.add(_digest_duplicate_key(dict(row)))
     now = now or datetime.now(timezone.utc)
     candidates = []
     for row in rows:
+        if row['id'] in submitted_ids or _digest_duplicate_key(dict(row)) in submitted_keys:
+            continue
         candidate, reason = prepare_review_candidate(dict(row), now=now)
+        if (not generic and candidate.get('ai_verdict') == 'hold'
+                and unsupported_language_reason(candidate.get('ai_verdict_reason'), candidate.get('description'))):
+            # Historical invalid holds are re-reviewed, never auto-approved.
+            candidate.update(ai_verdict='', ai_verdict_reason='')
         if reason is None and not generic and candidate["score"] < threshold:
             # Only a promised visa earns a read below the keyword bar.
             if candidate.get("sponsorship_signal") != "offered":
@@ -1060,6 +1086,12 @@ def _note(report, job_id, note):
         report.append({"job_id": job_id, "note": note})
 
 
+def unsupported_language_reason(reason, description):
+    """A reviewer cannot invent a Spanish requirement absent from the posting."""
+    return (bool(re.search(r"\b(?:spanish|espa[nñ]ol|castellano)\b", str(reason or ''), re.I))
+            and job_scoring.language_requirement_barrier({'description': description or ''}) != 'language barrier: Spanish')
+
+
 def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None, verified_evidence=None,
                        preserve_doubtful=False):
     """Accepted review entries in queue field shape; nothing is written here.
@@ -1105,6 +1137,10 @@ def validated_verdicts(verdicts, eligible, *, report=None, descriptions=None, ve
             continue
         if sponsorship not in _AI_SPONSORSHIP:
             _note(report, job_id, f"unknown sponsorship {sponsorship!r}; entry dropped")
+            continue
+        if (verdict in ('hold', 'reject') and descriptions is not None
+                and unsupported_language_reason(entry.get('reason'), descriptions.get(job_id))):
+            _note(report, job_id, "unsupported language requirement; verdict dropped, review the other criteria")
             continue
         evidence = ""
         if descriptions is not None:
@@ -3043,7 +3079,7 @@ def evaluate_job(job, *, conn, session, seen_titles, skip_counts):
 
     max_age = CONFIG["max_job_age_days"]
     date_posted = job.get("date_posted", "")
-    if date_posted:
+    if max_age is not None and date_posted:
         try:
             posted = datetime.fromisoformat(date_posted.replace("Z", "+00:00"))
             if posted.tzinfo is None:
@@ -3248,7 +3284,7 @@ def main():
     # remote @ joveo ai" came back on nine consecutive nights with a fresh job
     # id each time; without the seed each night's copy takes a daily slot.
     seen_titles = load_recent_duplicate_keys(conn, CONFIG["max_job_age_days"], CONFIG["score_threshold"])
-    log.info(f"Duplicate guard seeded with {len(seen_titles)} sent titles from the last {CONFIG['max_job_age_days']} days")
+    log.info(f"Duplicate guard seeded with {len(seen_titles)} titles from the last {CONFIG['max_job_age_days'] or 7} days")
 
     # Breadth-first: fetch one page per generator, evaluate immediately, rotate
     while any(b["matches"] < target and b["generators"] for b in buckets.values()):

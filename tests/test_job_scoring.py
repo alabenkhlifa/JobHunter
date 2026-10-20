@@ -938,18 +938,18 @@ ENGLISH_BODY = ("We are looking for a software architect to lead the development
                 "in Madrid and international projects. ") * 2
 
 
-def test_spanish_only_body_is_knocked_out_but_a_bilingual_posting_is_not():
-    assert job_scoring.language_body_barrier(job(description=SPANISH_BODY)) == "language barrier: Spanish"
+def test_advert_language_does_not_establish_a_spanish_requirement():
+    assert job_scoring.language_body_barrier(job(description=SPANISH_BODY)) is None
     assert job_scoring.language_body_barrier(job(description=SPANISH_BODY + ENGLISH_BODY)) is None
     assert job_scoring.language_body_barrier(job(description=ENGLISH_BODY)) is None
-    assert job_scoring.evaluate(job(description=SPANISH_BODY), allowed_locations=UAE)["reason"] == "language barrier: Spanish"
+    assert job_scoring.evaluate(job(description=SPANISH_BODY), allowed_locations=UAE)["reason"] is None
 
 
 @pytest.mark.parametrize("text", [
     "Fluent Spanish required", "Spanish: C1", "Must speak Spanish", "Español nivel alto", "Nivel alto de español",
     "Native Spanish speaker", "Spanish and English fluency", "Business-level Spanish", "Good command of Spanish",
     "Fluent in Spanish and English (C1)", "Spanish language skills are mandatory",
-    "Spanish speaking clients, must be fluent",
+    "Spanish speaking clients, must be fluent", "Spanish required",
 ])
 def test_required_spanish_is_a_barrier(text):
     assert job_scoring.language_requirement_barrier(job(description=text)) == "language barrier: Spanish"
@@ -963,8 +963,6 @@ def test_required_spanish_is_a_barrier(text):
     # The adjective, not the language.
     "A Spanish fintech with excellent benefits", "Spanish market; must have Java", "Strong Spanish team",
     "Spanish payroll experience required", "Native cloud platform for the Spanish public sector",
-    # No speaking or level context: left to the reviewer.
-    "Spanish required",
 ])
 def test_spanish_mentions_without_a_language_requirement_are_not_barriers(text):
     assert job_scoring.language_requirement_barrier(job(description=text)) is None
@@ -982,7 +980,7 @@ def test_either_language_is_enough(text):
 @pytest.mark.parametrize("note,reason", [
     ("board: fluent Spanish required", "language barrier: Spanish (board)"),
     ("board: native Spanish required", "language barrier: Spanish (board)"),
-    ("board: ad written in Spanish, Spanish requirement not stated", "language barrier: Spanish (board: ad written in Spanish)"),
+    ("board: ad written in Spanish, Spanish requirement not stated", None),
     ("board: ad in English, Spanish requirement not stated; Turkish required", "language barrier: Turkish (board)"),
     ("board: no Spanish needed (ad in English); Catalan required", "language barrier: Catalan (board)"),
     ("board: no Spanish needed (ad in English)", None),

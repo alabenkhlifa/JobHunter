@@ -29,7 +29,8 @@ def job(**overrides):
     ("", "not a date", False),
     ("2026-09-08", NOW.isoformat(), True),
 ])
-def test_freshness_uses_posting_date_then_collection_date(posted, scraped, eligible):
+def test_explicit_freshness_limit_uses_posting_then_collection_date(posted, scraped, eligible, monkeypatch):
+    monkeypatch.setitem(scraper.CONFIG, 'max_job_age_days', 7)
     _, reason = scraper.prepare_review_candidate(
         job(date_posted=posted, date_scraped=scraped), now=NOW,
     )
@@ -87,7 +88,7 @@ def make_conn(rows):
 def test_candidate_checks_do_not_change_job_records():
     conn = make_conn([job(), job(id="expired", date_posted="2026-08-01")])
     before = conn.total_changes
-    assert [j["id"] for j in scraper.get_review_candidates(conn, now=NOW)] == ["example"]
+    assert [j["id"] for j in scraper.get_review_candidates(conn, now=NOW)] == ["example", "expired"]
     assert conn.total_changes == before
     assert conn.execute("SELECT status FROM jobs WHERE id='expired'").fetchone()[0] == "new"
     conn.close()
@@ -107,7 +108,7 @@ def test_owner_backlog_keeps_only_the_three_chosen_spanish_cities():
 
 
 def test_record_review_rechecks_eligibility_before_writing():
-    conn = make_conn([job(date_posted="2000-01-01")])
+    conn = make_conn([job(title="Junior Backend Engineer", date_posted="2000-01-01")])
     result = scraper.record_review(conn, [{
         "job_id": "example", "verdict": "send", "sponsorship": "implied",
         "rank": 1, "reason": "fit",
@@ -117,13 +118,37 @@ def test_record_review_rechecks_eligibility_before_writing():
     conn.close()
 
 
-def test_queue_preview_and_digest_count_exclude_expired_backlog():
+def test_queue_preview_and_digest_count_include_old_backlog():
     recent = datetime.now(timezone.utc).isoformat()
     conn = make_conn([
         job(date_scraped=recent),
         job(id="expired", date_posted="2000-01-01", date_scraped=recent),
     ])
-    assert [row["id"] for row in scraper.list_queued_jobs(conn)] == ["example"]
-    assert scraper._queued_after_send(conn, []) == [80]
-    assert scraper._queued_after_send(conn, ["example"]) == []
+    assert [row["id"] for row in scraper.list_queued_jobs(conn)] == ["example", "expired"]
+    assert scraper._queued_after_send(conn, []) == [80, 80]
+    assert scraper._queued_after_send(conn, ["example"]) == [80]
+    conn.close()
+
+
+@pytest.mark.parametrize('date', ['2000-01-01', '', 'not a date'])
+def test_default_owner_pool_has_no_age_or_date_requirement(date):
+    _, reason = scraper.prepare_review_candidate(job(date_posted=date, date_scraped=date), now=NOW)
+    assert scraper.DEFAULT_CONFIG['max_job_age_days'] is None
+    assert reason is None
+
+
+def test_pending_notified_and_archived_offers_return_but_user_decisions_do_not():
+    conn = make_conn([job(id='shown', notified=1), job(id='archived', status='archived'),
+                      job(id='interested', status='interested'), job(id='skip', status='skipped'),
+                      job(id='reject', status='rejected'), job(id='closed', status='unavailable')])
+    assert {row['id'] for row in scraper.get_review_candidates(conn, now=NOW)} == {'shown', 'archived'}
+    conn.close()
+
+
+def test_old_unsupported_language_hold_is_reviewable_without_rewriting_history():
+    conn = make_conn([job()])
+    conn.execute("UPDATE jobs SET ai_verdict='hold', ai_verdict_reason='Spanish working requirement unclear'")
+    row = scraper.get_review_candidates(conn, now=NOW)[0]
+    assert row['ai_verdict'] == row['ai_verdict_reason'] == ''
+    assert conn.execute('SELECT ai_verdict FROM jobs').fetchone()[0] == 'hold'
     conn.close()

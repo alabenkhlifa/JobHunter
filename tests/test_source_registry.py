@@ -239,14 +239,14 @@ def test_body_salary_and_body_work_model_win_over_board_hints(collection, monkey
     assert result["work_model"] == "remote"
 
 
-def test_a_board_note_knocks_out_a_translated_spanish_ad(collection, monkeypatch):
+def test_translation_does_not_establish_a_required_language(collection, monkeypatch):
     text = "Required: 5 years of experience. Java Spring Boot microservices on AWS."
     monkeypatch.setattr(jobhunter_sources, "module_for", lambda b: board_module(
         text, language_requirement="board: ad written in Spanish, Spanish requirement not stated"))
     result = scraper.evaluate_job(job(), **collection)
-    assert result["score"] == 0  # a rubric knockout is stored at zero, like every other
+    assert result["score"] > 0
     reason = collection["conn"].execute("SELECT score, score_breakdown FROM jobs WHERE id = 'sj-abc123'").fetchone()
-    assert reason == (0, "knocked out: language barrier: Spanish (board: ad written in Spanish)")
+    assert reason[0] > 0 and 'knocked out' not in reason[1]
 
 
 def test_a_crashing_board_fetch_yields_an_empty_description_not_an_exception(monkeypatch, caplog):

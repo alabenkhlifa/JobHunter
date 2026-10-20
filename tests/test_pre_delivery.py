@@ -89,7 +89,7 @@ def test_inaccessible_queue_job_is_held_without_claiming_closed_or_sending(datab
     assert scraper.send_reviewed_digest('test', 'private', database)['sent'] == 1
 
 
-def test_backfill_never_promotes_holds_rejects_notified_old_or_filtered_rows(database, monkeypatch):
+def test_backfill_keeps_old_and_notified_offers_without_promoting_holds_or_filtered_rows(database, monkeypatch):
     insert(database, 100, verdict='hold')
     insert(database, 101, status='rejected', verdict='reject')
     insert(database, 102, notified=1)
@@ -97,9 +97,37 @@ def test_backfill_never_promotes_holds_rejects_notified_old_or_filtered_rows(dat
     insert(database, 104, location='Bengaluru, India')
     insert(database, 105, sponsorship='doubtful')
     calls = source_responses(monkeypatch)
-    monkeypatch.setattr(scraper, 'send_telegram', lambda *args: pytest.fail('Nothing may be sent'))
+    sent = []
+    monkeypatch.setattr(scraper, 'send_telegram', lambda *args: sent.append(args[-1]) or True)
+    assert scraper.send_reviewed_digest('test', 'private', database)['sent'] == 2
+    assert set(calls) == {'li-102', 'li-103'} and len(sent) == 1
+
+
+def test_old_repeat_offers_are_checked_live_each_time_and_only_open_ones_send(database, monkeypatch):
+    insert(database, 100, days=90, notified=1, score=99)
+    insert(database, 101, days=60, status='archived', notified=1, score=98)
+    insert(database, 102, days=30, notified=1, score=91)
+    insert(database, 103, days=0, score=48)
+    calls = source_responses(monkeypatch, closed=['li-100'], unknown=['li-101'])
+    sent = []
+    monkeypatch.setattr(scraper, 'send_telegram', lambda token, chat, text: sent.append(text) or True)
+    assert scraper.send_reviewed_digest('test', 'private', database)['sent'] == 2
+    assert set(calls) == {'li-100', 'li-101', 'li-102', 'li-103'}
+    assert database.execute("SELECT status FROM jobs WHERE id='li-100'").fetchone()[0] == 'unavailable'
+    assert database.execute("SELECT status FROM jobs WHERE id='li-101'").fetchone()[0] == 'archived'
+    # An earlier open result is never reused as proof on a later delivery.
+    calls = source_responses(monkeypatch, unknown=['li-101', 'li-102', 'li-103'])
     assert scraper.send_reviewed_digest('test', 'private', database)['sent'] == 0
-    assert calls == []
+    assert set(calls) == {'li-101', 'li-102', 'li-103'} and len(sent) == 1
+
+
+def test_submitted_copy_cannot_return_as_an_old_pending_recommendation(database):
+    submitted = insert(database, 100, status='submitted', notified=1, days=30)
+    insert(database, 101, days=20)
+    insert(database, 102, days=20)
+    database.execute("UPDATE jobs SET description='A separate Java backend product.' WHERE id='li-102'")
+    scraper.record_application_stage(database, submitted['id'], 'submitted')
+    assert {row['id'] for row in scraper.get_review_candidates(database)} == {'li-102'}
 
 
 def test_queue_more_reopens_listings_and_refills_skipped_closed_job(database, monkeypatch):

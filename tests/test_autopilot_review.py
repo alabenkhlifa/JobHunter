@@ -50,14 +50,24 @@ def test_batch_limit_and_disabled_noop(conn):
     assert review.review_batch(conn, paused, NOW)["candidates"] == []
 
 
+def test_autopilot_recorder_refuses_unsupported_spanish_hold(conn):
+    job = add_job(conn, ai_verdict='')
+    pool, _ = review.review_pool(conn, enabled_policy(), now=NOW)
+    result = review.record_review(conn, [{'job_id': job['id'], 'verdict': 'hold',
+        'reason': 'Spanish working requirement unclear', 'sponsorship': 'no_info'}], pool, now=NOW)
+    assert result['recorded'] == 0
+    assert 'unsupported language' in result['review_notes'][0]['note']
+    assert conn.execute('SELECT ai_verdict FROM jobs WHERE id=?', (job['id'],)).fetchone()[0] == ''
+
+
 def test_record_review_accepts_old_archived_jobs_and_rejects(conn):
     archived = add_job(conn, ai_verdict="", ai_rubric="", status="archived",
                        date_posted="2026-06-01", date_scraped="2026-06-01T20:00:00+00:00")
     other = add_job(conn, ai_verdict="", ai_rubric="")
     outsider = add_job(conn, title="Junior Developer", ai_verdict="")
     pool, _ = review.review_pool(conn, enabled_policy(), now=NOW)
-    # scraper.record_review would drop the archived/old one: prove the autopilot keeps it.
-    assert archived["id"] not in {row["id"] for row in scraper.get_review_candidates(conn)}
+    # Both review paths now retain older, archived pending offers.
+    assert archived["id"] in {row["id"] for row in scraper.get_review_candidates(conn)}
     verdicts = [
         {"job_id": archived["id"], "verdict": "send", "reason": "good java fit", "sponsorship": "no_info", "rank": 1},
         {"job_id": other["id"], "verdict": "reject", "reason": "dotnet", "sponsorship": "no_info"},
