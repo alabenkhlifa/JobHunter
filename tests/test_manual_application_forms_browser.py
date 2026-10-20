@@ -1,4 +1,4 @@
-"""Real DOM checks for manual Easy Apply and SuccessFactors; no live uploads."""
+"""Real DOM checks for manual ATS forms; no live uploads."""
 import json
 import os
 from pathlib import Path
@@ -130,3 +130,35 @@ def test_successfactors_unverified_tenant_or_requisition_stays_blocked(change):
     if change == 'no_apply': html = html.replace('>Apply</span>', '>Save</span>')
     page = inspect_html(html, url)
     assert not page.verifies_application_for('Lead Software Engineer', 'Swiss Re')
+
+
+CLARIVATE = '''<!doctype html><title>Apply</title>
+<form id="application"><h1>Lead Software Engineer (JREQ136480)</h1>
+<label>First Name<input name="firstName" required></label>
+<label>Email<input type="email" required></label>
+<button type="submit">Next</button></form><h2>follow us</h2>'''
+CLARIVATE_URL = 'https://careers.clarivate.com/apply?jobSeqNo=CLACLAGBJREQ136480EXTERNALENGB&step=1'
+
+
+def test_clarivate_rendered_requisition_form_without_separate_brand_heading():
+    page = inspect_html(CLARIVATE, CLARIVATE_URL)
+    assert page.headings == ['Lead Software Engineer (JREQ136480)', 'follow us']
+    assert page.verifies_application_for('Lead Software Engineer', 'Clarivate')
+    assert page.missing_required == ['First Name', 'Email']
+    assert not page.safe_to_continue
+
+
+@pytest.mark.parametrize('change', ['hidden_heading', 'wrong_role', 'wrong_reference', 'wrong_host',
+                                   'missing_brand', 'missing_query', 'no_form'])
+def test_clarivate_rendered_unbound_form_is_not_verified(change):
+    html = CLARIVATE
+    url = CLARIVATE_URL
+    if change == 'hidden_heading': html = html.replace('<h1>', '<h1 hidden>')
+    if change == 'wrong_role': html = html.replace('Lead Software Engineer', 'Senior Software Engineer')
+    if change == 'wrong_reference': html = html.replace('JREQ136480', 'JREQ999999')
+    if change == 'wrong_host': url = url.replace('careers.clarivate.com', 'careers.clarivate.com.example.test')
+    if change == 'missing_brand': url = url.replace('careers.clarivate.com', 'jobs.phenom.com')
+    if change == 'missing_query': url = url.split('?')[0]
+    if change == 'no_form': html = html.replace('<button type="submit">Next</button>', '')
+    page = inspect_html(html, url)
+    assert not page.verifies_application_for('Lead Software Engineer', 'Clarivate')

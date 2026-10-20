@@ -25,7 +25,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import scraper
 
@@ -202,6 +202,22 @@ class PageInspection:
         """A source Apply link and an ATS shell cannot verify this application."""
         context = getattr(self, "application_context", {})
         parsed = urlsplit(self.url)
+        if parsed.hostname == "careers.clarivate.com":
+            # This employer-owned form has a generic title and no separate brand
+            # heading. Bind its visible role/requisition to the exact Phenom URL;
+            # never strip arbitrary requisitions in the generic heading matcher.
+            sequences = parse_qs(parsed.query, keep_blank_values=True).get("jobSeqNo", [])
+            sequence = re.fullmatch(r"CLACLAGB(JREQ[0-9]+)EXTERNALENGB", sequences[0]) if len(sequences) == 1 else None
+            headings = [match for heading in self.headings
+                        if (match := re.fullmatch(r"(.+)\s+\((JREQ[0-9]+)\)", heading.strip()))]
+            return bool(
+                parsed.scheme == "https" and parsed.path == "/apply"
+                and parsed.netloc.casefold() in {"careers.clarivate.com", "careers.clarivate.com:443"}
+                and _title_tokens(job_company or "") == ("clarivate",)
+                and self.actionable_application_form and sequence and len(headings) == 1
+                and headings[0][2] == sequence[1]
+                and _title_tokens(headings[0][1]) == _title_tokens(job_title) != ()
+            )
         if parsed.hostname in {"www.linkedin.com", "linkedin.com"}:
             match = re.fullmatch(r"/jobs/view/(\d+)/?", parsed.path)
             return bool(

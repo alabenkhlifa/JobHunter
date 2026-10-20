@@ -110,6 +110,85 @@ def _rendered_form(*, heading="Staff Software Engineer (UAE)", url="https://jobs
             "buttons": [{"text": "Submit Application", "type": "submit", "disabled": True}]}
 
 
+def _clarivate_form():
+    page = _rendered_form(
+        heading="Lead Software Engineer (JREQ136480)",
+        url="https://careers.clarivate.com/apply?jobSeqNo=CLACLAGBJREQ136480EXTERNALENGB"
+            "&utm_source=linkedin&utm_medium=phenom-feeds&step=1&stepname=personalInformation",
+    )
+    page.update(title="Apply", headings=["Lead Software Engineer (JREQ136480)", "follow us"])
+    return page
+
+
+def test_clarivate_requisition_heading_binds_exact_role_and_employer_url():
+    page = inspect_page(FakeClient(_clarivate_form()))
+    assert page.actionable_application_form
+    assert page.verifies_application_for("Lead Software Engineer", "Clarivate", job_id="li-4470931205")
+
+
+@pytest.mark.parametrize("change", [
+    "wrong_host", "lookalike_host", "missing_brand", "http", "wrong_path", "credentials", "wrong_port",
+    "wrong_company", "missing_company", "wrong_role", "extra_seniority", "missing_heading",
+    "missing_reference", "wrong_reference", "malformed_reference", "missing_query", "wrong_tenant",
+    "wrong_locale", "blank_sequence", "duplicate_sequence", "duplicate_blank_sequence",
+    "extra_requisition_heading", "no_form",
+])
+def test_clarivate_unbound_or_mismatched_application_stays_blocked(change):
+    payload = _clarivate_form()
+    company = "Clarivate"
+    if change == "wrong_host": payload["url"] = payload["url"].replace("careers.clarivate.com", "careers.example.test")
+    if change == "lookalike_host": payload["url"] = payload["url"].replace("careers.clarivate.com", "careers.clarivate.com.example.test")
+    if change == "missing_brand": payload["url"] = payload["url"].replace("careers.clarivate.com", "jobs.phenom.com")
+    if change == "http": payload["url"] = payload["url"].replace("https:", "http:")
+    if change == "wrong_path": payload["url"] = payload["url"].replace("/apply?", "/jobs?")
+    if change == "credentials": payload["url"] = payload["url"].replace("https://", "https://other@")
+    if change == "wrong_port": payload["url"] = payload["url"].replace("careers.clarivate.com", "careers.clarivate.com:8443")
+    if change == "wrong_company": company = "Other Employer"
+    if change == "missing_company": company = None
+    if change == "wrong_role": payload["headings"][0] = "Senior Software Engineer (JREQ136480)"
+    if change == "extra_seniority": payload["headings"][0] = "Lead Software Engineer Junior (JREQ136480)"
+    if change == "missing_heading": payload["headings"] = ["follow us"]
+    if change == "missing_reference": payload["headings"][0] = "Lead Software Engineer"
+    if change == "wrong_reference": payload["headings"][0] = "Lead Software Engineer (JREQ999999)"
+    if change == "malformed_reference": payload["headings"][0] = "Lead Software Engineer (JREQ136480extra)"
+    if change == "missing_query": payload["url"] = payload["url"].split("?")[0]
+    if change == "wrong_tenant": payload["url"] = payload["url"].replace("CLACLAGB", "OTHER")
+    if change == "wrong_locale": payload["url"] = payload["url"].replace("EXTERNALENGB", "EXTERNALOTHER")
+    if change == "blank_sequence": payload["url"] = payload["url"].replace("CLACLAGBJREQ136480EXTERNALENGB", "")
+    if change == "duplicate_sequence": payload["url"] += "&jobSeqNo=CLACLAGBJREQ999999EXTERNALENGB"
+    if change == "duplicate_blank_sequence": payload["url"] += "&jobSeqNo="
+    if change == "extra_requisition_heading": payload["headings"].append("Other Role (JREQ999999)")
+    if change == "no_form": payload.update(inputs=[], buttons=[])
+    assert not inspect_page(FakeClient(payload)).verifies_application_for("Lead Software Engineer", company)
+
+
+def test_clarivate_verification_does_not_relax_generic_heading_or_company_checks():
+    from jobhunter_auto_apply.engine import _heading_matches_job, _page_identifies_company
+    payload = _clarivate_form()
+    assert not _heading_matches_job(payload["headings"][0], "Lead Software Engineer", "Clarivate")
+    assert not _page_identifies_company("https://careers.clarivate.com.example.test/apply",
+                                        "Apply", payload["headings"], "Clarivate")
+
+
+def test_clarivate_verified_inspection_preserves_manual_approval_and_challenge_gates(tmp_path):
+    db = tmp_path / "jobs.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT, company TEXT)")
+        conn.execute("INSERT INTO jobs VALUES (?, ?, ?)", ("li-4470931205", "Lead Software Engineer", "Clarivate"))
+    payload = _clarivate_form()
+    client = FakeClient(payload)
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False, tracker_sync=False), client=client)
+    page = engine.inspect("li-4470931205")
+    assert page.verifies_application_for("Lead Software Engineer", "Clarivate")
+    assert not page.safe_to_continue  # Unanswered required fields are still enforced.
+    with pytest.raises(PermissionError):
+        engine.click_submit("li-4470931205", "button[type=submit]")
+    payload["challenge_visible"] = True
+    assert "human verification" in inspect_page(client).blockers
+    assert not client.clicked
+    assert not client.uploads
+
+
 def test_generic_ats_jobs_shell_cannot_be_recorded_as_draft_inspected(tmp_path):
     db = tmp_path / "jobs.db"
     _job_db(db)
