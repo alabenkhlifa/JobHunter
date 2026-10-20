@@ -9,9 +9,9 @@ catch { playwright = require('playwright-core'); }
     executablePath: process.env.JOBHUNTER_CHROMIUM_EXECUTABLE});
   try {
     const page = await browser.newPage();
-    await page.route('**/*', route => route.fulfill({contentType: 'text/html',
+    await page.route('**/*', route => route.fulfill({contentType: 'text/html; charset=utf-8',
       body: input.frames?.[new URL(route.request().url()).pathname] ?? input.html}));
-    await page.goto('https://careers.example.test/application/tech-leader');
+    await page.goto(input.url || 'https://careers.example.test/application/tech-leader');
     if (input.reveal) await page.locator('#method-cv').click();
     process.stdout.write(JSON.stringify(await page.evaluate(input.expression)));
   } finally {

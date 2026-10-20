@@ -15,6 +15,7 @@ field (``answers.plan_fields``) instead of by page-text terms.
 from __future__ import annotations
 
 import datetime as dt
+import html
 import json
 import os
 import re
@@ -140,6 +141,9 @@ class PageInspection:
     def actionable_application_form(self) -> bool:
         if not self.loaded_application_page:
             return False
+        context = getattr(self, "application_context", {})
+        if context.get("kind") == "linkedin_easy_apply":
+            return bool(context.get("actionable"))
         applicant_fields = [item for item in self.inputs if (
             item.get("tag") in {"input", "select", "textarea"}
             and str(item.get("type") or "").casefold() not in
@@ -194,8 +198,29 @@ class PageInspection:
         return bool(editable or resume_first or final_review)
 
     def verifies_application_for(self, job_title: str, job_company: str | None = None,
-                                 job_location: str | None = None) -> bool:
+                                 job_location: str | None = None, *, job_id: str | None = None) -> bool:
         """A source Apply link and an ATS shell cannot verify this application."""
+        context = getattr(self, "application_context", {})
+        parsed = urlsplit(self.url)
+        if parsed.hostname in {"www.linkedin.com", "linkedin.com"}:
+            match = re.fullmatch(r"/jobs/view/(\d+)/?", parsed.path)
+            return bool(
+                parsed.scheme == "https" and match and job_id == f"li-{match[1]}"
+                and context.get("kind") == "linkedin_easy_apply"
+                and context.get("job_id") == match[1] and self.actionable_application_form
+                and _heading_matches_job(context.get("role", ""), job_title, job_company, job_location)
+                and _title_tokens(context.get("company", "")) == _title_tokens(job_company or "")
+                and _title_tokens(context.get("dialog_company", "")) == _title_tokens(job_company or "")
+            )
+        if context.get("kind") == "successfactors":
+            return bool(
+                parsed.scheme == "https" and parsed.hostname == "career2.successfactors.eu"
+                and context.get("tenant") == "SwissRe" and _title_tokens(job_company or "") == ("swiss", "re")
+                and context.get("brand_host") == "careers.swissre.com"
+                and re.fullmatch(r"\d+", str(context.get("requisition", "")))
+                and self.actionable_application_form
+                and _heading_matches_job(context.get("role", ""), job_title, job_company, job_location)
+            )
         return bool(
             self.actionable_application_form
             and any(_heading_matches_job(heading, job_title, job_company, job_location) for heading in self.headings)
@@ -204,7 +229,7 @@ class PageInspection:
 
 
 def _title_tokens(value: str) -> tuple[str, ...]:
-    return tuple(re.findall(r"\w+", unicodedata.normalize("NFKC", str(value or "")).casefold()))
+    return tuple(re.findall(r"\w+", unicodedata.normalize("NFKC", html.unescape(str(value or ""))).casefold()))
 
 
 _SUBMIT_LABEL_RX = re.compile(
@@ -471,6 +496,53 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     const rect = el.getBoundingClientRect();
     return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
   };
+  // LinkedIn renders its application in a native dialog, with the file picker
+  // attached to body. Bind that dialog to the exact job URL and page title;
+  // never combine fields from background jobs, settings, or a second modal.
+  const linkedInJob = location.protocol === 'https:' &&
+    ['www.linkedin.com', 'linkedin.com'].includes(location.hostname) &&
+    location.pathname.match(/^\/jobs\/view\/(\d+)\/?$/);
+  const dialogs = linkedInJob ? [...document.querySelectorAll('dialog[open]')].filter(visible) : [];
+  const dialog = dialogs.length === 1 && dialogs[0].querySelector(
+    '[data-sdui-screen="com.linkedin.sdui.flagshipnav.jobs.easyapply.EasyApply"]') ? dialogs[0] : null;
+  const titleParts = document.title.split(' | ');
+  const dialogHeading = dialog?.querySelector('header h2')?.innerText.trim() || '';
+  const linkedin = dialog && titleParts.length >= 3 && titleParts.at(-1) === 'LinkedIn' &&
+    dialogHeading.startsWith('Apply to ');
+  const scope = linkedin ? dialog : document;
+  const scopeText = (linkedin ? dialog : document.body)?.innerText || '';
+  const uploadButton = linkedin && [...dialog.querySelectorAll('button')].find(el =>
+    visible(el) && !el.disabled && el.innerText.trim() === 'Upload resume');
+  const resumeStep = !!uploadButton && /select or upload a resume/i.test(scopeText);
+  const externalFiles = resumeStep ? [...document.querySelectorAll('body > input[type=file]')].filter(el =>
+    !el.disabled && el.accept.split(',').includes('application/pdf')) : [];
+  const ownedFile = externalFiles.length === 1 ? externalFiles[0] : null;
+  let applicationContext = {};
+  if (linkedin) {
+    const controls = [...dialog.querySelectorAll('button')].filter(el => visible(el) && !el.disabled);
+    const continuation = controls.some(el => /^(next|review|submit application)$/i.test(el.innerText.trim()));
+    const fields = [...dialog.querySelectorAll('input,select,textarea')].filter(el =>
+      visible(el) && !el.disabled && !['hidden','button','submit','password'].includes(el.type));
+    const review = /review (?:your )?application/i.test(scopeText) &&
+      controls.some(el => /^submit application$/i.test(el.innerText.trim()));
+    applicationContext = {kind: 'linkedin_easy_apply', job_id: linkedInJob[1],
+      role: titleParts[0], company: titleParts.slice(1, -1).join(' | '), dialog_company: dialogHeading.slice(9),
+      actionable: continuation && (resumeStep || fields.length > 0 || review)};
+  } else if (location.protocol === 'https:' && location.hostname === 'career2.successfactors.eu') {
+    const tenant = document.getElementById('career_company');
+    const req = document.getElementById('career_job_req_id');
+    const jobReq = document.getElementById('jobReqId');
+    const heading = [...document.querySelectorAll('h1,h2,h3,[role=heading]')].filter(visible)
+      .map(el => el.innerText.trim().match(/^(.+)\s+\((\d+)\)$/))
+      .find(match => match && match[2] === req?.value);
+    const brand = [...document.querySelectorAll('a[href]')].find(el => visible(el) &&
+      new URL(el.href).hostname === 'careers.swissre.com');
+    if (tenant?.type === 'hidden' && tenant.value === 'SwissRe' && req?.type === 'hidden' &&
+        jobReq?.type === 'hidden' && req.value === jobReq.value && heading && brand) {
+      applicationContext = {kind: 'successfactors', tenant: tenant.value, requisition: req.value,
+        role: heading[1], brand_host: 'careers.swissre.com'};
+    }
+  }
   const labelFor = (el) => {
     const labels = el.labels ? [...el.labels].map(l => l.innerText.trim()).filter(Boolean) : [];
     if (labels.length) return labels.join(' ');
@@ -503,12 +575,16 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       parent.getAttribute('data-ddd-child-link') === name &&
       parent.getAttribute('data-ddd-no-children') === el.selectedOptions[0]?.text.trim();
   };
-  const presented = (el) => visible(el) || (
+  const presented = (el) => el === ownedFile || visible(el) || (
     el.type === 'file' && !el.matches(':disabled') && [...(el.labels || [])].some(visible)
   ) || (
     !el.matches(':disabled') && !!widgetFor(el)
   ) || !!uploadedFileFor(el);
-  const formFor = (el) => el.form ? (el.form.id || `form-${[...document.forms].indexOf(el.form)}`) : '';
+  const formFor = (el) => {
+    if (linkedin && (dialog.contains(el) || el === ownedFile)) return 'linkedin-easy-apply';
+    const form = el.form || el.closest('form');
+    return form ? (form.id || `form-${[...document.forms].indexOf(form)}`) : '';
+  };
   const questionFor = (el) => { try {
     const group = el.closest('fieldset, [role=radiogroup], [role=group]');
     if (group) {
@@ -537,23 +613,24 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
   };
   return {
     url: location.href,
+    application_context: applicationContext,
     frame_path: framePath,
     title: document.title,
-    text: document.body ? document.body.innerText.slice(0, 7000) : '',
-    headings: [...document.querySelectorAll('h1, h2, h3, [role=heading]')]
+    text: scopeText.slice(0, 12000),
+    headings: [...scope.querySelectorAll('h1, h2, h3, [role=heading]')]
       .filter(el => visible(el) && !el.closest('aside, nav, [class*="recommend" i], [class*="similar" i], [class*="related" i]'))
       .slice(0, 20)
       .map(el => (el.innerText || '').trim().slice(0, 200)).filter(Boolean),
-    forms: [...document.forms].filter(visible).slice(0, 20).map(el => ({
+    forms: linkedin ? [{id: 'linkedin-easy-apply', text: scopeText.slice(0, 4000)}] : [...document.forms].filter(visible).slice(0, 20).map(el => ({
       id: el.id || `form-${[...document.forms].indexOf(el)}`,
       text: (el.innerText || '').trim().slice(0, 4000)
     })),
-    inputs: [...document.querySelectorAll('input, select, textarea')].filter(presented).slice(0, 80).map((el) => ({
+    inputs: [...scope.querySelectorAll('input, select, textarea'), ...(ownedFile ? [ownedFile] : [])].filter(presented).slice(0, 80).map((el) => ({
       tag: el.tagName.toLowerCase(),
       type: el.type || '',
       id: el.id || '',
       name: el.name || '',
-      label: labelFor(el),
+      label: el === ownedFile ? 'Resume' : labelFor(el),
       form: formFor(el),
       question: questionFor(el),
       autocomplete: el.getAttribute('autocomplete') || '',
@@ -567,7 +644,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       invalid: el.getAttribute('aria-invalid') === 'true' || !el.checkValidity(),
       options: el.tagName === 'SELECT' ? [...el.options].slice(0, 25).map(o => o.text.trim()).filter(Boolean) : []
     })),
-    buttons: [...document.querySelectorAll('button, input[type=submit], input[type=button]')].filter(visible).slice(0, 50).map((el) => ({
+    buttons: [...scope.querySelectorAll('button, input[type=submit], input[type=button], [role=button]')].filter(visible).slice(0, 80).map((el) => ({
       text: (el.innerText || el.value || el.getAttribute('aria-label') || '').trim(),
       type: el.type || '',
       id: el.id || '',
@@ -690,6 +767,7 @@ def _inspection_from_data(data: dict[str, Any], blocklist_terms: tuple[str, ...]
     # Form-local text verifies an input-free final step without expanding the
     # CLI's public inspection schema or exposing duplicate applicant details.
     inspection.forms = data.get("forms") or []
+    inspection.application_context = data.get("application_context") or {}
     return inspection
 
 
@@ -758,7 +836,7 @@ class AutoApplyEngine:
             )
         return self.client
 
-    def _verify_before_mutation(self, job_id: str, client: CDPClient) -> None:
+    def _verify_before_mutation(self, job_id: str, client: CDPClient) -> PageInspection:
         """Check the current rendered form before sending a document or clicking submit."""
         try:
             inspection = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
@@ -766,9 +844,10 @@ class AutoApplyEngine:
         except (CDPError, OSError):
             _record_unverified(self.config, job_id)
             raise
-        if not inspection.verifies_application_for(title, company, _expected_location(self.config.db_path, job_id)):
+        if not inspection.verifies_application_for(title, company, _expected_location(self.config.db_path, job_id), job_id=job_id):
             _record_unverified(self.config, job_id, url=inspection.url)
             raise CDPError("exact role and employer application form were not verified; no browser action was taken")
+        return inspection
 
     def inspect(self, job_id: str, *, stage: str = "draft_inspected") -> PageInspection:
         if self.config.policy_run and stage == "draft_inspected" and self.config.run_id is None:
@@ -785,7 +864,7 @@ class AutoApplyEngine:
         if stage != "submission_attempted":
             title, company, _ = _expected_job(self.config.db_path, job_id)
             location = _expected_location(self.config.db_path, job_id)
-            if not inspection.verifies_application_for(title, company, location):
+            if not inspection.verifies_application_for(title, company, location, job_id=job_id):
                 _record_unverified(self.config, job_id, url=inspection.url)
                 raise CDPError("exact role and actionable application form were not verified; no draft state was recorded")
         evidence_path = None
@@ -895,7 +974,14 @@ class AutoApplyEngine:
         client = self.connect()
         if self.config.expected_page_url is not None and client.evaluate("location.href") != self.config.expected_page_url:
             raise PermissionError("The approved application page changed before upload.")
-        self._verify_before_mutation(job_id, client)
+        inspection = self._verify_before_mutation(job_id, client)
+        if getattr(inspection, "application_context", {}).get("kind") == "linkedin_easy_apply":
+            owned_files = [item for item in inspection.inputs if item.get("type") == "file"]
+            if len(owned_files) != 1 or not client.evaluate(f"""(() => {{
+              const files = [...document.querySelectorAll('input[type=file]')];
+              return files.length === 1 && files[0] === document.querySelector({json.dumps(selector)});
+            }})()"""):
+                raise CDPError("the LinkedIn resume upload control is ambiguous or unavailable")
         if client.evaluate("location.href") != self.config.expected_page_url:
             raise PermissionError("The approved application page changed before upload.")
         client.upload_file(selector, upload_path)
@@ -938,7 +1024,7 @@ class AutoApplyEngine:
   if (!/^https?:$/.test(location.protocol) || !document.body) return {{ok:false, reason:'application page is not loaded'}};
   const visible = el => {{const r=el.getBoundingClientRect(), s=getComputedStyle(el);
     return !el.disabled && r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';}};
-  const required = [...document.querySelectorAll('input[required],select[required],textarea[required]')].filter(visible);
+  const required = [...document.querySelectorAll('input[required],select[required],textarea[required],input[aria-required=true],select[aria-required=true],textarea[aria-required=true]')].filter(visible);
   const missing = required.filter(el => {{
     if (el.type === 'radio') return ![...document.querySelectorAll('input[type=radio]')].some(other => other.name === el.name && other.checked);
     if (el.type === 'checkbox') {{

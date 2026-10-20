@@ -134,6 +134,45 @@ def test_source_apply_control_and_search_form_are_not_an_application_form():
     assert not search.verifies_application_for("Staff Software Engineer (UAE)")
 
 
+def _linkedin_resume_step():
+    return {"url": "https://www.linkedin.com/jobs/view/123456/", "title": "Engineer | Example | LinkedIn",
+            "text": "Apply to Example\nSelect or upload a resume", "headings": ["Apply to Example"],
+            "application_context": {"kind": "linkedin_easy_apply", "job_id": "123456", "role": "Engineer",
+                                    "company": "Example", "dialog_company": "Example", "actionable": True},
+            "inputs": [{"tag": "input", "type": "file", "label": "Resume", "form": "linkedin-easy-apply"}],
+            "buttons": [{"text": "Next", "type": "button", "form": "linkedin-easy-apply"}]}
+
+
+def test_manual_linkedin_inspection_checks_collected_job_id(tmp_path):
+    db = tmp_path / "jobs.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT, company TEXT)")
+        conn.executemany("INSERT INTO jobs VALUES(?, 'Engineer', 'Example')", [('li-123456',), ('li-999999',)])
+    payload = _linkedin_resume_step()
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False, tracker_sync=False),
+                             client=FakeClient(payload))
+    assert engine.inspect('li-123456').actionable_application_form
+    with pytest.raises(CDPError, match="exact role"):
+        engine.inspect('li-999999')
+
+
+def test_approved_linkedin_upload_still_refuses_ambiguous_file_control(tmp_path):
+    db = tmp_path / "jobs.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT, company TEXT)")
+        conn.execute("INSERT INTO jobs VALUES('li-123456', 'Engineer', 'Example')")
+    payload = _linkedin_resume_step()
+    payload['inputs'] = []
+    client = FakeClient(payload)
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False, tracker_sync=False,
+                                        expected_page_url=payload['url']), client)
+    resume = tmp_path / 'resume.pdf'
+    resume.write_bytes(b'%PDF-test')
+    with pytest.raises(CDPError, match="ambiguous or unavailable"):
+        engine.upload_file('li-123456', 'input[type=file]', str(resume), approved=True)
+    assert client.uploads == []
+
+
 def _final_review_form():
     return {
         **_rendered_form(), "inputs": [],
