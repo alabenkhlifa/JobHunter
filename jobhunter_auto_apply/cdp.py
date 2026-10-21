@@ -221,13 +221,21 @@ class CDPClient:
         self.evaluate(f"""(() => {{const e=document.querySelector({json.dumps(selector)});
           if(!e) throw Error('Control unavailable');
           e.scrollIntoView({{block:'center',behavior:'instant'}});}})()""")
-        position = self.evaluate(f"""(() => {{const e=document.querySelector({json.dumps(selector)});
-          if(!e||e.disabled) throw Error('Control unavailable');
-          const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
-          const top=document.elementFromPoint(x,y);
-          if(!r.width||!r.height||getComputedStyle(e).visibility==='hidden'||
-             (top!==e&&!e.contains(top))) throw Error('Control obscured');
-          return {{x,y}};}})()""")
+        previous = None
+        deadline = time.monotonic()+2
+        while time.monotonic() < deadline:
+            position = self.evaluate(f"""(() => {{const e=document.querySelector({json.dumps(selector)});
+              if(!e||e.disabled) throw Error('Control unavailable');
+              const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+              const top=document.elementFromPoint(x,y);
+              return r.width&&r.height&&getComputedStyle(e).visibility!=='hidden'&&
+                (top===e||e.contains(top)) ? {{x,y}} : null;}})()""")
+            if position and previous and all(abs(position[k]-previous[k])<.5 for k in ('x','y')):
+                break
+            previous = position
+            time.sleep(.05)
+        else:
+            raise CDPError('Control obscured or moving; no click was sent.')
         for kind in ("mousePressed", "mouseReleased"):
             self.call("Input.dispatchMouseEvent", {"type": kind, "button": "left",
                                                   "clickCount": 1, **position})

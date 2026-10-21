@@ -195,3 +195,14 @@ def test_uncertain_submit_is_persisted_and_cannot_be_repeated(tmp_path):
         assert json.loads(notes)['submit_outcome_unknown'] is True
     with pytest.raises(PermissionError, match='never resubmitted'):
         service.click_submit('job-1', 'button[type=submit]', approved=True)
+
+
+def test_client_name_from_approved_package_engagement_is_not_an_employer():
+    data = snapshot()
+    data['work'].insert(1, {**data['work'][0], 'prefix': 'experienceData[2]', 'company': 'Example Client'})
+    resume = copy.deepcopy(RESUME)
+    resume['experience'][0]['engagements'] = [{'name': 'Example Client - Approved Platform'}]
+    profile = {**PROFILE, 'experience': [{'company': 'Consultancy One'}, {'company': 'Consultancy Two'}]}
+    result = prefill.audit(data, resume, profile)
+    assert result['issues'] == ['client_parsed_as_duplicate_employer']
+    assert not result['manual_review']

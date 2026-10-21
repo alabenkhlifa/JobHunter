@@ -263,3 +263,12 @@ def test_unavailable_dependent_dropdown_requires_matching_parent_evidence(browse
     control = next(item for item in inspection.inputs if item['id'] == '-1_PersonProfileFields.State')
     assert bool(control['required']) is required
     assert ('County/State' in inspection.missing_required) is required
+
+
+def test_click_waits_for_obstruction_to_clear_and_sends_one_trusted_click(browser):
+    open_page, _, _ = browser
+    client = open_page("""<!doctype html><button id="next" onclick="if(event.isTrusted)window.clicks++">Next</button>
+      <div id="overlay" style="position:fixed;inset:0;background:white"></div>
+      <script>window.clicks=0;setTimeout(()=>document.getElementById('overlay').remove(),200)</script>""")
+    client.click('#next')
+    assert client.evaluate('window.clicks') == 1

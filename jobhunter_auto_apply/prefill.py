@@ -18,7 +18,7 @@ SNAPSHOT_JS = r"""(() => {
       location.pathname!=='/apply') return null;
   const shown=e=>!!e&&e.getBoundingClientRect().width>0&&getComputedStyle(e).visibility!=='hidden';
   const read=id=>{const e=document.getElementById(id);return !shown(e)?null:
-    e.type==='checkbox'?e.checked:e.tagName==='SELECT'?e.selectedOptions[0]?.text.trim()||'':e.value;};
+    e.type==='checkbox'?e.checked:e.tagName==='SELECT'?(e.value?e.selectedOptions[0]?.text.trim()||'':''):e.value;};
   const rows=(prefix,suffix)=>[...document.querySelectorAll('input[id]')]
     .filter(e=>new RegExp('^'+prefix+'\\[\\d+\\]\\.'+suffix+'$').test(e.id)&&shown(e))
     .map(e=>e.id.slice(0,e.id.lastIndexOf('.')));
@@ -134,12 +134,14 @@ def audit(snapshot: dict | None, resume: dict, profile: dict, scoped: dict | Non
     periods = [_period(str(r.get('dates') or '')) for r in expected]
     employers = {_norm(r.get('company')) for r in profile.get('experience', [])}
     client_names: set[str] = set()
-    for role in profile.get('experience', []):
+    for role in [*profile.get('experience', []), *expected]:
         for engagement in role.get('engagements', []):
             if isinstance(engagement, dict):
-                for key in ('client', 'client_name', 'name', 'company', 'product', 'project'):
+                for key in ('client', 'client_name', 'name', 'label', 'company', 'product', 'project'):
                     if isinstance(engagement.get(key), str):
-                        client_names.add(_norm(engagement[key]))
+                        label = engagement[key]
+                        client_names.add(_norm(label))
+                        client_names.add(_norm(re.split(r'\s+[—–-]\s+', label)[0]))
     used: set[int] = set()
     for row in snapshot.get('work', []):
         prefix = str(row.get('prefix') or '')

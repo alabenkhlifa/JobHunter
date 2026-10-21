@@ -208,7 +208,8 @@ class PageInspection:
         query = parse_qs(parsed.query, keep_blank_values=True)
         clarivate = False
         if parsed.hostname == 'careers.clarivate.com' and parsed.path == '/apply':
-            steps = {('3', 'jobSpecificQuestions'): 'questions',
+            steps = {('2', 'workAndEducation'): 'experience',
+                     ('3', 'jobSpecificQuestions'): 'questions',
                      ('4', 'voluntaryInformation'): 'consent',
                      ('5', 'applicationReview'): 'review'}
             pair = (query.get('step', [''])[0], query.get('stepname', [''])[0])
@@ -218,7 +219,11 @@ class PageInspection:
                 previous = any(b.get('id') == 'previous' and b.get('text') == 'Previous Step' for b in controls)
                 next_step = any(b.get('id') == 'next' and b.get('text') == 'Next Step' for b in controls)
                 owned = [x for x in self.inputs if x.get('form') == form.get('id') and not x.get('disabled')]
-                if kind == 'questions':
+                if kind == 'experience':
+                    clarivate |= previous and next_step and all(
+                        any(x.get('required') and str(x.get('id', '')).startswith(prefix) for x in owned)
+                        for prefix in ('experienceData[', 'educationData['))
+                elif kind == 'questions':
                     clarivate |= previous and next_step and any(
                         x.get('required') and str(x.get('id', '')).startswith('jsqData.') for x in owned)
                 elif kind == 'consent':
@@ -1103,11 +1108,13 @@ class AutoApplyEngine:
         try:
             client.click(selector)
             deadline = time.monotonic()+client.timeout
+            title, company, _ = _expected_job(self.config.db_path, job_id)
             while time.monotonic() < deadline:
                 time.sleep(.15)
-                if client.evaluate('location.href') != self.config.expected_page_url:
-                    return self.inspect(job_id)
                 current = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
+                if (current.url != self.config.expected_page_url and
+                        current.verifies_application_for(title, company, job_id=job_id)):
+                    return self.inspect(job_id)
                 if (getattr(current, 'prefill_snapshot', None) or {}).get('errors'):
                     raise CDPError('The ATS reported validation errors; inspect the form before continuing.')
             raise CDPError('Next outcome is unverified; inspect the page without repeating the click.')

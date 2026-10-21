@@ -165,6 +165,7 @@ def test_clarivate_rendered_unbound_form_is_not_verified(change):
 
 
 @pytest.mark.parametrize('step,name,content', [
+    ('2', 'workAndEducation', '<label>Job Title<input id="experienceData[0].title" required></label><label>School<input id="educationData[0].schoolName" required></label><button id="next">Next Step</button>'),
     ('3', 'jobSpecificQuestions', '<label>Work authorization<select id="jsqData.test" required><option>No</option></select></label><button id="next">Next Step</button>'),
     ('4', 'voluntaryInformation', '<label>Consent<input id="agreementCheck" type="checkbox" required></label><button id="next">Next Step</button>'),
     ('5', 'applicationReview', '<h2>My Information</h2><h2>My Experience</h2><h3>Work Experience</h3><h3>Education</h3><button type="submit">Submit</button>'),
@@ -193,3 +194,10 @@ def test_clarivate_dom_snapshot_captures_bad_prefill_without_contact_details():
     result = audit(page.prefill_snapshot, {'experience': [{'company': 'Consultancy', 'title': 'Engineer',
                    'dates': '08/2019 - 09/2020'}]}, {})
     assert result['issues'] == ['parsed_employer_mismatch']
+
+
+def test_clarivate_empty_select_placeholders_are_not_parsed_education_facts():
+    html = '<form><input id="educationData[0].schoolName"><select id="educationData[0].degree"><option value="">Please select</option></select><select id="educationData[0].fieldOfStudy"><option value="">Please select</option></select></form>'
+    page = inspect_html(html, CLARIVATE_URL)
+    row = page.prefill_snapshot['education'][0]
+    assert row['degree'] == row['field'] == ''
