@@ -1115,7 +1115,8 @@ class AutoApplyEngine:
                 if (current.url != self.config.expected_page_url and
                         current.verifies_application_for(title, company, job_id=job_id)):
                     return self.inspect(job_id)
-                if (getattr(current, 'prefill_snapshot', None) or {}).get('errors'):
+                if (current.url == self.config.expected_page_url and
+                        (getattr(current, 'prefill_snapshot', None) or {}).get('errors')):
                     raise CDPError('The ATS reported validation errors; inspect the form before continuing.')
             raise CDPError('Next outcome is unverified; inspect the page without repeating the click.')
         except (BrowserDialogError, BrowserTimeoutError) as exc:

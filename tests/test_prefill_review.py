@@ -206,3 +206,24 @@ def test_client_name_from_approved_package_engagement_is_not_an_employer():
     result = prefill.audit(data, resume, profile)
     assert result['issues'] == ['client_parsed_as_duplicate_employer']
     assert not result['manual_review']
+
+
+def test_next_waits_for_rendered_destination_without_treating_its_empty_fields_as_failed_submit(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from jobhunter_auto_apply import engine as module
+    service, _, _ = engine(tmp_path, snapshot())
+    destination = URL.replace('step=2&stepname=workAndEducation', 'step=3&stepname=jobSpecificQuestions')
+    browser = SimpleNamespace(timeout=1, click=Mock(), evaluate=lambda _: 'Next Step')
+    monkeypatch.setattr(service, 'connect', lambda: browser)
+    monkeypatch.setattr(service, '_verify_before_mutation', lambda *_: SimpleNamespace(
+        url=URL, missing_required=[], invalid_fields=[]))
+    pending = SimpleNamespace(url=destination, verifies_application_for=lambda *_, **__: False,
+                              prefill_snapshot={'errors': ['Please enter all required fields']})
+    loaded = SimpleNamespace(url=destination, verifies_application_for=lambda *_, **__: True)
+    pages = iter([pending, loaded])
+    monkeypatch.setattr(module, 'inspect_page', lambda *_, **__: next(pages))
+    monkeypatch.setattr(module.time, 'sleep', lambda _: None)
+    monkeypatch.setattr(service, 'inspect', Mock(return_value=loaded))
+    assert service.advance('job-1', '#next', approved=True) is loaded
+    browser.click.assert_called_once_with('#next')
