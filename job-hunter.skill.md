@@ -613,6 +613,15 @@ employers or locations, or override its retry policy after failed lookups.
    for parsing to finish, then inspect again before filling fields so that
    prefill cannot overwrite confirmed answers. A cleared file input does not
    mean upload failed when the form displays its stored current filename.
+   If CDP inspection times out after upload or Next, inspect a Pi desktop
+   screenshot before restarting Chromium. A native JavaScript alert can block
+   page inspection: Clarivate shows both `Resume uploaded successfully` and
+   `Please upload resume` this way. Acknowledge only the observed informational
+   or validation alert, then verify the accepted file or resolve the stated
+   requirement. Do not accept unknown consent, submission or verification
+   prompts. After parsing, recheck country, phone prefix and earlier corrected
+   answers; the parser can replace them. Never repeat an upload or Next click
+   while its result is hidden behind a dialog.
    A hidden file input is eligible only through its visible associated
    label. Never unhide inactive panels or bypass the rendered-form check.
    A final review step may have no editable fields. The verifier accepts it
