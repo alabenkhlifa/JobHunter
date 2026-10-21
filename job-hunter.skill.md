@@ -613,20 +613,31 @@ employers or locations, or override its retry policy after failed lookups.
    for parsing to finish, then inspect again before filling fields so that
    prefill cannot overwrite confirmed answers. A cleared file input does not
    mean upload failed when the form displays its stored current filename.
-   If CDP inspection times out after upload or Next, inspect a Pi desktop
-   screenshot before restarting Chromium. A native JavaScript alert can block
-   page inspection: Clarivate shows both `Resume uploaded successfully` and
-   `Please upload resume` this way. Acknowledge only the observed informational
-   or validation alert, then verify the accepted file or resolve the stated
-   requirement. Do not accept unknown consent, submission or verification
-   prompts. After parsing, recheck country, phone prefix and earlier corrected
-   answers; the parser can replace them. Never repeat an upload or Next click
-   while its result is hidden behind a dialog.
+   Use the auto-apply CDP client for uploads and step navigation. It subscribes
+   before actions and acknowledges only the recognized Clarivate upload-success
+   and required-field alerts. Unknown consent, submission or verification dialogs
+   stop for review. A timeout captures the Pi desktop when available; inspect it
+   and the previous action's outcome before continuing. Never repeat an upload,
+   Next or final-submit click while its outcome is unknown.
+   After CV parsing, audit the extracted fields against the permanent approved
+   package and confirmed profile (Clarivate adapter):
+   `python -m jobhunter_auto_apply.cli --cdp-port 9333 reconcile-prefill --job-id JOB_ID --page-url EXACT_URL`.
+   With the owner's existing preparation approval, add `--approved` to repair
+   unambiguous source-backed country, phone-prefix, employer/title and education
+   mismatches. The command saves a private before-snapshot and rechecks every
+   edit; unknown facts, ambiguous rows and unexplained validation errors require
+   review. It never edits the profile or approved PDFs. Other ATS parsers still
+   require manual comparison against the approved package.
+   Advance one reviewed step with
+   `python -m jobhunter_auto_apply.cli --cdp-port 9333 advance --job-id JOB_ID --page-url EXACT_URL --selector '#next' --approved`.
+   Use the actual visible continuation selector. This checks parser output and
+   validation before clicking once; it cannot authorize final submission.
    A hidden file input is eligible only through its visible associated
    label. Never unhide inactive panels or bypass the rendered-form check.
    A final review step may have no editable fields. The verifier accepts it
-   only with an explicit final-submit notice and enabled Submit Application
-   control in the same visible form, plus the exact role and employer identity.
+   only with a supported review layout and an enabled submission control in the
+   same visible form, plus the exact role, employer and requisition identity.
+   Clarivate has explicit question, consent and final-review step adapters.
    Use the normal approved submit helper for this step. If it rejects a valid
    review step, report the verifier error for repair; do not ask the owner to
    submit manually merely because the page has no inputs.

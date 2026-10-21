@@ -49,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cdp-host", default="127.0.0.1")
     parser.add_argument("--cdp-port", type=int, default=9222, help="Chromium CDP port (Pi browser: 9333)")
     parser.add_argument("--policy", default=None, help="Autopilot policy file for --policy-run (gate default otherwise)")
+    parser.add_argument("--candidate-profile", default="data/master-profile.json",
+                        help="Confirmed profile for reviewing ATS CV parser output")
     sub = parser.add_subparsers(dest="command", required=True)
 
     inspect = sub.add_parser("inspect", help="Inspect current browser page and record draft/blocker state")
@@ -59,6 +61,17 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--profile", default="data/master-profile.json",
                          help="Policy runs without --answers: owner profile used to build answers")
     _approval(inspect, None)
+
+    reconcile = sub.add_parser('reconcile-prefill', help='Audit ATS CV extraction against the approved package')
+    reconcile.add_argument('--job-id', required=True)
+    reconcile.add_argument('--page-url', required=True, help=PAGE_URL_HELP)
+    reconcile.add_argument('--approved', action='store_true', help='Repair unambiguous source-backed fields; otherwise audit only')
+
+    advance = sub.add_parser('advance', help='Advance one reviewed step after checking CV parser output')
+    advance.add_argument('--job-id', required=True)
+    advance.add_argument('--page-url', required=True, help=PAGE_URL_HELP)
+    advance.add_argument('--selector', required=True)
+    advance.add_argument('--approved', action='store_true', help='Owner approved preparation and the completed answers')
 
     upload = sub.add_parser("upload", help="Upload a file to a file input after explicit approval")
     upload.add_argument("--job-id", required=True)
@@ -122,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         cdp_host=args.cdp_host,
         cdp_port=args.cdp_port,
         expected_page_url=args.page_url,
+        profile_path=args.candidate_profile,
         verify_submission=True,
         policy_run=policy_run,
         policy_path=args.policy,
@@ -131,7 +145,13 @@ def main(argv: list[str] | None = None) -> int:
     approved = bool(getattr(args, "approved", False))
 
     try:
-        if args.command == "inspect":
+        if args.command == 'reconcile-prefill':
+            result = engine.reconcile_prefill(args.job_id, approved=approved)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return EXIT_BLOCKED if result['issues'] else EXIT_OK
+        elif args.command == 'advance':
+            inspection = engine.advance(args.job_id, args.selector, approved=approved)
+        elif args.command == "inspect":
             inspection = engine.inspect(args.job_id)
         elif args.command == "upload":
             inspection = engine.upload_file(args.job_id, args.selector, args.file, approved=approved)

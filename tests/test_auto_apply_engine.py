@@ -584,7 +584,7 @@ def test_approved_upload_preserves_permanent_package_directory(tmp_path, monkeyp
                                         expected_page_url="https://example.test/apply"), client=client)
     monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
     monkeypatch.setattr(engine, "inspect", lambda *args, **kwargs: None)
-    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args: None)
+    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args, **kwargs: None)
     engine.upload_file("job-1", "input[type=file]", str(cached), approved=True)
     with closing(sqlite3.connect(db)) as conn, conn:
         assert conn.execute("SELECT package_path,stage FROM applications").fetchone() == (str(package), "resume_uploaded")
@@ -600,7 +600,7 @@ def test_scoped_submit_records_attempt_and_skips_global_tracker(tmp_path, monkey
                                         tracker_sync=False, verify_submission=True,
                                         expected_page_url="https://example.test/apply"), client)
     monkeypatch.setattr(engine, "inspect", Mock())
-    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args: None)
+    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args, **kwargs: None)
     engine.click_submit("job-1", '[id="submit"]', approved=True)
     with closing(sqlite3.connect(tmp_path / "jobs.db")) as db, db:
         assert db.execute("SELECT stage FROM applications").fetchone()[0] == "submission_attempted"
@@ -613,7 +613,7 @@ def test_scoped_missing_submit_control_never_records_success(tmp_path, monkeypat
     client.evaluate.side_effect = ["https://example.test/apply", {"ok": False}]
     engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), tracker_sync=False, verify_submission=True,
                                         expected_page_url="https://example.test/apply"), client)
-    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args: None)
+    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args, **kwargs: None)
     with pytest.raises(PermissionError, match="not submitted"):
         engine.click_submit("job-1", '[id="submit"]', approved=True)
     assert not (tmp_path / "jobs.db").exists()
@@ -625,7 +625,7 @@ def test_submit_is_only_an_attempt_until_receipt_is_verified(tmp_path, monkeypat
     engine = AutoApplyEngine(ApplyConfig(db_path=str(tmp_path / "jobs.db"), tracker_sync=False,
                                         expected_page_url="https://example.test/apply"), client)
     monkeypatch.setattr(engine, "inspect", Mock())
-    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args: None)
+    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args, **kwargs: None)
     engine.click_submit("job-1", "button[type=submit]", approved=True)
     with closing(sqlite3.connect(tmp_path / "jobs.db")) as db:
         assert db.execute("SELECT stage FROM applications").fetchone()[0] == "submission_attempted"
@@ -656,7 +656,7 @@ def test_container_upload_uses_readonly_mount_path_after_host_validation(tmp_pat
                                         expected_page_url="https://example.test/approved"), client)
     monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
     monkeypatch.setattr(engine, "inspect", Mock())
-    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args: None)
+    monkeypatch.setattr(engine, "_verify_before_mutation", lambda *args, **kwargs: None)
     engine.upload_file("job-1", '[id="resume"]', str(document), approved=True)
     client.upload_file.assert_called_once_with('[id="resume"]', "/documents/job package/Resume.pdf")
     assert document.stat().st_mode & 0o777 == 0o600

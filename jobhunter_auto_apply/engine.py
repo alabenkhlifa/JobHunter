@@ -20,6 +20,8 @@ import json
 import os
 import re
 import sqlite3
+import shutil
+import subprocess
 import time
 import unicodedata
 from dataclasses import dataclass, field, replace
@@ -29,8 +31,9 @@ from urllib.parse import parse_qs, urlsplit
 
 import scraper
 
-from .cdp import CDPClient, CDPError, connect_first_page
+from .cdp import BrowserDialogError, BrowserTimeoutError, CDPClient, CDPError, connect_first_page
 from .email_verification import complete_email_verification
+from . import prefill
 
 
 DEFAULT_BLOCKLIST_TERMS = (
@@ -79,6 +82,7 @@ class ApplyConfig:
     tracker_sync: bool = True
     verify_submission: bool = False
     expected_page_url: str | None = None
+    profile_path: str = "data/master-profile.json"
     # When Chromium runs in the managed container, output_dir is mounted here
     # read-only. Local validation keeps using host paths; only CDP sees this path.
     browser_output_dir: str | None = None
@@ -121,6 +125,7 @@ class PageInspection:
     missing_required: list[str] = field(default_factory=list)
     invalid_fields: list[str] = field(default_factory=list)
     frame_path: list[str] = field(default_factory=list)
+    prefill_issues: list[str] = field(default_factory=list)
 
     @property
     def loaded_application_page(self) -> bool:
@@ -135,6 +140,7 @@ class PageInspection:
             and not self.sensitive_questions
             and not self.missing_required
             and not self.invalid_fields
+            and not self.prefill_issues
         )
 
     @property
@@ -195,7 +201,34 @@ class PageInspection:
                     for button in self.buttons)
             for form in getattr(self, "forms", [])
         )
-        return bool(editable or resume_first or final_review)
+        # Clarivate's later steps have questionnaire/consent controls, followed
+        # by an input-free review. Keep this adapter bound to exact step names,
+        # one rendered form and its controls; identity is checked separately.
+        parsed = urlsplit(self.url)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        clarivate = False
+        if parsed.hostname == 'careers.clarivate.com' and parsed.path == '/apply':
+            steps = {('3', 'jobSpecificQuestions'): 'questions',
+                     ('4', 'voluntaryInformation'): 'consent',
+                     ('5', 'applicationReview'): 'review'}
+            pair = (query.get('step', [''])[0], query.get('stepname', [''])[0])
+            kind = steps.get(pair) if len(query.get('step', [])) == len(query.get('stepname', [])) == 1 else None
+            for form in getattr(self, 'forms', []):
+                controls = [b for b in self.buttons if b.get('form') == form.get('id') and not b.get('disabled')]
+                previous = any(b.get('id') == 'previous' and b.get('text') == 'Previous Step' for b in controls)
+                next_step = any(b.get('id') == 'next' and b.get('text') == 'Next Step' for b in controls)
+                owned = [x for x in self.inputs if x.get('form') == form.get('id') and not x.get('disabled')]
+                if kind == 'questions':
+                    clarivate |= previous and next_step and any(
+                        x.get('required') and str(x.get('id', '')).startswith('jsqData.') for x in owned)
+                elif kind == 'consent':
+                    clarivate |= previous and next_step and any(
+                        x.get('id') == 'agreementCheck' and x.get('type') == 'checkbox' and x.get('required') for x in owned)
+                elif kind == 'review':
+                    clarivate |= previous and not owned and all(
+                        text in str(form.get('text', '')) for text in ('My Information', 'My Experience', 'Work Experience', 'Education')) and any(
+                            b.get('text') == 'Submit' and b.get('type') == 'submit' for b in controls)
+        return bool(editable or resume_first or final_review or clarivate)
 
     def verifies_application_for(self, job_title: str, job_company: str | None = None,
                                  job_location: str | None = None, *, job_id: str | None = None) -> bool:
@@ -394,13 +427,22 @@ def _post_submission_stages() -> frozenset[str]:
 def _record(config: ApplyConfig, job_id: str, stage: str, **kwargs: Any) -> int:
     if config.policy_run:
         kwargs["notes"] = _autopilot_notes(kwargs.get("notes"), config.run_id)
-        # record_application_stage updates one row in place. Once a submit was
-        # clicked that row is the only proof, so a later inspection or blocker
-        # may add notes and evidence but never lowers the stage again.
-        latest = _latest_application(config.db_path, job_id)
-        if latest and stage not in _post_submission_stages() and (
-                latest[1] or (latest[0] or "") in _post_submission_stages()):
-            stage = latest[0] or stage
+    # A reconnect/inspection must not erase an uncertain submit, including in
+    # manual mode. Otherwise the next process could repeat the same click.
+    latest = _latest_application(config.db_path, job_id)
+    if latest and stage not in _post_submission_stages() and (
+            latest[1] or (latest[0] or "") in _post_submission_stages()):
+        stage = latest[0] or stage
+        with sqlite3.connect(config.db_path) as previous:
+            row = previous.execute('SELECT notes FROM applications WHERE job_id=? ORDER BY id DESC LIMIT 1', (job_id,)).fetchone()
+        if row and row[0] and kwargs.get('notes'):
+            try:
+                notes = json.loads(row[0])
+                if not isinstance(notes, dict): notes = {'previous_notes': row[0]}
+            except (TypeError, ValueError):
+                notes = {'previous_notes': row[0]}
+            notes['latest_diagnostic'] = kwargs['notes']
+            kwargs['notes'] = json.dumps(notes)
     conn = _connect_db(config.db_path)
     try:
         return scraper.record_application_stage(conn, job_id, stage, **kwargs,
@@ -709,9 +751,10 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     }
   };
   walk(window, []);
-  return {...root, frame_candidates: candidates};
+  return {...root, frame_candidates: candidates, prefill_snapshot: __JOBHUNTER_PREFILL__};
 })()
 """
+    expression = expression.replace('__JOBHUNTER_PREFILL__', prefill.SNAPSHOT_JS)
     client.frame_path = ()
     data = client.evaluate(expression)
     if not isinstance(data, dict):
@@ -784,6 +827,7 @@ def _inspection_from_data(data: dict[str, Any], blocklist_terms: tuple[str, ...]
     # CLI's public inspection schema or exposing duplicate applicant details.
     inspection.forms = data.get("forms") or []
     inspection.application_context = data.get("application_context") or {}
+    inspection.prefill_snapshot = data.get('prefill_snapshot')
     return inspection
 
 
@@ -852,17 +896,73 @@ class AutoApplyEngine:
             )
         return self.client
 
-    def _verify_before_mutation(self, job_id: str, client: CDPClient) -> PageInspection:
+    def _prefill_audit(self, job_id: str, inspection: PageInspection) -> dict:
+        snapshot = getattr(inspection, 'prefill_snapshot', None)
+        if not snapshot:
+            return {'supported': False, 'issues': [], 'operations': [], 'manual_review': []}
+        try:
+            sources = prefill.load_sources(self.config.db_path, job_id, self.config.profile_path)
+            result = prefill.audit(snapshot, *sources[:3])
+            result['source_sha256'] = sources[3]
+        except (OSError, ValueError, sqlite3.Error, TypeError, KeyError):
+            result = {'supported': True, 'issues': ['approved_prefill_sources_unavailable'],
+                      'operations': [], 'manual_review': ['approved_prefill_sources_unavailable']}
+        inspection.prefill_issues = result['issues']
+        return result
+
+    def _browser_issue(self, job_id: str, exc: CDPError) -> None:
+        path = None
+        runtime = Path(os.getenv('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
+        display = os.getenv('WAYLAND_DISPLAY', 'wayland-0')
+        if shutil.which('grim') and (runtime/display).is_socket():
+            destination = _job_output_dir(self.config.output_dir, job_id)/'browser-dialog.png'
+            try:
+                subprocess.run(['grim', str(destination)], check=True, capture_output=True, timeout=5,
+                    env={**os.environ, 'XDG_RUNTIME_DIR': str(runtime), 'WAYLAND_DISPLAY': display})
+                path = str(destination)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        latest = _latest_application(self.config.db_path, job_id)
+        stage = (latest[0] if latest and (latest[1] or latest[0] in _post_submission_stages())
+                 else 'blocked_browser_dialog')
+        _record(self.config, job_id, stage, application_url=self.config.expected_page_url,
+                evidence_path=path, notes=(None if latest and stage in _post_submission_stages() else
+                    'Inspect the desktop dialog and previous action outcome; do not retry blindly.'),
+                error=str(exc))
+
+    def _submit_evaluate(self, job_id: str, client: CDPClient, expression: str) -> Any:
+        try:
+            return client.evaluate(expression)
+        except (BrowserDialogError, BrowserTimeoutError) as exc:
+            # The browser may have clicked before it stopped responding. Keep
+            # a durable uncertainty marker so reconnecting cannot resubmit.
+            _record(self.config, job_id, 'submission_attempted',
+                    application_url=self.config.expected_page_url,
+                    notes=json.dumps({'submit_outcome_unknown': True, 'retry_forbidden': True,
+                                      'exact_role_form_verified': True}), error=str(exc))
+            self._browser_issue(job_id, exc)
+            raise
+
+    def _verify_before_mutation(self, job_id: str, client: CDPClient, *, check_prefill: bool = True) -> PageInspection:
         """Check the current rendered form before sending a document or clicking submit."""
         try:
             inspection = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
             title, company, _ = _expected_job(self.config.db_path, job_id)
+        except (BrowserDialogError, BrowserTimeoutError) as exc:
+            self._browser_issue(job_id, exc)
+            raise
         except (CDPError, OSError):
             _record_unverified(self.config, job_id)
             raise
         if not inspection.verifies_application_for(title, company, _expected_location(self.config.db_path, job_id), job_id=job_id):
             _record_unverified(self.config, job_id, url=inspection.url)
             raise CDPError("exact role and employer application form were not verified; no browser action was taken")
+        if inspection.blockers:
+            raise CDPError('A site verification blocker is visible; no browser action was taken.')
+        if check_prefill and self._prefill_audit(job_id, inspection)['issues']:
+            _record(self.config, job_id, 'blocked_prefill_review', application_url=inspection.url,
+                    notes=json.dumps({'prefill_issues': inspection.prefill_issues}), error='cv_parser_output_requires_review')
+            raise CDPError('CV parser output differs from confirmed facts; reconcile the form before continuing.')
         return inspection
 
     def inspect(self, job_id: str, *, stage: str = "draft_inspected") -> PageInspection:
@@ -871,6 +971,9 @@ class AutoApplyEngine:
         try:
             client = self.connect()
             inspection = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
+        except (BrowserDialogError, BrowserTimeoutError) as exc:
+            self._browser_issue(job_id, exc)
+            raise
         except (CDPError, OSError):
             _record_unverified(self.config, job_id)
             raise
@@ -893,9 +996,16 @@ class AutoApplyEngine:
                 client.screenshot(evidence_path)
             except Exception:
                 evidence_path = None
+        self._prefill_audit(job_id, inspection)
+        if self.config.policy_run and inspection.prefill_issues:
+            _record(self.config, job_id, 'blocked_prefill_review', application_url=inspection.url,
+                    notes=json.dumps({'prefill_issues': inspection.prefill_issues}), error='cv_parser_output_requires_review')
+            raise CDPError('CV parser output requires owner review; no policy action was taken.')
         if self.config.policy_run:
             return self._record_policy_inspection(job_id, inspection, stage, evidence_path)
         status = "blocked_unknown_questions" if inspection.sensitive_questions else stage
+        if inspection.prefill_issues:
+            status = 'blocked_prefill_review'
         if inspection.blockers:
             status = "blocked_site_challenge"
         _record(
@@ -914,12 +1024,96 @@ class AutoApplyEngine:
                     "sensitive_questions": inspection.sensitive_questions,
                     "missing_required": inspection.missing_required,
                     "invalid_fields": inspection.invalid_fields,
+                    "prefill_issues": inspection.prefill_issues,
                 },
                 ensure_ascii=False,
             ),
             error="; ".join(inspection.blockers or inspection.sensitive_questions) or None,
         )
         return inspection
+
+    def reconcile_prefill(self, job_id: str, *, approved: bool = False) -> dict:
+        """Audit first; repair only unambiguous facts with explicit manual approval."""
+        if not self.config.expected_page_url or self.config.policy_run:
+            raise PermissionError('Prefill reconciliation requires the exact URL and owner-driven manual flow.')
+        self._refuse_resubmit(job_id)
+        client = self.connect()
+        before = None
+        source_sha = None
+        changes = []
+        for _ in range(80):
+            inspection = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
+            title, company, _ = _expected_job(self.config.db_path, job_id)
+            if (inspection.url != self.config.expected_page_url or inspection.blockers
+                    or not inspection.verifies_application_for(title, company, job_id=job_id)):
+                raise CDPError('Exact unobstructed application form is required for reconciliation.')
+            result = self._prefill_audit(job_id, inspection)
+            if not result['supported']:
+                raise CDPError('No supported CV parser audit adapter exists for this form.')
+            if source_sha is not None and source_sha != result.get('source_sha256'):
+                raise CDPError('Approved prefill sources changed during reconciliation.')
+            source_sha = result.get('source_sha256')
+            if before is None:
+                before = getattr(inspection, 'prefill_snapshot', None)
+                if approved and result['issues'] and not result['manual_review']:
+                    folder = _job_output_dir(self.config.output_dir, job_id)
+                    backup = folder/f'prefill-before-{time.time_ns()}.json'
+                    backup.write_text(json.dumps(before, ensure_ascii=False))
+                    backup.chmod(0o600)
+            if not approved or not result['issues'] or result['manual_review']:
+                result['changes'] = changes
+                if approved and not result['issues']:
+                    self.inspect(job_id)
+                return result
+            # Remove surplus rows first, then re-read after every operation.
+            operations = sorted(result['operations'], key=lambda op: op['kind'] != 'remove')
+            op = operations[0]
+            if op['kind'] == 'remove':
+                client.click(op['selector'])
+            elif op['kind'] == 'select':
+                client.select_option(op['selector'], op['value'])
+            else:
+                client.fill(op['selector'], op['value'])
+            # Wait for the controlled form to commit the change, without
+            # repeating a click or typing operation that may already have run.
+            deadline = time.monotonic()+3
+            signature = json.dumps(getattr(inspection, 'prefill_snapshot', None), sort_keys=True)
+            while time.monotonic() < deadline:
+                time.sleep(.1)
+                snapshot = client.evaluate(prefill.SNAPSHOT_JS)
+                if json.dumps(snapshot, sort_keys=True) != signature:
+                    break
+            else:
+                raise CDPError('Prefill edit did not settle; inspect the form before retrying.')
+            changes.append({'kind': op['kind'], 'selector': op['selector']})
+        raise CDPError('Prefill repair limit reached; review the form.')
+
+    def advance(self, job_id: str, selector: str, *, approved: bool = False) -> PageInspection:
+        if not approved or not self.config.expected_page_url or self.config.policy_run:
+            raise PermissionError('Advancing requires owner-approved preparation and the exact page URL.')
+        self._refuse_resubmit(job_id)
+        client = self.connect()
+        inspection = self._verify_before_mutation(job_id, client)
+        if inspection.url != self.config.expected_page_url or inspection.missing_required or inspection.invalid_fields:
+            raise CDPError('Required or invalid fields remain; no Next action was taken.')
+        button = client.evaluate(f"""(() => {{const e=document.querySelector({json.dumps(selector)});
+          return e&&e.tagName==='BUTTON'&&!e.disabled ? e.innerText.trim() : null;}})()""")
+        if button not in {'Next', 'Next Step', 'Continue', 'Review'}:
+            raise PermissionError('Only a continuation control is allowed; final submission is separately approved.')
+        try:
+            client.click(selector)
+            deadline = time.monotonic()+client.timeout
+            while time.monotonic() < deadline:
+                time.sleep(.15)
+                if client.evaluate('location.href') != self.config.expected_page_url:
+                    return self.inspect(job_id)
+                current = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
+                if (getattr(current, 'prefill_snapshot', None) or {}).get('errors'):
+                    raise CDPError('The ATS reported validation errors; inspect the form before continuing.')
+            raise CDPError('Next outcome is unverified; inspect the page without repeating the click.')
+        except (BrowserDialogError, BrowserTimeoutError) as exc:
+            self._browser_issue(job_id, exc)
+            raise
 
     def _record_policy_inspection(self, job_id: str, inspection: PageInspection, stage: str,
                                   evidence_path: str | None) -> PageInspection:
@@ -990,7 +1184,7 @@ class AutoApplyEngine:
         client = self.connect()
         if self.config.expected_page_url is not None and client.evaluate("location.href") != self.config.expected_page_url:
             raise PermissionError("The approved application page changed before upload.")
-        inspection = self._verify_before_mutation(job_id, client)
+        inspection = self._verify_before_mutation(job_id, client, check_prefill=False)
         if getattr(inspection, "application_context", {}).get("kind") == "linkedin_easy_apply":
             owned_files = [item for item in inspection.inputs if item.get("type") == "file"]
             if len(owned_files) != 1 or not client.evaluate(f"""(() => {{
@@ -1000,7 +1194,11 @@ class AutoApplyEngine:
                 raise CDPError("the LinkedIn resume upload control is ambiguous or unavailable")
         if client.evaluate("location.href") != self.config.expected_page_url:
             raise PermissionError("The approved application page changed before upload.")
-        client.upload_file(selector, upload_path)
+        try:
+            client.upload_file(selector, upload_path)
+        except (BrowserDialogError, BrowserTimeoutError) as exc:
+            self._browser_issue(job_id, exc)
+            raise
         time.sleep(1)
         _record(self.config, job_id, "resume_uploaded")
         return self.inspect(job_id, stage="after_upload")
@@ -1028,12 +1226,13 @@ class AutoApplyEngine:
             raise PermissionError("submit requires explicit approval")
         if self.config.expected_page_url is None:
             raise PermissionError("the approved application page URL is required for submission")
+        self._refuse_resubmit(job_id)
         client = self.connect()
         if client.evaluate("location.href") != self.config.expected_page_url:
             raise PermissionError("The approved application page changed before submission.")
         self._verify_before_mutation(job_id, client)
         requested_at = dt.datetime.now(dt.timezone.utc)
-        result = client.evaluate(
+        result = self._submit_evaluate(job_id, client,
             f"""
 (() => {{
   if ({json.dumps(self.config.expected_page_url)} !== null && location.href !== {json.dumps(self.config.expected_page_url)}) return {{ok:false, reason:'page changed'}};
@@ -1061,6 +1260,9 @@ class AutoApplyEngine:
   if (challenge) return {{ok:false, reason:'human verification is open'}};
   const el = document.querySelector({json.dumps(selector)});
   if (!el || el.disabled) return {{ok:false, reason:'selector unavailable'}};
+  el.scrollIntoView({{block:'center',behavior:'instant'}});
+  const rect = el.getBoundingClientRect(), top = document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);
+  if (!visible(el) || (top !== el && !el.contains(top))) return {{ok:false, reason:'submit control is obscured'}};
   el.click();
   return {{ok:true}};
 }})()

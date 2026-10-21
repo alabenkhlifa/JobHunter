@@ -13,6 +13,7 @@ import pytest
 
 from jobhunter_auto_apply.cdp import CDPClient, CDPError, list_targets
 from jobhunter_auto_apply.engine import inspect_page
+from jobhunter_auto_apply import cdp
 
 
 pytestmark = pytest.mark.skipif(os.environ.get('JOBHUNTER_BROWSER_TESTS') != '1',
@@ -114,6 +115,50 @@ def test_inspection_and_upload_use_the_same_embedded_form(browser, tmp_path):
     client.call('Runtime.evaluate', {'expression': "document.querySelector('#icims').hidden = true"})
     with pytest.raises(CDPError, match='no longer accessible'):
         client.evaluate("document.querySelector('#cv')")
+
+
+def test_native_dialog_success_is_handled_while_the_command_is_pending(browser, monkeypatch):
+    open_page, _, base = browser
+    monkeypatch.setattr(cdp, 'TRUSTED_ALERT_ORIGINS', frozenset({base}))
+    client = open_page('<!doctype html><title>Synthetic application</title>')
+    assert client.evaluate("alert('Resume uploaded successfully'); 42") == 42
+    assert client.evaluate('document.readyState') == 'complete'
+    assert client.dialog_events[-1] == {'type': 'alert', 'action': 'success'}
+
+
+def test_delayed_upload_alert_is_drained_before_upload_reports_acceptance(browser, monkeypatch, tmp_path):
+    open_page, _, base = browser
+    monkeypatch.setattr(cdp, 'TRUSTED_ALERT_ORIGINS', frozenset({base}))
+    client = open_page('''<!doctype html><input id="cv" type="file" onchange="
+      setTimeout(()=>{alert('Resume uploaded successfully');const p=document.createElement('p');
+      p.textContent=this.files[0].name;const a=document.createElement('a');a.href='#';
+      a.textContent='Download';p.appendChild(a);document.body.appendChild(p)},200)">''')
+    document = tmp_path/'approved.txt'; document.write_text('Approved synthetic document')
+    client.upload_file('#cv', str(document))
+    assert client.evaluate("document.querySelector('a').innerText") == 'Download'
+    assert client.dialog_events[-1]['action'] == 'success'
+
+
+def test_native_unknown_confirmation_is_not_accepted(browser):
+    open_page, _, _ = browser
+    client = open_page('<!doctype html><title>Synthetic application</title>')
+    with pytest.raises(cdp.BrowserDialogError):
+        client.evaluate("window.confirm('Accept new terms and submit?')")
+    assert client.pending_dialog['type'] == 'confirm'
+    client.call('Page.handleJavaScriptDialog', {'accept': False})
+    assert client.evaluate('document.readyState') == 'complete'
+
+
+def test_trusted_controls_update_controlled_text_and_native_select(browser):
+    open_page, _, _ = browser
+    client = open_page('''<!doctype html><input id="name" value="wrong"
+      oninput="if(event.isTrusted)this.dataset.accepted=this.value">
+      <select id="country" onchange="if(event.isTrusted)this.dataset.accepted=this.value">
+      <option value="ES">Spain</option><option value="TN">Tunisia</option></select>''')
+    client.fill('#name', 'Approved employer')
+    client.select_option('#country', 'Tunisia')
+    assert client.evaluate("document.querySelector('#name').dataset.accepted") == 'Approved employer'
+    assert client.evaluate("document.querySelector('#country').dataset.accepted") == 'TN'
 
 
 @pytest.mark.parametrize('mode', ['hidden', 'cross_origin', 'ambiguous', 'nested', 'challenge', 'passive_badge'])

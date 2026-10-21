@@ -162,3 +162,34 @@ def test_clarivate_rendered_unbound_form_is_not_verified(change):
     if change == 'no_form': html = html.replace('<button type="submit">Next</button>', '')
     page = inspect_html(html, url)
     assert not page.verifies_application_for('Lead Software Engineer', 'Clarivate')
+
+
+@pytest.mark.parametrize('step,name,content', [
+    ('3', 'jobSpecificQuestions', '<label>Work authorization<select id="jsqData.test" required><option>No</option></select></label><button id="next">Next Step</button>'),
+    ('4', 'voluntaryInformation', '<label>Consent<input id="agreementCheck" type="checkbox" required></label><button id="next">Next Step</button>'),
+    ('5', 'applicationReview', '<h2>My Information</h2><h2>My Experience</h2><h3>Work Experience</h3><h3>Education</h3><button type="submit">Submit</button>'),
+])
+def test_clarivate_later_steps_require_exact_step_identity_and_owned_controls(step, name, content):
+    html = f'<!doctype html><title>Apply</title><form><h1>Lead Software Engineer (JREQ136480)</h1>{content}<button id="previous" type="button">Previous Step</button></form>'
+    url = CLARIVATE_URL.split('&step=')[0] + f'&step={step}&stepname={name}'
+    page = inspect_html(html, url)
+    assert page.verifies_application_for('Lead Software Engineer', 'Clarivate')
+    assert not page.verifies_application_for('Other Engineer', 'Clarivate')
+    assert not inspect_html(html, url.replace('JREQ136480EXTERNAL', 'JREQ999EXTERNAL')).verifies_application_for('Lead Software Engineer', 'Clarivate')
+    assert not inspect_html(html.replace('id="previous"', 'id="unrelated"'), url).verifies_application_for('Lead Software Engineer', 'Clarivate')
+
+
+def test_clarivate_dom_snapshot_captures_bad_prefill_without_contact_details():
+    from jobhunter_auto_apply.prefill import audit
+    html = '''<!doctype html><title>Apply</title><h1>Lead Software Engineer (JREQ136480)</h1>
+      <form><input id="experienceData[0].companyName" value="Enterprise Product">
+      <input id="experienceData[0].title" value="Engineer">
+      <input id="experienceData[0].fromTo.startDate" value="08/2019">
+      <input id="experienceData[0].fromTo.endDate" value="09/2020">
+      <input id="experienceData[0].fromTo.currentlyWorkHere" type="checkbox">
+      <input name="email" type="email" value="private@example.test"><button>Next Step</button></form>'''
+    page = inspect_html(html, CLARIVATE_URL)
+    assert 'private@example.test' not in json.dumps(page.prefill_snapshot)
+    result = audit(page.prefill_snapshot, {'experience': [{'company': 'Consultancy', 'title': 'Engineer',
+                   'dates': '08/2019 - 09/2020'}]}, {})
+    assert result['issues'] == ['parsed_employer_mismatch']

@@ -520,7 +520,7 @@ def test_approved_worker_upload_uses_container_document_path_and_candidate_db(ap
     monkeypatch.setattr("jobhunter_service.applications._browser_page", lambda *_: (client, pages[11]))
     monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
     monkeypatch.setattr("jobhunter_auto_apply.engine.AutoApplyEngine.inspect", Mock(return_value=PageInspection(pages[11]["url"], "Apply", "")))
-    monkeypatch.setattr("jobhunter_auto_apply.engine.AutoApplyEngine._verify_before_mutation", lambda *args: None)
+    monkeypatch.setattr("jobhunter_auto_apply.engine.AutoApplyEngine._verify_before_mutation", lambda *args, **kwargs: None)
     worker({**payload, "root": str(roots[11]), "approved": True})
     client.upload_file.assert_called_once_with('[id="resume"]', "/documents/same-job-package/Resume.pdf")
     client.close.assert_called_once()
