@@ -235,6 +235,37 @@ def test_manual_linkedin_inspection_checks_collected_job_id(tmp_path):
         engine.inspect('li-999999')
 
 
+def test_manual_linkedin_upload_preserves_package_and_needs_separate_submit_approval(tmp_path, monkeypatch):
+    db = tmp_path / "jobs.db"
+    package = tmp_path / "output" / "li-123456"
+    package.mkdir(parents=True)
+    resume = package / "resume.pdf"
+    resume.write_bytes(b"%PDF-test")
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT, company TEXT)")
+        conn.execute("INSERT INTO jobs VALUES('li-123456', 'Engineer', 'Example')")
+        scraper.record_application_stage(conn, 'li-123456', 'apply_preparation_approved',
+                                         package_path=str(package), sync=False)
+    payload = _linkedin_resume_step()
+    client = FakeClient(payload)
+    engine = AutoApplyEngine(ApplyConfig(db_path=str(db), evidence_enabled=False, tracker_sync=False,
+                                        expected_page_url=payload['url']), client)
+    monkeypatch.setattr("jobhunter_auto_apply.engine.time.sleep", lambda _: None)
+
+    with pytest.raises(PermissionError, match="upload requires explicit approval"):
+        engine.upload_file('li-123456', 'input[type=file]', str(resume))
+    assert client.uploads == []
+    engine.upload_file('li-123456', 'input[type=file]', str(resume), approved=True)
+    assert client.uploads == [('input[type=file]', str(resume))]
+
+    with pytest.raises(PermissionError, match="submit requires explicit approval"):
+        engine.click_submit('li-123456', 'button[type=submit]')
+    assert client.clicked == []
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT stage, package_path, submitted_at FROM applications").fetchone() == (
+            'blocked_submit_approval', str(package), None)
+
+
 def test_approved_linkedin_upload_still_refuses_ambiguous_file_control(tmp_path):
     db = tmp_path / "jobs.db"
     with sqlite3.connect(db) as conn:
