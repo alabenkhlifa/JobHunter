@@ -70,6 +70,11 @@ sensitive answers. Upload the reviewed resume from the permanent package and pre
 challenges and let the owner complete them manually before resuming. Verify the
 exact-role portal receipt and tracker state before reporting submission.
 
+For the owner's LinkedIn Easy Apply applications, always use the personal email
+already saved in LinkedIn; this is standing approval and does not need to be
+requested again for each application or batch. Do not change account emails.
+Other ATS forms continue to use the dedicated configured jobs mailbox.
+
 This allowance never applies to unattended autopilot: its LinkedIn Easy Apply gate
 and answer-planner hard stops remain in force. Never use `--policy-run` or standing
 autopilot approval to authorize manual preparation or final submission.
