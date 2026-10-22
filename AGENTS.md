@@ -54,6 +54,9 @@ Use `jobhunter_auto_apply` conservatively:
 - Record states through the existing application tracking functions in `scraper.py`.
 
 When missing fields appear, inspect local profile data and cached confirmed answers first. Ask only for unconfirmed or sensitive fields, with clear CTA-style options.
+Reuse candidate-confirmed private gender and pronoun preferences without asking
+again. Keep these as separate preferences; neither authorizes inferring the other
+or answering unrelated diversity questions.
 
 Routine email-code verification for an already-approved application must use the dedicated mailbox reader automatically; do not delegate code retrieval to the owner. The submit helper handles recognized email codes; `verify-email` resumes its pending step without resubmitting. For CAPTCHA, phone or identity-verification blockers, do not click/solve them. If the browser runs on a Raspberry Pi or remote desktop, first confirm it is visible there (on the Pi: `~/.hermes/scripts/jobhunter_autopilot.py browser status` exits 0 with `visible: true`; a headless browser shows nothing over VNC), put the page in front (`... browser open <job_id>`), then instruct the user to connect with a phone VNC client over the VPN, complete the challenge manually, and report back before continuing. Never relaunch Chromium with other flags or another profile; restart its service instead.
 

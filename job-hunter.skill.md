@@ -659,6 +659,10 @@ employers or locations, or override its retry policy after failed lookups.
    an unlabeled field. If a custom widget fails, pause and report the blocker;
    do not manipulate site-specific React internals to bypass it.
 
+Reuse candidate-confirmed private gender and pronoun preferences without asking
+again. Keep these as separate preferences; neither authorizes inferring the other
+or answering unrelated diversity questions.
+
 ### Owner-approved manual LinkedIn Easy Apply
 
 LinkedIn Easy Apply is allowed in the owner-driven manual flow after the owner's

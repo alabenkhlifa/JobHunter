@@ -65,7 +65,7 @@ def test_missing_application_defaults_are_marked_missing():
     profile = {key: value for key, value in PROFILE.items() if key != "application_defaults"}
     answers = _answers(profile=profile, research=None)
     for key in ("notice_period", "requires_visa_sponsorship", "work_authorization", "citizenship",
-                "allow_contact_for_other_vacancies", "salary_expectation", "gender", "preferred_language",
+                "allow_contact_for_other_vacancies", "salary_expectation", "gender", "pronouns", "preferred_language",
                 "data_sharing_scope"):
         assert answers[key]["value"] is None and answers[key]["source"] == "missing", key
     assert "notice_period" in module.missing_answers(answers)
@@ -291,7 +291,7 @@ def test_load_answers_from_file_and_profile(tmp_path):
 
 def _preference_answers():
     return _answers(profile={**PROFILE, "application_defaults": {
-        **PROFILE["application_defaults"], "gender": "Male", "preferred_language": "en_US",
+        **PROFILE["application_defaults"], "gender": "Male", "pronouns": "He/Him", "preferred_language": "en_US",
         "data_sharing_scope": "current_opening",
     }})
 
@@ -314,6 +314,28 @@ def test_gender_matching_does_not_match_male_inside_female(options, expected):
     plan = plan_fields(_inspection([_field("Gender", tag="select", options=options)]), _preference_answers())
     assert [f["value"] for f in plan["fill"]] == ([expected] if expected else [])
     assert bool(plan["hard_stops"]) is (expected is None)
+
+
+@pytest.mark.parametrize("required", [True, False])
+@pytest.mark.parametrize("label", ["Pronouns", "What pronouns do you identify yourself with? (He/him, she/her, they/them, other)"])
+def test_confirmed_pronouns_match_slash_spacing_without_inferring_gender(required, label):
+    plan = plan_fields(_inspection([
+        _field(label, tag="select", required=required, options=["She / Her", "He / Him", "They / Them"]),
+    ]), _preference_answers())
+    assert [(f["answer_key"], f["value"]) for f in plan["fill"]] == [("pronouns", "He / Him")]
+    assert not plan["hard_stops"]
+
+
+def test_gender_does_not_authorize_pronouns_and_pronouns_do_not_authorize_other_eeo_answers():
+    gender_only = _answers(profile={**PROFILE, "application_defaults": {
+        **PROFILE["application_defaults"], "gender": "Male",
+    }})
+    field = _field("Pronouns", tag="select", options=["He / Him", "She / Her"])
+    assert plan_fields(_inspection([field]), gender_only)["hard_stops"]
+    for label, options in [("Pronouns", ["She / Her"]), ("Gender and pronouns", ["Male / He/Him"]),
+                           ("Sexual orientation", ["Straight"])]:
+        plan = plan_fields(_inspection([_field(label, tag="select", options=options)]), _preference_answers())
+        assert not plan["fill"] and plan["hard_stops"]
 
 
 @pytest.mark.parametrize("label,options,expected", [
@@ -354,7 +376,7 @@ def test_saved_sharing_scope_never_broadens_to_other_available_choices(field):
 
 def test_private_preferences_load_for_another_job_without_changing_public_resume(tmp_path):
     from resume_refiner import project_public_resume
-    prefs = {key: _preference_answers()[key]["value"] for key in ("gender", "preferred_language", "data_sharing_scope")}
+    prefs = {key: _preference_answers()[key]["value"] for key in ("gender", "pronouns", "preferred_language", "data_sharing_scope")}
     profile = {**PROFILE, "application_defaults": {**PROFILE["application_defaults"], **prefs}}
     assert project_public_resume(profile) == project_public_resume(PROFILE)
     path = tmp_path / "profile.json"

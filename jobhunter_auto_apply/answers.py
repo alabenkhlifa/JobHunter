@@ -37,7 +37,7 @@ ANSWER_KEYS = (
     "location", "city", "country", "salary_expectation", "salary_currency", "notice_period",
     "work_authorization", "requires_visa_sponsorship", "citizenship",
     "allow_contact_for_other_vacancies", "languages", "english_level", "years_experience",
-    "gender", "preferred_language", "data_sharing_scope",
+    "gender", "pronouns", "preferred_language", "data_sharing_scope",
     "willing_to_relocate", "current_company", "current_title", "referral_source",
     "consent", "decline_to_answer",
 )
@@ -101,6 +101,7 @@ _EEO_RX = _rx(r"\b(gender|sex|sexual orientation|pronouns?|ethnic\w*|race|racial
               r"|lgbt\w*|transgender|genero|genre|sexo|etnia|origen etnico|raza|discapacidad|minusvalia"
               r"|orientacion sexual|diversity|diversidad)\b")
 _GENDER_RX = _rx(r"\b(gender|genero|genre)\b")
+_PRONOUNS_RX = _rx(r"\bpronouns?\b")
 _OTHER_EEO_RX = _rx(r"\b(sex|sexual|pronouns?|ethnic\w*|race|racial|veteran|disabilit\w*|disabled"
                      r"|lgbt\w*|transgender|sexo|etnia|raza|discapacidad|minusvalia|diversity|diversidad)\b")
 _DATA_SHARING_RX = _rx(r"\b(shar(?:e|ing)\b.{0,40}\b(data|profile|information)"
@@ -186,7 +187,7 @@ _KEY_KINDS = {
     "work_authorization": "yes_no", "requires_visa_sponsorship": "yes_no",
     "allow_contact_for_other_vacancies": "yes_no", "willing_to_relocate": "yes_no",
     "consent": "checkbox", "decline_to_answer": "choice", "salary_currency": "choice",
-    "gender": "choice", "preferred_language": "choice", "data_sharing_scope": "choice",
+    "gender": "choice", "pronouns": "choice", "preferred_language": "choice", "data_sharing_scope": "choice",
 }
 
 
@@ -345,7 +346,7 @@ def build_answers(profile: dict[str, Any] | None, *, research: dict[str, Any] | 
         "application_defaults")
     # Explicit private preferences only: never derive these from a name, CV,
     # spoken-language proficiency, or consent to contact about future jobs.
-    for key in ("gender", "preferred_language", "data_sharing_scope"):
+    for key in ("gender", "pronouns", "preferred_language", "data_sharing_scope"):
         put(key, defaults.get(key), "application_defaults")
 
     languages = _languages_text(profile)
@@ -617,6 +618,9 @@ def _choose_option(options: list[str], value: Any, answer_key: str | None) -> st
         matches = next((group for group in aliases if target in group), {target})
         # Never use substring matching here: "male" is contained in "female".
         return next((raw for norm, raw in usable if norm in matches), None)
+    if answer_key == "pronouns":
+        identity = lambda text: re.sub(r"\s*/\s*", "/", text)
+        return next((raw for norm, raw in usable if identity(norm) == identity(target)), None)
     if answer_key == "preferred_language":
         locale = _english_locale(value)
         if locale is None:
@@ -782,6 +786,11 @@ def plan_fields(inspection: Any, answers: dict[str, dict[str, Any]] | None) -> d
             # A confirmed preference overrides the default EEO decline/skip
             # only for the same attribute, never for other diversity questions.
             result = _result("eeo", result["required"], "gender")
+        if (result["kind"] == "eeo" and _PRONOUNS_RX.search(_field_text(field))
+                and not _GENDER_RX.search(_field_text(field))
+                and not _OTHER_EEO_RX.search(_PRONOUNS_RX.sub("", _field_text(field)))
+                and _real((answers.get("pronouns") or {}).get("value")) is not None):
+            result = _result("eeo", result["required"], "pronouns")
         label = _label(field)
         required = result["required"]
         key = result["answer_key"]
