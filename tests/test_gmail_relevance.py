@@ -208,3 +208,126 @@ def test_preview_truncates_at_word_boundary_with_ellipsis():
     preview = watcher.preview_text({"snippet": "longword " * 40})
     assert len(preview) <= 141
     assert preview.endswith("longword…")
+
+
+@pytest.mark.parametrize("subject,body,label", [
+    ("Gracias por registrarte en ExampleCo",
+     "Tu usuario es: candidate@example.com. Puedes ver las ofertas de trabajo, crear alertas y completar tu perfil.",
+     "Account registered"),
+    ("Thank you for applying to ExampleCo",
+     "We have received your application. If you are selected, our team will contact you for an interview.",
+     "Application received"),
+    ("Thank you for your application",
+     "Thank you for submitting your application. We are currently reviewing your professional background.",
+     "Application received"),
+    ("ExampleCo - Thank you for your application",
+     "We have well received your application and our Talent Acquisition team is now reviewing it with care.",
+     "Application received"),
+    ("Gracias por crear tu cuenta",
+     "Tu cuenta ha sido creada con éxito. Puedes crear alertas de empleo.",
+     "Account registered"),
+    ("¡Ya estás dentro!",
+     "¡Bienvenido/a! Te has registrado en nuestro portal de empleo. Usuario: candidate@example.com. Contraseña: test-only-secret",
+     "Account registered"),
+    ("Welcome to ExampleCo Careers",
+     "You can browse career opportunities and manage your profile. Password: test-only-secret",
+     "Welcome email"),
+    ("Registration confirmation",
+     "Thank you for your registration. Your candidate profile is now available on our Careers Portal.",
+     "Account registered"),
+    ("Hemos recibido tu candidatura",
+     "Hemos recibido tu candidatura para la posición de Technical Lead y estamos revisándola.",
+     "Application received"),
+    ("Gracias por inscribirte",
+     "Te has inscrito en Technical Lead. Tu CV ya está con nosotros y lo revisaremos.",
+     "Application received"),
+])
+def test_informational_mail_never_asks_for_action_or_changes_application(tmp_path, monkeypatch, subject, body, label):
+    jobs = [{"id": "test-job", "title": "Technical Lead", "company": "ExampleCo", "stage": "submitted"}]
+    message = {"subject": subject, "text": f"ExampleCo {subject} {body}", "body_text": body,
+               "from": "ExampleCo Careers <careers@example.com>", "snippet": body}
+    writer = Mock()
+    monkeypatch.setattr(watcher, "record_application_outcome", writer)
+    watcher.process_application_outcome(message, jobs, tmp_path / "unused.db")
+    alert = watcher.format_alert([message])
+    assert f"<b>{label}</b>" in alert
+    assert "Review needed" not in alert
+    assert "review this email" not in alert
+    assert "action required</b>" not in alert
+    assert "test-only-secret" not in alert
+    assert "candidate@example.com" not in alert
+    if label in {"Account registered", "Welcome email"}:
+        assert "no action required" in alert
+        assert "matched_job" not in message
+    writer.assert_not_called()
+
+
+def test_filled_position_is_a_rejection_and_updates_only_the_matched_application(tmp_path, monkeypatch):
+    jobs = [
+        {"id": "test-job", "title": "Technical Lead", "company": "ExampleCo", "stage": "submitted"},
+        {"id": "other-job", "title": "Data Scientist", "company": "OtherCo", "stage": "submitted"},
+    ]
+    message = {"text": "ExampleCo Technical Lead: We regret to inform that the position has been filled."}
+    writer = Mock(return_value={"status": "updated", "tracker_synced": True})
+    monkeypatch.setattr(watcher, "record_application_outcome", writer)
+    watcher.process_application_outcome(message, jobs, tmp_path / "unused.db")
+    assert message["outcome"] == "rejected"
+    writer.assert_called_once_with(tmp_path / "unused.db", jobs[0], "rejected", tracker_sync=None)
+    assert "Application rejected" in watcher.format_alert([message])
+
+
+@pytest.mark.parametrize("body,outcome", [
+    ("Your account has been created. Action required: please provide additional information.", "action_required"),
+    ("Thank you for submitting your application. Please upload the required documents.", "action_required"),
+    ("Thank you for registering. We would like to schedule an interview.", "interview_invited"),
+    ("We received your application. We won't be moving forward with your application.", "rejected"),
+])
+def test_genuine_outcomes_take_priority_over_registration_and_receipts(tmp_path, body, outcome):
+    message = {"subject": "Welcome to ExampleCo Careers", "body_text": body, "text": body}
+    watcher.process_application_outcome(message, [], tmp_path / "unused.db")
+    assert message["outcome"] == outcome
+    assert "notice" not in message
+    assert "no action required" not in watcher.format_alert([message])
+
+
+def test_classification_ignores_sender_names_and_duplicated_preview(tmp_path):
+    message = {"subject": "Registration confirmation", "body_text": "Your account has been created.",
+               "text": "Action Required Recruiting your account has been created.",
+               "snippet": "Action required: untrusted preview"}
+    watcher.process_application_outcome(message, [], tmp_path / "unused.db")
+    assert message["notice"] == "account_registered"
+    assert "outcome" not in message
+
+
+@pytest.mark.parametrize("body", [
+    "If the position has been filled, we will suggest other opportunities.",
+    "The position has not been filled. Your application is under review.",
+])
+def test_filled_position_context_does_not_invent_rejection(body):
+    assert watcher.classify_application_outcome(body) == (None, [])
+
+
+def test_community_signup_is_not_an_application_receipt(tmp_path):
+    message = {"text": "Te has inscrito en nuestra comunidad de talentos."}
+    watcher.process_application_outcome(message, [], tmp_path / "unused.db")
+    assert not message["acknowledgement"]
+
+
+def test_spanish_verification_never_reaches_digest_or_application_updates(tmp_path, monkeypatch):
+    service = Mock()
+    service.users().messages().list().execute.return_value = {"messages": [{"id": "otp"}]}
+    monkeypatch.setattr(watcher, "gmail_service", Mock(return_value=service))
+    monkeypatch.setattr(watcher, "interested_jobs", Mock(return_value=JOBS))
+    monkeypatch.setattr(watcher, "message_summary", Mock(return_value={
+        "subject": "Contraseña de un solo uso para verificación de cuenta de candidato",
+        "text": "ExampleCo: Su código de acceso para la verificación de la cuenta es test-only.",
+    }))
+    updater = Mock()
+    monkeypatch.setattr(watcher, "process_application_outcome", updater)
+    args = argparse.Namespace(google_token=tmp_path / "token.json", db_path=tmp_path / "jobs.db",
+                              state_path=tmp_path / "state.json", max_messages=25, query="newer_than:30d")
+    matches, state = watcher.collect_mail(args)
+    assert matches == []
+    assert state["seen_message_ids"] == ["otp"]
+    updater.assert_not_called()
+    service.users().messages().modify.assert_not_called()

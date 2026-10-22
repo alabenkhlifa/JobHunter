@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -54,10 +55,16 @@ ACCOUNT_NOTICE_PATTERN = re.compile(
     r"password (?:reset|changed)|reset your password|"
     r"verify your (?:email|account)|confirm your email|"
     r"verification code|security code|one time (?:code|password|passcode)"
+    r"|contrasena de un solo uso|codigo de (?:acceso|verificacion|seguridad)"
     r")\b"
 )
 REJECTION_PATTERNS = [
     ("regret to inform", r"\bregret to inform (?:you|the candidate)\b"),
+    (
+        "position filled or closed",
+        r"\bregret to inform (?:you )?(?:that )?(?:the|this) "
+        r"(?:position|role|vacancy) (?:has been|was|is) (?:filled|closed|cancelled|canceled)\b",
+    ),
     (
         "application not progressing",
         r"\b(?:(?:will|would|can|could) not|won t|cannot) "
@@ -104,10 +111,24 @@ REJECTION_PATTERNS = [
     ),
 ]
 ACKNOWLEDGEMENT_PATTERNS = (
-    r"\b(?:we (?:have )?received|we ve received) your application\b",
+    r"\b(?:we (?:have )?(?:well )?received|we ve received) your application\b",
     r"\byour application (?:has been|was) (?:received|submitted)\b",
     r"\byour application (?:will be reviewed|is (?:currently )?under review)\b",
+    r"\bthank you for submitting your application\b",
+    r"\bwe are (?:currently )?reviewing your (?:application|professional background)\b",
+    r"\bhemos recibido (?:tu|su) (?:candidatura|solicitud)\b",
+    r"\bte has inscrito en (?:la (?:oferta|vacante)|el (?:puesto|proceso))\b",
+    r"\btu cv ya esta con nosotros\b",
 )
+ACCOUNT_CONFIRMATION_PATTERNS = (
+    r"\b(?:thank you|thanks) for (?:registering|creating (?:your|an) account|your registration)\b",
+    r"\b(?:your|the) (?:candidate )?account (?:has been|was|is(?: now)?) (?:successfully )?(?:created|registered|activated)\b",
+    r"\byour candidate profile is now available\b",
+    r"\bgracias por (?:registrarte|registrarse|crear (?:tu|su) cuenta)\b",
+    r"\b(?:tu|su) cuenta (?:ha sido|fue) creada\b",
+    r"\bte has registrado en (?:nuestro|el) portal de empleo\b",
+)
+WELCOME_SUBJECT_PATTERN = re.compile(r"\b(?:welcome (?:to|aboard)|bienvenid[oa])\b")
 OFFER_PATTERNS = [
     (
         "offer extended",
@@ -366,7 +387,8 @@ def normalize(text: str) -> str:
 
 
 def normalize_for_matching(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (text or "").lower())).strip()
+    folded = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode().lower()
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", folded)).strip()
 
 
 def contains_term(text: str, term: str) -> bool:
@@ -487,6 +509,7 @@ def message_summary(service, msg_id: str) -> dict[str, Any]:
         "subject": header_value(headers, "Subject"),
         "date": header_value(headers, "Date"),
         "snippet": msg.get("snippet") or "",
+        "body_text": text,
         "text": (
             f"{header_value(headers, 'From')} {header_value(headers, 'To')} "
             f"{header_value(headers, 'Subject')} {msg.get('snippet') or ''} {text}"
@@ -603,12 +626,17 @@ def process_application_outcome(
     db_path: Path,
     *, tracker_sync=None,
 ) -> None:
-    outcome, outcome_reasons = classify_application_outcome(summary["text"])
+    # Classify the visible content, without sender names or duplicated snippets.
+    content = (
+        f"{summary.get('subject', '')} {summary['body_text']}"
+        if "body_text" in summary else summary["text"]
+    )
+    outcome, outcome_reasons = classify_application_outcome(content)
     if outcome:
         summary["outcome"] = outcome
         summary["outcome_reasons"] = outcome_reasons
     else:
-        normalized = normalize_for_matching(summary["text"])
+        normalized = normalize_for_matching(content)
         summary["acknowledgement"] = any(
             re.search(pattern, normalized)
             for pattern in ACKNOWLEDGEMENT_PATTERNS
@@ -616,6 +644,14 @@ def process_application_outcome(
             r"\b(?:unfortunately|regret|unsuccessful|declined|rejected|decided|chosen|other candidates)\b",
             normalized,
         )
+        if not summary["acknowledgement"]:
+            if any(re.search(pattern, normalized) for pattern in ACCOUNT_CONFIRMATION_PATTERNS):
+                summary["notice"] = "account_registered"
+            elif WELCOME_SUBJECT_PATTERN.search(normalize_for_matching(summary.get("subject", ""))):
+                summary["notice"] = "welcome"
+            if summary.get("notice"):
+                # Account events never establish an application or its outcome.
+                return
 
     job, match_reason = match_active_application(summary["text"], jobs)
     summary["application_match_reason"] = match_reason
@@ -690,6 +726,10 @@ def format_alert(matches: list[dict[str, Any]]) -> str:
             icon, label = OUTCOME_ALERTS[outcome]
         elif m.get("acknowledgement"):
             icon, label = "📨", "Application received"
+        elif m.get("notice") == "account_registered":
+            icon, label = "👤", "Account registered"
+        elif m.get("notice") == "welcome":
+            icon, label = "👋", "Welcome email"
         else:
             icon, label = "⚠️", "Review needed"
         lines.extend(["", f"{icon} <b>{label}</b>"])
@@ -718,6 +758,9 @@ def format_alert(matches: list[dict[str, Any]]) -> str:
                 lines.extend(["✅ Outcome recorded in database", "⚠️ Spreadsheet update not confirmed"])
         elif m.get("acknowledgement"):
             lines.append("Receipt confirmation; no status change.")
+        elif m.get("notice") in {"account_registered", "welcome"}:
+            # Welcome messages can contain credentials; do not quote their body.
+            lines.append("Informational email; no action required. Application status unchanged.")
         else:
             preview = preview_text(m)
             if preview:
@@ -786,8 +829,9 @@ def collect_mail(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[s
             # Verification secrets belong only to the active ATS interaction,
             # never the periodic recruiter digest.
             verification = re.search(
-                r"\b(?:verification code|security code|one[- ]time (?:code|password)|otp|verify your (?:email|account)|confirm your email)\b",
-                summary["text"], re.IGNORECASE,
+                r"\b(?:verification code|security code|one time (?:code|password|passcode)|otp|verify your (?:email|account)|confirm your email|"
+                r"contrasena de un solo uso|codigo de (?:acceso|verificacion|seguridad))\b",
+                normalize_for_matching(summary["text"]),
             )
             if relevant and not verification:
                 summary["reasons"] = reasons
