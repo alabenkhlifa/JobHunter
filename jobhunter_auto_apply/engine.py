@@ -650,8 +650,14 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       const matches = document.querySelectorAll('[id="' + id + '"]');
       return matches.length === 1 ? matches[0] : null;
     };
-    const tenant = unique('career_company'), req = unique('career_job_req_id');
+    const tenant = unique('career_company');
     const form = unique('careerform');
+    // SuccessFactors repeats this hidden field in the form header and table.
+    // Accept matching copies owned by this form, never conflicting identities.
+    const requisitions = [...document.querySelectorAll('[id="career_job_req_id"]')];
+    const req = requisitions[0];
+    const requisitionsMatch = requisitions.length && requisitions.every(el =>
+      el.type === 'hidden' && el.form === form && el.value === req.value);
     const binding = __JOBHUNTER_SUCCESSFACTORS__.find(item =>
       item.host === location.hostname && item.tenant === tenant?.value);
     const query = new URLSearchParams(location.search), companies = query.getAll('company');
@@ -669,7 +675,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       return visible(el) && url.protocol === 'https:' && !url.username && !url.password &&
         ['', '443'].includes(url.port) && binding.brands.includes(url.hostname);
     });
-    if (binding && queryMatches && jobReqMatches && form?.tagName === 'FORM' && visible(form) &&
+    if (binding && queryMatches && requisitionsMatch && jobReqMatches && form?.tagName === 'FORM' && visible(form) &&
         tenant?.type === 'hidden' && tenant.form === form && req?.type === 'hidden' && req.form === form &&
         /^\d+$/.test(req.value) && headings.length === 1 && headings[0][2] === req.value && brand) {
       applicationContext = {kind: 'successfactors', tenant: tenant.value, requisition: req.value,

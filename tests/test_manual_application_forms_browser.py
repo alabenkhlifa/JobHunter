@@ -170,6 +170,7 @@ def test_successfactors_zurich_and_gft_registration_application_forms(host, tena
     <h1>{heading} (123456)</h1>
     <input type="hidden" id="career_company" value="{tenant}">
     <input type="hidden" id="career_job_req_id" value="123456">
+    <table><tr><th><input type="hidden" id="career_job_req_id" value="123456"></th></tr></table>
     <label>Correo electrónico: *<input id="fbclc_userName" type="text"></label>
     <label>Nombre: *<input id="fbclc_fName" type="text"></label>
     <label>Apellidos: *<input id="fbclc_lName" type="text"></label>
@@ -194,6 +195,8 @@ def test_successfactors_zurich_and_gft_registration_application_forms(host, tena
         (html.replace('https://' + brand, 'https://' + brand + '.example.test'), url),
         (html.replace('<a href=', '<a hidden href='), url),
         (html.replace('id="career_job_req_id" value="123456"', 'id="career_job_req_id" value="999999"'), url),
+        (html.replace('id="career_job_req_id" value="123456"', 'id="career_job_req_id" value="999999"', 1), url),
+        (html + '<form><input type="hidden" id="career_job_req_id" value="123456"></form>', url),
         (html.replace('<h1>', '<h1 hidden>'), url),
         (html.replace('</form>', '<h2>Other Engineer (999999)</h2></form>'), url),
         (html.replace('</form>', '<input type="hidden" id="jobReqId" value="999999"></form>'), url),
