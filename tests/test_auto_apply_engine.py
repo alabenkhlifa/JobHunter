@@ -713,10 +713,40 @@ def test_container_upload_still_requires_explicit_confirmation(tmp_path):
     ("Senior Backend Engineer – Alcobendas", "Senior Backend Engineer", "Acme", None, False),
     ("Backend Engineer", "Senior Backend Engineer", "Acme", None, False),
     ("Senior Backend Engineer at Other Co", "Senior Backend Engineer", "Acme", None, False),
+    ("Full Stack Developer Senior", "Senior Full Stack Developer", "Infortec Consultores", None, True),
+    ("Senior Full Stack Developer", "Full Stack Developer Senior", "Infortec Consultores", None, True),
+    ("Full Stack Developer Senior - Madrid", "Senior Full Stack Developer", "Acme", None, True),
+    ("Full Stack Developer Junior", "Senior Full Stack Developer", "Acme", None, False),
+    ("Full Stack Developer", "Senior Full Stack Developer", "Acme", None, False),
+    ("Full Stack Developer Senior Junior", "Senior Full Stack Developer", "Acme", None, False),
+    ("Senior Stack Full Developer", "Senior Full Stack Developer", "Acme", None, False),
+    ("Full Stack Developer Senior Payments", "Senior Full Stack Developer", "Acme", None, False),
 ])
 def test_heading_suffix_tolerance(heading, title, company, location, expected):
     from jobhunter_auto_apply.engine import _heading_matches_job
     assert _heading_matches_job(heading, title, company, location) is expected
+
+
+@pytest.mark.parametrize('url,expected', [
+    ('https://career5.successfactors.eu/careers?company=gfttechnol', True),
+    ('https://career5.successfactors.eu/careers?company=gfttechnol&jobReqId=123456', True),
+    ('https://career5.successfactors.eu/careers?company=OtherTenant', False),
+    ('https://career5.successfactors.eu/careers?company=gfttechnol&company=', False),
+    ('https://career5.successfactors.eu/careers?company=gfttechnol&jobReqId=999999', False),
+    ('https://career5.successfactors.eu/careers?company=gfttechnol&jobReqId=123456&jobReqId=999999', False),
+    ('https://other@career5.successfactors.eu/careers?company=gfttechnol', False),
+    ('https://career5.successfactors.eu:8443/careers?company=gfttechnol', False),
+    ('https://career5.successfactors.eu.example.test/careers?company=gfttechnol', False),
+    ('http://career5.successfactors.eu/careers?company=gfttechnol', False),
+])
+def test_successfactors_url_identity_is_checked_before_any_browser_action(url, expected):
+    payload = _rendered_form(heading='Desarrollador/a Java Microservicios (123456)', url=url)
+    payload['application_context'] = {
+        'kind': 'successfactors', 'tenant': 'gfttechnol', 'form': 'careerform',
+        'role': 'Desarrollador/a Java Microservicios', 'requisition': '123456', 'brand_host': 'www.gft.com',
+    }
+    page = inspect_page(FakeClient(payload))
+    assert page.verifies_application_for('Desarrollador/a Java Microservicios', 'GFT Technologies') is expected
 
 
 @pytest.mark.parametrize("label,expected", [

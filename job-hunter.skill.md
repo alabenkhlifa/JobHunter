@@ -634,6 +634,12 @@ employers or locations, or override its retry policy after failed lookups.
    validation before clicking once; it cannot authorize final submission.
    A hidden file input is eligible only through its visible associated
    label. Never unhide inactive panels or bypass the rendered-form check.
+   Form verification accepts a seniority word moved between the start and end
+   of the same role, and binds LinkedIn titles containing `|` to the visible
+   dialog employer. SuccessFactors adapters cover Swiss Re (`SwissRe`), Zurich
+   (`SF2013`) and GFT (`gfttechnol`), requiring the configured ATS host, employer
+   brand and a matching requisition heading inside the application form.
+   A verified identity does not mean required answers or consent are complete.
    A final review step may have no editable fields. The verifier accepts it
    only with a supported review layout and an enabled submission control in the
    same visible form, plus the exact role, employer and requisition identity.

@@ -67,6 +67,32 @@ def test_linkedin_employer_with_separator_or_encoded_ampersand(company):
     assert page.verifies_application_for('Senior Java Developer', company.replace('&amp;', '&'), job_id='li-123456')
 
 
+@pytest.mark.parametrize('role,company', [
+    ('SENIOR SOLUTION ARCHITECT | AZURE', 'Capitole'),
+    ('SENIOR SOLUTION ARCHITECT | AZURE', 'Example Consulting | Part of Example Group'),
+])
+def test_linkedin_role_separator_is_distinguished_from_employer_separator(role, company):
+    html = LINKEDIN.replace('Senior Java Developer', role).replace('Example Consulting', company)
+    page = inspect_html(html, 'https://www.linkedin.com/jobs/view/123456/')
+    assert page.application_context['role'] == role
+    assert page.application_context['company'] == company
+    assert page.verifies_application_for(role, company, job_id='li-123456')
+    assert not page.verifies_application_for('SENIOR SOLUTION ARCHITECT', company, job_id='li-123456')
+    assert not page.verifies_application_for(role, 'AZURE | ' + company, job_id='li-123456')
+
+
+def test_infortec_reordered_seniority_still_requires_exact_role_and_employer():
+    html = '''<!doctype html><title>Infortec Consultores | Full Stack Developer Senior</title>
+    <h1>Full Stack Developer Senior</h1><form>
+    <label>Full Name<input name="name"></label><label>Email<input type="email"></label>
+    <button type="submit">Enviar candidatura</button></form>'''
+    page = inspect_html(html, 'https://empleo.infortec.net/jobs/full-stack-developer-senior-example')
+    assert page.verifies_application_for('Senior Full Stack Developer', 'Infortec Consultores')
+    assert not page.verifies_application_for('Junior Full Stack Developer', 'Infortec Consultores')
+    assert not page.verifies_application_for('Senior Full Stack Developer', 'Other Consultancy')
+    assert not page.verifies_application_for('Senior Stack Full Developer', 'Infortec Consultores')
+
+
 @pytest.mark.parametrize('change', ['different_company', 'no_easy_apply_marker', 'hidden_dialog',
                                    'second_dialog', 'wrong_host', 'wrong_path', 'no_continuation'])
 def test_linkedin_does_not_accept_source_pages_or_unbound_modals(change):
@@ -130,6 +156,52 @@ def test_successfactors_unverified_tenant_or_requisition_stays_blocked(change):
     if change == 'no_apply': html = html.replace('>Apply</span>', '>Save</span>')
     page = inspect_html(html, url)
     assert not page.verifies_application_for('Lead Software Engineer', 'Swiss Re')
+
+
+@pytest.mark.parametrize('host,tenant,company,brand,heading,role,submit', [
+    ('career2.successfactors.eu', 'SF2013', 'Zurich Insurance', 'www.careers.zurich.com',
+     'Career Opportunities: Lead Solution Architect', 'Lead Solution Architect', 'Apply'),
+    ('career5.successfactors.eu', 'gfttechnol', 'GFT Technologies', 'www.gft.com',
+     'Puestos vacantes: Desarrollador/a Java Microservicios', 'Desarrollador/a Java Microservicios', 'Solicitar'),
+])
+def test_successfactors_zurich_and_gft_registration_application_forms(host, tenant, company, brand, heading, role, submit):
+    html = f'''<!doctype html><title>{heading} (123456)</title>
+    <a href="https://{brand}/">Careers</a><form id="careerform">
+    <h1>{heading} (123456)</h1>
+    <input type="hidden" id="career_company" value="{tenant}">
+    <input type="hidden" id="career_job_req_id" value="123456">
+    <label>Correo electrónico: *<input id="fbclc_userName" type="text"></label>
+    <label>Nombre: *<input id="fbclc_fName" type="text"></label>
+    <label>Apellidos: *<input id="fbclc_lName" type="text"></label>
+    <input type="submit" id="fbqa_apply" value="{submit}"></form>'''
+    url = f'https://{host}/careers?company={tenant}'
+    page = inspect_html(html, url)
+    assert page.verifies_application_for(role, company)
+    assert page.application_context['requisition'] == '123456'
+    assert page.missing_required == ['Correo electrónico: *', 'Nombre: *', 'Apellidos: *']
+    assert not page.safe_to_continue
+    assert not page.verifies_application_for('Other Engineer', company)
+    assert not page.verifies_application_for(role, 'Other Employer')
+
+    changes = [
+        (html, url.replace('company=' + tenant, 'company=OtherTenant')),
+        (html, url + '&company=' + tenant),
+        (html, url.replace('https:', 'http:')),
+        (html, url.replace(host, host + '.example.test')),
+        (html, url.replace(host, host + ':8443')),
+        (html, url.replace('/careers?', '/profile?')),
+        (html.replace('value="' + tenant + '"', 'value="OtherTenant"'), url),
+        (html.replace('https://' + brand, 'https://' + brand + '.example.test'), url),
+        (html.replace('<a href=', '<a hidden href='), url),
+        (html.replace('id="career_job_req_id" value="123456"', 'id="career_job_req_id" value="999999"'), url),
+        (html.replace('<h1>', '<h1 hidden>'), url),
+        (html.replace('</form>', '<h2>Other Engineer (999999)</h2></form>'), url),
+        (html.replace('</form>', '<input type="hidden" id="jobReqId" value="999999"></form>'), url),
+        (html.replace('id="fbqa_apply"', 'id="save"').replace('type="submit"', 'type="button"'), url),
+        (html.replace('<h1>', '</form><h1>').replace('</h1>', '</h1><form>'), url),
+    ]
+    for changed_html, changed_url in changes:
+        assert not inspect_html(changed_html, changed_url).verifies_application_for(role, company), changed_url
 
 
 CLARIVATE = '''<!doctype html><title>Apply</title>

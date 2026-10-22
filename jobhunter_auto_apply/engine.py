@@ -150,6 +150,15 @@ class PageInspection:
         context = getattr(self, "application_context", {})
         if context.get("kind") == "linkedin_easy_apply":
             return bool(context.get("actionable"))
+        if context.get("kind") == "successfactors":
+            # Registration and application share one form. Localized labels
+            # and text-typed email fields must not turn it into a login shell.
+            owned = {item.get("id") for item in self.inputs
+                     if item.get("form") == context.get("form") and not item.get("disabled")}
+            if {"fbclc_userName", "fbclc_fName", "fbclc_lName"} <= owned:
+                return any(button.get("form") == context.get("form")
+                           and button.get("id") == "fbqa_apply" and button.get("type") == "submit"
+                           for button in self.buttons)
         applicant_fields = [item for item in self.inputs if (
             item.get("tag") in {"input", "select", "textarea"}
             and str(item.get("type") or "").casefold() not in
@@ -268,10 +277,7 @@ class PageInspection:
             )
         if context.get("kind") == "successfactors":
             return bool(
-                parsed.scheme == "https" and parsed.hostname == "career2.successfactors.eu"
-                and context.get("tenant") == "SwissRe" and _title_tokens(job_company or "") == ("swiss", "re")
-                and context.get("brand_host") == "careers.swissre.com"
-                and re.fullmatch(r"\d+", str(context.get("requisition", "")))
+                _successfactors_identity(self.url, context, job_company)
                 and self.actionable_application_form
                 and _heading_matches_job(context.get("role", ""), job_title, job_company, job_location)
             )
@@ -334,6 +340,37 @@ _ATS_EMPLOYER_TENANTS = {
     "careers-en-axa.icims.com": {("axa",), ("axa", "group", "operations")},
 }
 
+# Explicit host/tenant/brand bindings: shared ATS hosts do not identify an
+# employer. The DOM adapter and Python verifier use this same registry.
+_SUCCESSFACTORS_TENANTS = (
+    {"host": "career2.successfactors.eu", "tenant": "SwissRe", "company": "Swiss Re",
+     "brands": ["careers.swissre.com"]},
+    {"host": "career2.successfactors.eu", "tenant": "SF2013", "company": "Zurich Insurance",
+     "brands": ["www.careers.zurich.com", "careers.zurich.com", "www.zurich.com"]},
+    {"host": "career5.successfactors.eu", "tenant": "gfttechnol", "company": "GFT Technologies",
+     "brands": ["www.gft.com", "jobs.gft.com"]},
+)
+
+
+def _successfactors_identity(url: str, context: dict, company: str | None) -> bool:
+    parsed = urlsplit(url)
+    binding = next((item for item in _SUCCESSFACTORS_TENANTS
+                    if item["host"] == parsed.hostname and item["tenant"] == context.get("tenant")), None)
+    if not binding or parsed.scheme != "https" or parsed.netloc.casefold() not in {
+            binding["host"], binding["host"] + ":443"} or parsed.path not in {"/careers", "/career", "/portalcareer"}:
+        return False
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if "company" in query and query["company"] != [binding["tenant"]]:
+        return False
+    requisition = str(context.get("requisition", ""))
+    return bool(
+        context.get("form") == "careerform"
+        and _title_tokens(company or "") == _title_tokens(binding["company"])
+        and context.get("brand_host") in binding["brands"]
+        and re.fullmatch(r"\d+", requisition)
+        and all(query[key] == [requisition] for key in ("career_job_req_id", "jobReqId") if key in query)
+    )
+
 
 def _strip_legal_suffix(words: list[str]) -> list[str]:
     words = list(words)
@@ -382,15 +419,22 @@ def _heading_matches_job(heading: str, job_title: str, job_company: str | None,
         if tokens[:len(prefix)] == prefix:
             tokens = tokens[len(prefix):]
             break
-    if tokens == title:
+    def role_tokens(words):
+        # Move only a trailing seniority qualifier. Preserve every role word,
+        # its order and its level; never use bag-of-words or fuzzy similarity.
+        if len(words) >= 3 and words[-1] in {"senior", "junior", "lead", "staff", "principal"}:
+            return (words[-1], *words[:-1])
+        return words
+
+    if role_tokens(tokens) == role_tokens(title):
         return True
     company = {word for word in _title_tokens(job_company or "") if word not in _COMPANY_FILLER}
     tags = _SUFFIX_TAGS | set(_title_tokens(job_location or ""))
-    if tokens[:len(title)] == title:
+    if role_tokens(tokens[:len(title)]) == role_tokens(title):
         suffix = {word for word in tokens[len(title):] if word not in _SUFFIX_FILLER}
         return bool(suffix) and suffix <= (company | tags)
     # The stored title may carry the tag (" - Madrid") that the rendered heading omits.
-    if len(tokens) >= 2 and title[:len(tokens)] == tokens:
+    if len(tokens) >= 2 and role_tokens(title[:len(tokens)]) == role_tokens(tokens):
         extra = {word for word in title[len(tokens):] if word not in _SUFFIX_FILLER}
         return bool(extra) and extra <= tags
     return False
@@ -568,10 +612,19 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
   const dialogs = linkedInJob ? [...document.querySelectorAll('dialog[open]')].filter(visible) : [];
   const dialog = dialogs.length === 1 && dialogs[0].querySelector(
     '[data-sdui-screen="com.linkedin.sdui.flagshipnav.jobs.easyapply.EasyApply"]') ? dialogs[0] : null;
-  const titleParts = document.title.split(' | ');
   const dialogHeading = dialog?.querySelector('header h2')?.innerText.trim() || '';
-  const linkedin = dialog && titleParts.length >= 3 && titleParts.at(-1) === 'LinkedIn' &&
-    dialogHeading.startsWith('Apply to ');
+  const decodeIdentity = text => {
+    const element = document.createElement('textarea');
+    element.innerHTML = text;
+    return element.value.normalize('NFKC').replace(/\s+/g, ' ').trim();
+  };
+  const dialogCompany = decodeIdentity(dialogHeading.slice(9));
+  const titleIdentity = decodeIdentity(document.title);
+  const employerSuffix = ' | ' + dialogCompany + ' | LinkedIn';
+  // Anchor the split to the visible dialog employer: both role and employer
+  // may themselves contain pipes.
+  const linkedin = dialog && dialogHeading.startsWith('Apply to ') && dialogCompany &&
+    titleIdentity.endsWith(employerSuffix) && titleIdentity.length > employerSuffix.length;
   const scope = linkedin ? dialog : document;
   const scopeText = (linkedin ? dialog : document.body)?.innerText || '';
   const uploadButton = linkedin && [...dialog.querySelectorAll('button')].find(el =>
@@ -589,21 +642,38 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     const review = /review (?:your )?application/i.test(scopeText) &&
       controls.some(el => /^submit application$/i.test(el.innerText.trim()));
     applicationContext = {kind: 'linkedin_easy_apply', job_id: linkedInJob[1],
-      role: titleParts[0], company: titleParts.slice(1, -1).join(' | '), dialog_company: dialogHeading.slice(9),
+      role: titleIdentity.slice(0, -employerSuffix.length), company: dialogCompany, dialog_company: dialogCompany,
       actionable: continuation && (resumeStep || fields.length > 0 || review)};
-  } else if (location.protocol === 'https:' && location.hostname === 'career2.successfactors.eu') {
-    const tenant = document.getElementById('career_company');
-    const req = document.getElementById('career_job_req_id');
-    const jobReq = document.getElementById('jobReqId');
-    const heading = [...document.querySelectorAll('h1,h2,h3,[role=heading]')].filter(visible)
-      .map(el => el.innerText.trim().match(/^(.+)\s+\((\d+)\)$/))
-      .find(match => match && match[2] === req?.value);
-    const brand = [...document.querySelectorAll('a[href]')].find(el => visible(el) &&
-      new URL(el.href).hostname === 'careers.swissre.com');
-    if (tenant?.type === 'hidden' && tenant.value === 'SwissRe' && req?.type === 'hidden' &&
-        jobReq?.type === 'hidden' && req.value === jobReq.value && heading && brand) {
+  } else if (location.protocol === 'https:' && !location.username && !location.password &&
+             ['', '443'].includes(location.port) && ['/careers', '/career', '/portalcareer'].includes(location.pathname)) {
+    const unique = id => {
+      const matches = document.querySelectorAll('[id="' + id + '"]');
+      return matches.length === 1 ? matches[0] : null;
+    };
+    const tenant = unique('career_company'), req = unique('career_job_req_id');
+    const form = unique('careerform');
+    const binding = __JOBHUNTER_SUCCESSFACTORS__.find(item =>
+      item.host === location.hostname && item.tenant === tenant?.value);
+    const query = new URLSearchParams(location.search), companies = query.getAll('company');
+    const queryMatches = (!companies.length || (companies.length === 1 && companies[0] === tenant?.value)) &&
+      ['career_job_req_id', 'jobReqId'].every(key => !query.has(key) ||
+        (query.getAll(key).length === 1 && query.get(key) === req?.value));
+    const jobReqs = [...document.querySelectorAll('[id="jobReqId"]')];
+    const jobReqMatches = !jobReqs.length || (jobReqs.length === 1 && jobReqs[0].type === 'hidden' &&
+      jobReqs[0].form === form && jobReqs[0].value === req?.value);
+    const headings = form ? [...form.querySelectorAll('h1,h2,h3,[role=heading]')].filter(visible)
+      .map(el => el.innerText.trim().replace(/^(?:Career Opportunities|Puestos vacantes):\s*/i, '')
+        .match(/^(.+)\s+\((\d+)\)$/)).filter(Boolean) : [];
+    const brand = binding && [...document.querySelectorAll('a[href]')].find(el => {
+      const url = new URL(el.href);
+      return visible(el) && url.protocol === 'https:' && !url.username && !url.password &&
+        ['', '443'].includes(url.port) && binding.brands.includes(url.hostname);
+    });
+    if (binding && queryMatches && jobReqMatches && form?.tagName === 'FORM' && visible(form) &&
+        tenant?.type === 'hidden' && tenant.form === form && req?.type === 'hidden' && req.form === form &&
+        /^\d+$/.test(req.value) && headings.length === 1 && headings[0][2] === req.value && brand) {
       applicationContext = {kind: 'successfactors', tenant: tenant.value, requisition: req.value,
-        role: heading[1], brand_host: 'careers.swissre.com'};
+        role: headings[0][1], brand_host: new URL(brand.href).hostname, form: form.id};
     }
   }
   const labelFor = (el) => {
@@ -700,6 +770,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       value: (el.type === 'radio' || el.type === 'checkbox') ? (el.value || '') : '',
       disabled: !!el.disabled || el.matches(':disabled'),
       required: !unavailableChild(el) && (!!el.required || el.getAttribute('aria-required') === 'true' ||
+        (applicationContext.kind === 'successfactors' && el.form?.id === applicationContext.form && /\*/.test(labelFor(el))) ||
         (!!widgetFor(el) && (widgetFor(el).getAttribute('aria-required') === 'true' || el.getAttribute('i_required') === 'true'))),
       widget_id: widgetFor(el)?.id || '',
       uploaded_file_name: uploadedFileFor(el),
@@ -760,6 +831,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
 })()
 """
     expression = expression.replace('__JOBHUNTER_PREFILL__', prefill.SNAPSHOT_JS)
+    expression = expression.replace('__JOBHUNTER_SUCCESSFACTORS__', json.dumps(_SUCCESSFACTORS_TENANTS))
     client.frame_path = ()
     data = client.evaluate(expression)
     if not isinstance(data, dict):
