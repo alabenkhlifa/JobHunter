@@ -59,8 +59,9 @@ SNAPSHOT_JS = r"""(() => {
     let item = host || e;
     while (item && item !== form && !item.tagName.startsWith('UI5-FORM-ITEM-')) item = parent(item);
     const labels = item && item !== form ? [...item.querySelectorAll('[ui5-label]')].filter(visible) : [];
-    return norm(host?.getAttribute('accessible-name') || e.getAttribute('aria-label') ||
-      labels.map(l => l.textContent).join(' ') || e.labels?.[0]?.textContent || e.name || 'Resume / CV');
+    return norm(host?.getAttribute('accessible-name') || host?.getAttribute('text') ||
+      e.getAttribute('aria-label') || labels.map(l => l.textContent).join(' ') ||
+      e.labels?.[0]?.textContent || e.name || (e.type === 'file' ? 'Resume / CV' : 'field'));
   };
   const nodes = [];
   const walk = root => {
@@ -77,6 +78,7 @@ SNAPSHOT_JS = r"""(() => {
     if (!e.matches('input,textarea,select') || !visible(e) ||
         ['hidden', 'button', 'submit', 'password'].includes(e.type)) continue;
     const host = component(e);
+    if (host && /^UI5-(CHECKBOX|RADIO-BUTTON)-/.test(host.tagName)) continue;
     // UI5 Select is represented once by its host below, not by its shadow internals.
     if (e.getRootNode().host?.tagName.startsWith('UI5-SELECT-')) continue;
     const question = label(e, host);
@@ -111,6 +113,19 @@ SNAPSHOT_JS = r"""(() => {
       value_present:!!norm(e.selectedOption?.textContent || e.value) &&
         !/^(no selection|please select|select an option)$/i.test(norm(e.selectedOption?.textContent || e.value)),
       invalid:['Negative','Error'].includes(e.getAttribute('value-state')), options});
+  }
+  for (const e of nodes.filter(e => /^UI5-(CHECKBOX|RADIO-BUTTON)-/.test(e.tagName) && visible(e))) {
+    const radio = e.tagName.startsWith('UI5-RADIO-BUTTON-');
+    const item = e.closest('[ui5-form-item]'), selector = path(e), question = label(e, e);
+    const required = !e.disabled && (!!e.required || e.hasAttribute('required') ||
+      e.getAttribute('aria-required') === 'true' || !!item?.querySelector('[ui5-label][required]'));
+    const peers = radio && item ? nodes.filter(n => n.tagName === e.tagName &&
+      n.closest('[ui5-form-item]') === item && visible(n)) : [e];
+    inputs.push({tag:'input', id:e.id || selector, selector, name:radio && item ? path(item) : '',
+      type:radio ? 'radio' : 'checkbox', label:question, required, form:'careerform',
+      disabled:!!e.disabled, value_present:peers.some(n => !!n.checked),
+      option_label:radio ? norm(e.getAttribute('text') || e.textContent) : '',
+      invalid:['Negative','Error'].includes(e.getAttribute('value-state')), options:[]});
   }
   const buttons = nodes.filter(e => /^UI5-BUTTON-XWEB-/.test(e.tagName) && visible(e)).map(e => ({
     text:norm(e.textContent), id:e.id || path(e), selector:path(e), tag:e.tagName.toLowerCase(),

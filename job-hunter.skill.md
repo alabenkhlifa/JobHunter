@@ -648,7 +648,8 @@ employers or locations, or override its retry policy after failed lookups.
    Denodo's SAP UI5 application is supported in the owner-driven manual flow:
    bind tenant `denodosl` on `career55.sapsf.eu` to its visible employer brand,
    requisition heading and matching form-owned identifiers. Inspection reads
-   open shadow-root fields and returns their explicit `selector` paths; use
+   open shadow-root fields and UI5 checkbox/radio component state, returning
+   explicit `selector` paths; use
    those paths unchanged with upload, native field helpers and advance. Hidden
    steps and ambiguous controls remain unavailable. A completed upload collection
    item with its stored filename confirms an accepted resume even when the

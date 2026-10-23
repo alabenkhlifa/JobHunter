@@ -141,6 +141,23 @@ def test_ui5_stored_resume_survives_a_cleared_native_file_picker(change):
     assert file["value_present"] is (change == "complete")
     assert file["stored_files"] == (["Synthetic.pdf"] if change == "complete" else [])
 
+
+@pytest.mark.parametrize("required,checked,hidden", [(True,False,False), (True,True,False),
+                                                    (False,False,False), (True,False,True)])
+def test_ui5_checkbox_without_a_native_input_preserves_required_and_checked_state(required, checked, hidden):
+    attrs = " ".join(x for x, enabled in [("required",required),("checked",checked),("hidden",hidden)] if enabled)
+    html = HTML.replace("</form>", '<ui5-checkbox-xweb-dynamic-content text="Consent" ' + attrs +
+                        ' style="display:block"></ui5-checkbox-xweb-dynamic-content></form>') + """<script>
+        customElements.define('ui5-checkbox-xweb-dynamic-content',class extends HTMLElement{
+          connectedCallback(){this.attachShadow({mode:'open'}).innerHTML='<div role="checkbox">Consent</div>';}
+          get checked(){return this.hasAttribute('checked');}
+          get required(){return this.hasAttribute('required');}
+        });</script>"""
+    page = inspect_html(html)
+    checkbox = [f for f in page.inputs if f["type"] == "checkbox"]
+    assert len(checkbox) == (0 if hidden else 1)
+    assert ("Consent" in page.missing_required) is (required and not checked and not hidden)
+
 def test_shadow_upload_fill_and_trusted_click(browser, tmp_path):
     open_page, _, _ = browser
     client = open_page(HTML + """<x-profile></x-profile><script>
