@@ -656,7 +656,9 @@ employers or locations, or override its retry policy after failed lookups.
    native picker clears; do not upload it again. Compare every parsed CV
    field with the approved package before advancing, including employment and
    education. In-place wizard steps are re-inspected after one Next click;
-   only the complete Review step can use the separately approved submit helper.
+   empty optional employment/education collections require their visible Add
+   and enabled Next controls. Only the complete Review step can use the
+   separately approved submit helper.
    A verified identity does not mean required answers or consent are complete.
    A final review step may have no editable fields. The verifier accepts it
    only with a supported review layout and an enabled submission control in the

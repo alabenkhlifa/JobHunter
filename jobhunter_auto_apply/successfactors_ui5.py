@@ -136,8 +136,11 @@ SNAPSHOT_JS = r"""(() => {
       /recaptcha|hcaptcha|captcha-delivery\.com/i.test(e.src);
   });
   const continuation = buttons.some(b => /^(Next|Next Step|Continue|Review|Submit|Submit Application|Apply)$/i.test(b.text));
+  const emptyCollection = ['Previous Employment', 'Formal Education'].includes(step) &&
+    buttons.some(b => b.text === 'Add' && !b.disabled) &&
+    buttons.some(b => b.text === 'Next' && !b.disabled);
   const actionable = !!identity && selected.length === 1 && continuation &&
-    (inputs.some(e => !e.disabled) || /^Review/.test(step));
+    (inputs.some(e => !e.disabled) || /^Review/.test(step) || emptyCollection);
   return {url:location.href, title:document.title, text:form.innerText,
     headings:headings.map(h => h[0]), inputs, buttons, links:[], challenge_visible:challenge,
     application_context:{kind:'successfactors_ui5', tenant:'denodosl', requisition,

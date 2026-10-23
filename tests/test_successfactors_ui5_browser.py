@@ -158,6 +158,18 @@ def test_ui5_checkbox_without_a_native_input_preserves_required_and_checked_stat
     assert len(checkbox) == (0 if hidden else 1)
     assert ("Consent" in page.missing_required) is (required and not checked and not hidden)
 
+
+@pytest.mark.parametrize("change", ["none", "no_add", "disabled_next", "other_step"])
+def test_ui5_empty_optional_history_step_requires_owned_add_and_enabled_next(change):
+    start = '<ui5-file-uploader-xweb-dynamic-content accessible-name="Resume / CV"></ui5-file-uploader-xweb-dynamic-content>'
+    html = HTML.replace(start, "<p>No history added</p>").replace('title-text="Getting Started *"', 'title-text="Previous Employment"')
+    if change != "no_add":
+        html = html.replace("</form>", "<ui5-button-xweb-dynamic-content>Add</ui5-button-xweb-dynamic-content></form>")
+    if change == "disabled_next":
+        html = html.replace("<ui5-button-xweb-dynamic-content>Next", "<ui5-button-xweb-dynamic-content disabled>Next")
+    if change == "other_step": html = html.replace('title-text="Previous Employment"', 'title-text="Other"')
+    assert inspect_html(html).verifies_application_for("Product Architect", "Denodo") is (change == "none")
+
 def test_shadow_upload_fill_and_trusted_click(browser, tmp_path):
     open_page, _, _ = browser
     client = open_page(HTML + """<x-profile></x-profile><script>
