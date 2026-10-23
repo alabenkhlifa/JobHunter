@@ -645,6 +645,15 @@ employers or locations, or override its retry policy after failed lookups.
    dialog employer. SuccessFactors adapters cover Swiss Re (`SwissRe`), Zurich
    (`SF2013`) and GFT (`gfttechnol`), requiring the configured ATS host, employer
    brand and a matching requisition heading inside the application form.
+   Denodo's SAP UI5 application is supported in the owner-driven manual flow:
+   bind tenant `denodosl` on `career55.sapsf.eu` to its visible employer brand,
+   requisition heading and matching form-owned identifiers. Inspection reads
+   open shadow-root fields and returns their explicit `selector` paths; use
+   those paths unchanged with upload, native field helpers and advance. Hidden
+   steps and ambiguous controls remain unavailable. Compare every parsed CV
+   field with the approved package before advancing, including employment and
+   education. In-place wizard steps are re-inspected after one Next click;
+   only the complete Review step can use the separately approved submit helper.
    A verified identity does not mean required answers or consent are complete.
    A final review step may have no editable fields. The verifier accepts it
    only with a supported review layout and an enabled submission control in the

@@ -33,7 +33,7 @@ import scraper
 
 from .cdp import BrowserDialogError, BrowserTimeoutError, CDPClient, CDPError, connect_first_page
 from .email_verification import complete_email_verification
-from . import prefill
+from . import prefill, successfactors_ui5
 
 
 DEFAULT_BLOCKLIST_TERMS = (
@@ -148,7 +148,7 @@ class PageInspection:
         if not self.loaded_application_page:
             return False
         context = getattr(self, "application_context", {})
-        if context.get("kind") == "linkedin_easy_apply":
+        if context.get("kind") in {"linkedin_easy_apply", "successfactors_ui5"}:
             return bool(context.get("actionable"))
         if context.get("kind") == "successfactors":
             # Registration and application share one form. Localized labels
@@ -275,7 +275,7 @@ class PageInspection:
                 and _title_tokens(context.get("company", "")) == _title_tokens(job_company or "")
                 and _title_tokens(context.get("dialog_company", "")) == _title_tokens(job_company or "")
             )
-        if context.get("kind") == "successfactors":
+        if context.get("kind") in {"successfactors", "successfactors_ui5"}:
             return bool(
                 _successfactors_identity(self.url, context, job_company)
                 and self.actionable_application_form
@@ -347,6 +347,8 @@ _SUCCESSFACTORS_TENANTS = (
      "brands": ["careers.swissre.com"]},
     {"host": "career2.successfactors.eu", "tenant": "SF2013", "company": "Zurich Insurance",
      "brands": ["www.careers.zurich.com", "careers.zurich.com", "www.zurich.com"]},
+    {"host": "career55.sapsf.eu", "tenant": "denodosl", "company": "Denodo",
+     "brands": ["www.denodo.com", "jobs.denodo.com"]},
     {"host": "career5.successfactors.eu", "tenant": "gfttechnol", "company": "GFT Technologies",
      "brands": ["www.gft.com", "jobs.gft.com"]},
 )
@@ -597,6 +599,8 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
 
     expression = r"""
 (() => {
+  const ui5 = __JOBHUNTER_UI5__;
+  if (ui5) return ui5;
   const inspectDocument = (document, window, location, framePath) => {
   const visible = (el) => {
     const style = window.getComputedStyle(el);
@@ -836,6 +840,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
   return {...root, frame_candidates: candidates, prefill_snapshot: __JOBHUNTER_PREFILL__};
 })()
 """
+    expression = expression.replace('__JOBHUNTER_UI5__', successfactors_ui5.SNAPSHOT_JS)
     expression = expression.replace('__JOBHUNTER_PREFILL__', prefill.SNAPSHOT_JS)
     expression = expression.replace('__JOBHUNTER_SUCCESSFACTORS__', json.dumps(_SUCCESSFACTORS_TENANTS))
     client.frame_path = ()
@@ -1042,6 +1047,8 @@ class AutoApplyEngine:
             raise CDPError("exact role and employer application form were not verified; no browser action was taken")
         if inspection.blockers:
             raise CDPError('A site verification blocker is visible; no browser action was taken.')
+        if self.config.policy_run and getattr(inspection, 'application_context', {}).get('kind') == 'successfactors_ui5':
+            raise GateRefused('SAP UI5 applications require the owner-driven manual flow.')
         if check_prefill and self._prefill_audit(job_id, inspection)['issues']:
             _record(self.config, job_id, 'blocked_prefill_review', application_url=inspection.url,
                     notes=json.dumps({'prefill_issues': inspection.prefill_issues}), error='cv_parser_output_requires_review')
@@ -1179,7 +1186,12 @@ class AutoApplyEngine:
         inspection = self._verify_before_mutation(job_id, client)
         if inspection.url != self.config.expected_page_url or inspection.missing_required or inspection.invalid_fields:
             raise CDPError('Required or invalid fields remain; no Next action was taken.')
-        button = client.evaluate(f"""(() => {{const e=document.querySelector({json.dumps(selector)});
+        ui5 = getattr(inspection, 'application_context', {}).get('kind') == 'successfactors_ui5'
+        if ui5:
+            controls = [b for b in inspection.buttons if b.get('selector') == selector and not b.get('disabled')]
+            button = controls[0]['text'] if len(controls) == 1 else None
+        else:
+            button = client.evaluate(f"""(() => {{const e=document.querySelector({json.dumps(selector)});
           return e&&e.tagName==='BUTTON'&&!e.disabled ? e.innerText.trim() : null;}})()""")
         if button not in {'Next', 'Next Step', 'Continue', 'Review'}:
             raise PermissionError('Only a continuation control is allowed; final submission is separately approved.')
@@ -1190,7 +1202,9 @@ class AutoApplyEngine:
             while time.monotonic() < deadline:
                 time.sleep(.15)
                 current = inspect_page(client, blocklist_terms=self.config.blocklist_terms)
-                if (current.url != self.config.expected_page_url and
+                if (current.url != self.config.expected_page_url or
+                        (ui5 and getattr(current, 'application_context', {}).get('step') !=
+                         getattr(inspection, 'application_context', {}).get('step'))) and (
                         current.verifies_application_for(title, company, job_id=job_id)):
                     return self.inspect(job_id)
                 if (current.url == self.config.expected_page_url and
@@ -1271,6 +1285,11 @@ class AutoApplyEngine:
         if self.config.expected_page_url is not None and client.evaluate("location.href") != self.config.expected_page_url:
             raise PermissionError("The approved application page changed before upload.")
         inspection = self._verify_before_mutation(job_id, client, check_prefill=False)
+        if getattr(inspection, "application_context", {}).get("kind") == "successfactors_ui5":
+            owned = [item for item in inspection.inputs if item.get("type") == "file"
+                     and item.get("selector") == selector and not item.get("disabled")]
+            if len(owned) != 1:
+                raise CDPError("The SAP UI5 upload must use the inspected form's file control.")
         if getattr(inspection, "application_context", {}).get("kind") == "linkedin_easy_apply":
             owned_files = [item for item in inspection.inputs if item.get("type") == "file"]
             if len(owned_files) != 1 or not client.evaluate(f"""(() => {{
@@ -1316,7 +1335,9 @@ class AutoApplyEngine:
         client = self.connect()
         if client.evaluate("location.href") != self.config.expected_page_url:
             raise PermissionError("The approved application page changed before submission.")
-        self._verify_before_mutation(job_id, client)
+        inspection = self._verify_before_mutation(job_id, client)
+        if getattr(inspection, 'application_context', {}).get('kind') == 'successfactors_ui5':
+            return self._submit_ui5(job_id, client, inspection, selector)
         requested_at = dt.datetime.now(dt.timezone.utc)
         result = self._submit_evaluate(job_id, client,
             f"""
@@ -1371,6 +1392,28 @@ class AutoApplyEngine:
             except Exception:
                 self.last_receipt = None
         return inspection
+
+    def _submit_ui5(self, job_id: str, client: CDPClient, inspection: PageInspection,
+                    selector: str) -> PageInspection:
+        """Submit only the verified Review step; persist uncertainty before the click."""
+        context = inspection.application_context
+        controls = [b for b in inspection.buttons if b.get('selector') == selector
+                    and b.get('text') in {'Submit', 'Submit Application', 'Apply'} and not b.get('disabled')]
+        if (context.get('step') != 'Review' or len(controls) != 1 or inspection.missing_required
+                or inspection.invalid_fields or inspection.prefill_issues):
+            raise CDPError('Only a complete SAP UI5 Review step can be submitted.')
+        if client.evaluate('location.href') != self.config.expected_page_url:
+            raise PermissionError('The approved application page changed before submission.')
+        _record(self.config, job_id, 'submission_attempted', application_url=self.config.expected_page_url,
+                notes=json.dumps({'exact_role_form_verified': True, 'retry_forbidden': True,
+                                  'receipt_review_required': True}))
+        try:
+            client.click(selector)
+        except (BrowserDialogError, BrowserTimeoutError) as exc:
+            self._browser_issue(job_id, exc)
+            raise
+        time.sleep(2)
+        return self.inspect(job_id, stage='submission_attempted')
 
     def verify_email(self, job_id: str, *, approved: bool = False) -> PageInspection:
         """Resume a recorded code step without clicking the initial submit again."""

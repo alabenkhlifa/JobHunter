@@ -18,6 +18,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from .shadow import element_expression
+
 
 class CDPError(RuntimeError):
     """Raised when a CDP command fails."""
@@ -218,18 +220,20 @@ class CDPClient:
         """Click an unobscured top-level control through trusted browser input."""
         if self.frame_path:
             raise CDPError("native control interaction requires the top-level form")
-        self.evaluate(f"""(() => {{const e=document.querySelector({json.dumps(selector)});
+        self.evaluate(f"""(() => {{const e={element_expression(selector)};
           if(!e) throw Error('Control unavailable');
           e.scrollIntoView({{block:'center',behavior:'instant'}});}})()""")
         previous = None
         deadline = time.monotonic()+2
         while time.monotonic() < deadline:
-            position = self.evaluate(f"""(() => {{const e=document.querySelector({json.dumps(selector)});
+            position = self.evaluate(f"""(() => {{const e={element_expression(selector)};
               if(!e||e.disabled) throw Error('Control unavailable');
               const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
-              const top=document.elementFromPoint(x,y);
+              let top=document.elementFromPoint(x,y);
+              while(top?.shadowRoot) {{const inner=top.shadowRoot.elementFromPoint(x,y);if(!inner||inner===top)break;top=inner;}}
+              let owned=false;for(let n=top;n;n=n.parentElement||n.getRootNode().host)if(n===e){{owned=true;break;}}
               return r.width&&r.height&&getComputedStyle(e).visibility!=='hidden'&&
-                (top===e||e.contains(top)) ? {{x,y}} : null;}})()""")
+                owned ? {{x,y}} : null;}})()""")
             if position and previous and all(abs(position[k]-previous[k])<.5 for k in ('x','y')):
                 break
             previous = position
@@ -241,7 +245,7 @@ class CDPClient:
                                                   "clickCount": 1, **position})
 
     def fill(self, selector: str, value: str) -> None:
-        self.evaluate(f"""(() => {{const e=document.querySelector({json.dumps(selector)});
+        self.evaluate(f"""(() => {{const e={element_expression(selector)};
           if(!e||e.disabled||e.readOnly||!['INPUT','TEXTAREA'].includes(e.tagName)||
              ['hidden','password','file','checkbox','radio'].includes(e.type)||
              !e.getBoundingClientRect().width) throw Error('Text control unavailable');
@@ -250,12 +254,16 @@ class CDPClient:
         self.evaluate("document.activeElement.blur()")
 
     def select_option(self, selector: str, label: str) -> None:
-        info = self.evaluate(f"""(() => {{const e=document.querySelector({json.dumps(selector)});
-          if(!e||e.tagName!=='SELECT'||e.disabled||!e.getBoundingClientRect().width)
+        info = self.evaluate(f"""(() => {{const e={element_expression(selector)};
+          const ui5=e?.tagName==='UI5-SELECT-XWEB-DYNAMIC-CONTENT';
+          if(!e||(!ui5&&e.tagName!=='SELECT')||e.disabled||!e.getBoundingClientRect().width)
             throw Error('Select control unavailable');
-          const matches=[...e.options].filter(o=>o.text.trim()==={json.dumps(label)}&&!o.disabled);
+          const options=ui5?[...e.querySelectorAll('[ui5-option]')]:[...e.options];
+          const text=o=>(ui5?o.textContent:o.text).trim();
+          const matches=options.filter(o=>text(o)==={json.dumps(label)}&&!o.disabled);
           if(matches.length!==1) throw Error('Confirmed option unavailable');
-          e.focus();return {{current:e.selectedIndex,target:matches[0].index,count:e.options.length}};}})()""")
+          e.focus();return {{current:options.indexOf(ui5?e.selectedOption:e.selectedOptions[0]),
+            target:options.indexOf(matches[0]),count:options.length,ui5}};}})()""")
         if info["current"] == info["target"]:
             return
         self.click(selector)
@@ -270,7 +278,8 @@ class CDPClient:
         self.evaluate("document.activeElement.blur()")
         deadline = time.monotonic()+2
         while time.monotonic() < deadline:
-            selected = self.evaluate(f"document.querySelector({json.dumps(selector)})?.selectedOptions[0]?.text.trim()")
+            selected = self.evaluate(f"""(() => {{const e={element_expression(selector)};
+              return (e?.selectedOptions?.[0]?.text || e?.selectedOption?.textContent || '').trim();}})()""")
             if selected == label:
                 return
             time.sleep(.05)
@@ -310,8 +319,8 @@ class CDPClient:
 
     def upload_file(self, selector: str, file_path: str) -> None:
         self.call("DOM.enable")
-        if self.frame_path:
-            element = self.evaluate(f"document.querySelector({json.dumps(selector)})", return_by_value=False)
+        if self.frame_path or ">>>" in selector:
+            element = self.evaluate(f"{element_expression(selector)}", return_by_value=False)
             object_id = element.get("objectId")
             if not object_id:
                 raise CDPError(f"file input not found in application frame: {selector}")
