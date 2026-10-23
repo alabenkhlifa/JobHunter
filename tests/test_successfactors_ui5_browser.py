@@ -124,6 +124,23 @@ def test_ui5_shadow_required_and_invalid_fields_are_not_hidden_by_component_host
     assert page.invalid_fields == ["Phone"]
     assert not page.safe_to_continue
 
+
+@pytest.mark.parametrize("change", ["complete", "failed", "hidden", "outside_collection"])
+def test_ui5_stored_resume_survives_a_cleared_native_file_picker(change):
+    item = ('<span ui5-upload-collection-item upload-state="Complete" '
+            'file-name="Synthetic.pdf">Stored resume</span>')
+    if change == "failed": item = item.replace('upload-state="Complete"', 'upload-state="Error"')
+    if change == "hidden": item = item.replace("<span ", "<span hidden ")
+    start = '<ui5-file-uploader-xweb-dynamic-content accessible-name="Resume / CV">'
+    end = "</ui5-file-uploader-xweb-dynamic-content>"
+    html = HTML.replace(start, '<div ui5-upload-collection>' + start).replace(end, end + item + "</div>")
+    if change == "outside_collection":
+        html = html.replace(item, "").replace("</form>", item + "</form>")
+    page = inspect_html(html)
+    file = next(f for f in page.inputs if f["type"] == "file")
+    assert file["value_present"] is (change == "complete")
+    assert file["stored_files"] == (["Synthetic.pdf"] if change == "complete" else [])
+
 def test_shadow_upload_fill_and_trusted_click(browser, tmp_path):
     open_page, _, _ = browser
     client = open_page(HTML + """<x-profile></x-profile><script>

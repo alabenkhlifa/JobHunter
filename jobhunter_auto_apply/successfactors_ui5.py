@@ -82,6 +82,10 @@ SNAPSHOT_JS = r"""(() => {
     const question = label(e, host);
     const item = host?.closest('[ui5-form-item]');
     const disabled = !!e.disabled || !!host?.disabled;
+    const collection = host?.closest('[ui5-upload-collection]');
+    const stored = e.type === 'file' && collection ? [...collection.querySelectorAll(
+      '[ui5-upload-collection-item][upload-state="Complete"]')].filter(visible)
+      .map(file => file.getAttribute('file-name')).filter(Boolean) : [];
     const required = !!e.required || e.getAttribute('aria-required') === 'true' ||
       !!host?.required || /\*\s*$/.test(question) ||
       !!item?.querySelector('[ui5-label][required]') ||
@@ -90,7 +94,8 @@ SNAPSHOT_JS = r"""(() => {
     inputs.push({tag:e.tagName.toLowerCase(), id:e.id || selector, selector,
       name:e.name || '', type:e.type || 'text', label:question, required:required && !disabled, form:'careerform',
       disabled, readonly:!!e.readOnly || !!host?.readonly,
-      value_present:e.type === 'file' ? !!e.files?.length || !!host?.value :
+      stored_files:stored,
+      value_present:e.type === 'file' ? !!e.files?.length || !!host?.value || stored.length > 0 :
         e.type === 'radio' ? nodes.some(other => other.matches('input[type=radio]') && other.checked &&
           ((e.name && other.name === e.name) || (item && component(other)?.closest('[ui5-form-item]') === item))) :
         e.type === 'checkbox' ? e.checked : !!norm(e.value),

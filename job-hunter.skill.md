@@ -650,7 +650,9 @@ employers or locations, or override its retry policy after failed lookups.
    requisition heading and matching form-owned identifiers. Inspection reads
    open shadow-root fields and returns their explicit `selector` paths; use
    those paths unchanged with upload, native field helpers and advance. Hidden
-   steps and ambiguous controls remain unavailable. Compare every parsed CV
+   steps and ambiguous controls remain unavailable. A completed upload collection
+   item with its stored filename confirms an accepted resume even when the
+   native picker clears; do not upload it again. Compare every parsed CV
    field with the approved package before advancing, including employment and
    education. In-place wizard steps are re-inspected after one Next click;
    only the complete Review step can use the separately approved submit helper.
