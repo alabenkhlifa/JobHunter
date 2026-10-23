@@ -27,6 +27,12 @@ before selecting the jobs actually sent.
 
 Routine runs use deployed code without editing it. Write review input, candidate data, generated documents and evidence under ignored `data/`. If a command or verifier fails, report the failure instead of patching source or changing dependencies. Explicit development work follows `AGENTS.md`: a separate checkout, tests, commit, push and reviewed deployment.
 
+## Company application history
+
+Apply only to companies the candidate has not applied to before. Before selecting an offer, preparing its application or submitting it, check the full application history, tracker and any available portal evidence across all roles, listings and sources. Match company-name variants, regional entities and clearly identified brands of the same employer group; a different title, requisition, source or subsidiary label does not make an employer new.
+
+Exclude any company with a previous application, including a rejected application. Hold companies with an attempted or uncertain prior submission until reconciled; never retry an uncertain submission. Research, a generated package or an account alone does not establish that an application was sent. Select at most one offer per company in a batch, recheck history before submitting, and replace excluded offers with the next eligible new company. Keep the reason in private batch state without marking the listing rejected or changing existing receipts. A repeat company requires the owner's explicit exception for that company. This check applies to manual and autopilot work; existing automation filters alone are not evidence that it passed.
+
 ## Architecture
 - **Scraper**: `scraper.py` — scraping + CLI utilities (get-job, list-queued, send-doc, send-msg, mark-interested)
 - **Renderer**: `render_pdf.py` — dumb PDF renderer for resume and cover letter
