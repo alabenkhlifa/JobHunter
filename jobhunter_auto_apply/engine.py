@@ -637,12 +637,39 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
   const externalFiles = resumeStep ? [...document.querySelectorAll('body > input[type=file]')].filter(el =>
     !el.disabled && el.accept.split(',').includes('application/pdf')) : [];
   const ownedFile = externalFiles.length === 1 ? externalFiles[0] : null;
+  // SDUI choice inputs have no box; their associated empty label is the
+  // rendered control and the adjacent row text is the option. Require a unique
+  // dialog-owned label and single-input row, never a generic ancestor proxy.
+  const linkedinChoice = (el) => {
+    if (!linkedin || !['radio', 'checkbox'].includes(el.type) || !dialog.contains(el) ||
+        el.matches(':disabled') || el.closest('[hidden], [inert], [aria-hidden="true"]')) return null;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility !== 'visible') return null;
+    const labels = [...(el.labels || [])].filter(label => dialog.contains(label) && visible(label) &&
+      !label.closest('[hidden], [inert], [aria-hidden="true"]'));
+    if (labels.length !== 1 || !el.id ||
+        [...document.querySelectorAll('[id]')].filter(node => node.id === el.id).length !== 1) return null;
+    const label = labels[0], row = el.parentElement?.parentElement;
+    if (!row || !row.contains(label) || !visible(row) || row.querySelectorAll('input,select,textarea').length !== 1) return null;
+    const option = (label.innerText.trim() || row.innerText.trim()).slice(0, 300);
+    if (!option) return null;
+    const group = el.closest('fieldset, [role=radiogroup], [role=group]');
+    const holder = group?.parentElement;
+    const prompts = holder ? [...holder.children].filter(node => node.matches('p,legend,label') && visible(node) &&
+      !node.closest('[hidden], [inert], [aria-hidden="true"]')) : [];
+    const prompt = prompts.length === 1 && holder.querySelectorAll('fieldset, [role=radiogroup], [role=group]').length === 1
+      ? prompts[0].innerText.trim() : '';
+    // Only infer the starred question when it agrees with the input's own
+    // accessible question; unrelated nearby text cannot make a field required.
+    const question = prompt && prompt.replace(/\s*\*\s*$/, '').trim() === el.getAttribute('aria-label')?.trim() ? prompt : '';
+    return {option, question};
+  };
   let applicationContext = {};
   if (linkedin) {
     const controls = [...dialog.querySelectorAll('button')].filter(el => visible(el) && !el.disabled);
     const continuation = controls.some(el => /^(next|review|submit application)$/i.test(el.innerText.trim()));
     const fields = [...dialog.querySelectorAll('input,select,textarea')].filter(el =>
-      visible(el) && !el.disabled && !['hidden','button','submit','password'].includes(el.type));
+      (visible(el) || linkedinChoice(el)) && !el.matches(':disabled') && !['hidden','button','submit','password'].includes(el.type));
     const review = /review (?:your )?application/i.test(scopeText) &&
       controls.some(el => /^submit application$/i.test(el.innerText.trim()));
     applicationContext = {kind: 'linkedin_easy_apply', job_id: linkedInJob[1],
@@ -718,7 +745,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       parent.getAttribute('data-ddd-child-link') === name &&
       parent.getAttribute('data-ddd-no-children') === el.selectedOptions[0]?.text.trim();
   };
-  const presented = (el) => el === ownedFile || visible(el) || (
+  const presented = (el) => el === ownedFile || !!linkedinChoice(el) || visible(el) || (
     el.type === 'file' && !el.matches(':disabled') && [...(el.labels || [])].some(visible)
   ) || (
     !el.matches(':disabled') && !!widgetFor(el)
@@ -729,6 +756,8 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     return form ? (form.id || `form-${[...document.forms].indexOf(form)}`) : '';
   };
   const questionFor = (el) => { try {
+    const choice = linkedinChoice(el);
+    if (choice?.question) return choice.question;
     const group = el.closest('fieldset, [role=radiogroup], [role=group]');
     if (group) {
       const legend = group.querySelector('legend');
@@ -748,7 +777,11 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
   const valuePresent = (el) => {
     if (uploadedFileFor(el)) return true;
     if (el.type === 'radio') {
-      return [...document.querySelectorAll('input[type=radio]')].some(other => other.name === el.name && other.checked);
+      const group = el.closest('fieldset, [role=radiogroup], [role=group]');
+      return [...scope.querySelectorAll('input[type=radio]')].some(other =>
+        (el.name ? other.name === el.name : other === el) && other.checked &&
+        other.form === el.form && !other.matches(':disabled') && presented(other) &&
+        (!linkedin || other.closest('fieldset, [role=radiogroup], [role=group]') === group));
     }
     if (el.type === 'checkbox') return el.checked;
     if (widgetFor(el) && ['', '-1', '-999'].includes(el.value)) return false;
@@ -773,13 +806,14 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       type: el.type || '',
       id: el.id || '',
       name: el.name || '',
-      label: el === ownedFile ? 'Resume' : labelFor(el),
+      label: el === ownedFile ? 'Resume' : (linkedinChoice(el)?.option || labelFor(el)),
       form: formFor(el),
       question: questionFor(el),
       autocomplete: el.getAttribute('autocomplete') || '',
       value: (el.type === 'radio' || el.type === 'checkbox') ? (el.value || '') : '',
       disabled: !!el.disabled || el.matches(':disabled'),
       required: !unavailableChild(el) && (!!el.required || el.getAttribute('aria-required') === 'true' ||
+        (!!linkedinChoice(el)?.question && /\*\s*$/.test(linkedinChoice(el).question)) ||
         (applicationContext.kind === 'successfactors' && el.form?.id === applicationContext.form && /\*/.test(labelFor(el))) ||
         (!!widgetFor(el) && (widgetFor(el).getAttribute('aria-required') === 'true' || el.getAttribute('i_required') === 'true'))),
       widget_id: widgetFor(el)?.id || '',
@@ -875,10 +909,12 @@ def _inspection_from_data(data: dict[str, Any], blocklist_terms: tuple[str, ...]
         blockers.append("human verification")
 
     inputs = data.get("inputs") or []
-    missing_required = [
-        item.get("label") or item.get("name") or item.get("id") or item.get("tag") or "field"
-        for item in inputs if item.get("required") and not item.get("value_present")
-    ]
+    missing_required = list(dict.fromkeys(
+        (item.get("question") if (data.get("application_context") or {}).get("kind") == "linkedin_easy_apply"
+         and item.get("type") in {"radio", "checkbox"} else None)
+        or item.get("label") or item.get("name") or item.get("id") or item.get("tag") or "field"
+        for item in inputs if item.get("required") and not item.get("value_present") and not item.get("disabled")
+    ))
     invalid_fields = [
         item.get("label") or item.get("name") or item.get("id") or item.get("tag") or "field"
         for item in inputs if item.get("invalid")

@@ -123,6 +123,130 @@ def test_linkedin_contact_questions_and_final_review_remain_bound_to_job(phase):
     assert bool(page.missing_required) is (phase != 'review')
 
 
+def linkedin_choices(*, checked=False, kind='radio'):
+    options = ['Basic', 'Intermediate', 'Professional', 'Fluent', 'Native'] if kind == 'radio' else ['Acknowledge']
+    rows = ''.join(f'''<div class="choice"><div><input id="choice-{i}" name="level" type="{kind}"
+        aria-label="English level" style="width:0;height:0;appearance:none" {'checked' if checked and i == 3 else ''}>
+        <label for="choice-{i}" style="display:inline-block;width:18px;height:18px"></label></div>
+        <div><p>{option}</p></div></div>''' for i, option in enumerate(options))
+    content = f'<div class="question"><p>English level*</p><fieldset role="radiogroup"><div>{rows}</div></fieldset></div><button>Back</button><button>Next</button>'
+    return LINKEDIN.replace('<p>Select or upload a resume in PDF format</p><button>Upload resume</button><button>Next</button>', content)
+
+
+def test_linkedin_zero_size_radios_use_owned_rendered_labels_and_group_question():
+    page = inspect_html(linkedin_choices(), 'https://www.linkedin.com/jobs/view/123456/')
+    assert page.verifies_application_for('Senior Java Developer', 'Example Consulting', job_id='li-123456')
+    assert len(page.inputs) == 5
+    assert [f['label'] for f in page.inputs] == ['Basic', 'Intermediate', 'Professional', 'Fluent', 'Native']
+    assert all(f['question'] == 'English level*' and f['required'] and not f['value_present']
+               and f['form'] == 'linkedin-easy-apply' for f in page.inputs)
+    assert page.missing_required == ['English level*']
+    assert not page.safe_to_continue
+    assert any(s['reason'] == LINKEDIN_EASY_APPLY for s in page_hard_stops(page))
+    assert not page.verifies_application_for('Other Engineer', 'Example Consulting', job_id='li-123456')
+    assert not page.verifies_application_for('Senior Java Developer', 'Other Employer', job_id='li-123456')
+    assert not page.verifies_application_for('Senior Java Developer', 'Example Consulting', job_id='li-999999')
+
+
+@pytest.mark.parametrize('source', ['background', 'hidden_peer', 'disabled_peer', 'other_group'])
+def test_linkedin_radio_group_cannot_be_satisfied_by_unowned_checked_peer(source):
+    html = linkedin_choices()
+    peer = '<input type="radio" name="level" checked>'
+    if source == 'background':
+        html += peer
+    elif source == 'hidden_peer':
+        html = html.replace('</fieldset>', peer.replace(' checked', ' style="display:none" checked') + '</fieldset>')
+    elif source == 'disabled_peer':
+        html = html.replace('</fieldset>', peer.replace(' checked', ' disabled checked') + '</fieldset>')
+    else:
+        html = html.replace('<button>Back</button>', '<fieldset>' + peer + '</fieldset><button>Back</button>')
+    page = inspect_html(html, 'https://www.linkedin.com/jobs/view/123456/')
+    assert page.missing_required == ['English level*']
+    assert not any(f['value_present'] for f in page.inputs if f['id'].startswith('choice-'))
+
+
+def test_native_same_name_radio_group_spans_fieldsets_in_one_form():
+    html = '''<!doctype html><form>
+    <fieldset><legend>First option</legend><label>Yes<input type="radio" name="answer" required></label></fieldset>
+    <fieldset><legend>Second option</legend><label>No<input type="radio" name="answer" checked></label></fieldset>
+    <button type="submit">Apply</button></form>'''
+    page = inspect_html(html, 'https://careers.example.com/apply')
+    assert len(page.inputs) == 2
+    assert all(field['value_present'] for field in page.inputs)
+    assert not page.missing_required
+    assert not page.invalid_fields
+
+
+def test_linkedin_owned_checked_radio_satisfies_only_its_question():
+    page = inspect_html(linkedin_choices(checked=True), 'https://www.linkedin.com/jobs/view/123456/')
+    assert all(f['value_present'] for f in page.inputs)
+    assert not page.missing_required
+
+
+@pytest.mark.parametrize('change', ['hidden_label', 'hidden_group', 'hidden_input', 'disabled', 'disabled_fieldset',
+                                   'duplicate_id', 'extra_control', 'second_dialog', 'no_next', 'background_only'])
+def test_linkedin_choice_proxies_do_not_make_hidden_or_ambiguous_forms_actionable(change):
+    html = linkedin_choices()
+    if change == 'hidden_label': html = html.replace('display:inline-block', 'display:none')
+    if change == 'hidden_group': html = html.replace('<fieldset ', '<fieldset hidden ')
+    if change == 'hidden_input': html = html.replace('width:0;', 'display:none;width:0;')
+    if change == 'disabled': html = html.replace('<input id="choice-', '<input disabled id="choice-')
+    if change == 'disabled_fieldset': html = html.replace('<fieldset ', '<fieldset disabled ')
+    if change == 'duplicate_id': html += ''.join(f'<input hidden id="choice-{i}">' for i in range(5))
+    if change == 'extra_control': html = html.replace('<div class="choice">', '<div class="choice"><input type="hidden">')
+    if change == 'second_dialog': html += '<dialog open>Unrelated dialog</dialog>'
+    if change == 'no_next': html = html.replace('<button>Next</button>', '')
+    if change == 'background_only':
+        start, end = html.index('<div class="question">'), html.index('<button>Back</button>')
+        html = html[:start] + html[end:] + html[start:end]
+    page = inspect_html(html, 'https://www.linkedin.com/jobs/view/123456/')
+    assert not page.verifies_application_for('Senior Java Developer', 'Example Consulting', job_id='li-123456')
+    if change not in {'second_dialog', 'no_next'}:
+        assert not any(f['type'] in {'radio', 'checkbox'} for f in page.inputs)
+
+
+@pytest.mark.parametrize('kind', ['radio', 'checkbox'])
+@pytest.mark.parametrize('attribute', ['inert', 'aria-hidden="true"', 'hidden'])
+@pytest.mark.parametrize('ancestor', [False, True])
+def test_linkedin_choice_proxy_rejects_unavailable_label_ancestry(kind, attribute, ancestor):
+    html = linkedin_choices(kind=kind)
+    if ancestor:
+        html = html.replace('<label for=', f'<span {attribute} style="display:block"><label for=').replace('</label>', '</label></span>')
+    else:
+        html = html.replace('<label for=', f'<label {attribute} for=')
+    page = inspect_html(html, 'https://www.linkedin.com/jobs/view/123456/')
+    assert not page.verifies_application_for('Senior Java Developer', 'Example Consulting', job_id='li-123456')
+    assert not any(f['type'] in {'radio', 'checkbox'} for f in page.inputs)
+
+
+@pytest.mark.parametrize('change', ['missing_star', 'hidden_prompt', 'inert_prompt', 'aria_hidden_prompt',
+                                   'rendered_hidden_prompt', 'unrelated_prompt', 'ambiguous_prompt'])
+def test_linkedin_required_inference_requires_one_visible_matching_question(change):
+    html = linkedin_choices()
+    if change == 'missing_star': html = html.replace('English level*</p>', 'English level</p>')
+    if change == 'hidden_prompt': html = html.replace('<p>English level*', '<p hidden>English level*')
+    if change == 'inert_prompt': html = html.replace('<p>English level*', '<p inert>English level*')
+    if change == 'aria_hidden_prompt': html = html.replace('<p>English level*', '<p aria-hidden="true">English level*')
+    if change == 'rendered_hidden_prompt': html = html.replace('<p>English level*', '<p hidden style="display:block">English level*')
+    if change == 'unrelated_prompt': html = html.replace('<p>English level*', '<p>Other question*')
+    if change == 'ambiguous_prompt': html = html.replace('<p>English level*', '<p>Another question*</p><p>English level*')
+    page = inspect_html(html, 'https://www.linkedin.com/jobs/view/123456/')
+    assert len(page.inputs) == 5
+    assert not any(f['required'] for f in page.inputs)
+
+
+@pytest.mark.parametrize('checked', [False, True])
+def test_linkedin_zero_size_checkbox_retains_its_own_checked_validation(checked):
+    html = linkedin_choices(kind='checkbox')
+    if checked: html = html.replace('type="checkbox"', 'type="checkbox" checked')
+    page = inspect_html(html, 'https://www.linkedin.com/jobs/view/123456/')
+    assert page.verifies_application_for('Senior Java Developer', 'Example Consulting', job_id='li-123456')
+    assert len(page.inputs) == 1
+    assert page.inputs[0]['label'] == 'Acknowledge'
+    assert page.inputs[0]['value_present'] is checked
+    assert page.missing_required == ([] if checked else ['English level*'])
+
+
 SWISS = '''<!doctype html><title>Career Opportunities: Apply for Lead Software Engineer (123456)</title>
 <a href="https://careers.swissre.com/">Swiss Re</a>
 <form id="careerform"><h1>Lead Software Engineer (123456)</h1>
