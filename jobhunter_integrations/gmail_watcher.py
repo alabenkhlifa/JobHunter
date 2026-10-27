@@ -59,7 +59,11 @@ ACCOUNT_NOTICE_PATTERN = re.compile(
     r")\b"
 )
 REJECTION_PATTERNS = [
-    ("regret to inform", r"\bregret to inform (?:you|the candidate)\b"),
+    (
+        "unable to offer position",
+        r"\bwe (?:are unable to|cannot|can t|will not|won t) offer you "
+        r"(?:a|the) (?:position|role|job)\b",
+    ),
     (
         "position filled or closed",
         r"\bregret to inform (?:you )?(?:that )?(?:the|this) "
@@ -69,7 +73,7 @@ REJECTION_PATTERNS = [
         "application not progressing",
         r"\b(?:(?:will|would|can|could) not|won t|cannot) "
         r"(?:be )?(?:progressing|proceeding|moving forward)"
-        r"(?: with)? (?:your|the) application\b",
+        r"(?: with)? (?:your|the) (?:application|candidacy)\b",
     ),
     (
         "application unsuccessful",
@@ -151,19 +155,29 @@ OFFER_PATTERNS = [
 ]
 INTERVIEW_PATTERNS = [
     (
+        "interview confirmed",
+        r"\byour (?:technical |second |final )?interview (?:is|has been) "
+        r"(?:confirmed|scheduled|rescheduled) for\b",
+    ),
+    (
+        "interview availability requested",
+        r"\b(?:please (?:let us know|share|confirm)|could you (?:please )?(?:share|confirm)) "
+        r"your availability for (?:an? )?(?:technical |phone |video |initial )?interview\b",
+    ),
+    (
         "interview invitation",
         r"\b(?:(?:invite|invited) (?:you )?(?:to|for)|invitation (?:to|for)) "
-        r"(?:an? )?(?:initial |technical |phone |video |onsite |on site )?interview\b",
+        r"(?:an? )?(?:initial |technical |phone |video |onsite |on site |second |final )?interview\b",
     ),
     (
         "interview scheduling",
         r"\b(?:would like|d like|want|wish) to (?:schedule|arrange|book) "
-        r"(?:an? )?(?:initial |technical |phone |video |onsite |on site )?interview\b",
+        r"(?:an? )?(?:initial |technical |phone |video |onsite |on site |second |final )?interview\b",
     ),
     (
         "selected for interview",
         r"\b(?:selected|shortlisted) (?:you )?for (?:an? )?"
-        r"(?:initial |technical |phone |video |onsite |on site )?interview\b",
+        r"(?:initial |technical |phone |video |onsite |on site |second |final )?interview\b",
     ),
     (
         "accepted for interview",
@@ -191,6 +205,11 @@ ASSESSMENT_PATTERNS = [
     ),
 ]
 ACTION_REQUIRED_PATTERNS = [
+    (
+        "recruiter follow-up requested",
+        r"\b(?:please|kindly) (?:send|provide|upload)(?: us)? (?:your |an? )?"
+        r"(?:updated (?:cv|resume)|availability|salary expectations)\b",
+    ),
     ("action required", r"\baction required\b"),
     (
         "information requested",
@@ -358,7 +377,18 @@ def extract_text(payload: dict[str, Any]) -> str:
 
 def extract_visible_text(payload: dict[str, Any]) -> str:
     """Read visible mail copy, excluding CSS, scripts and HTML attributes."""
+    if payload.get("filename") or str(payload.get("mimeType", "")) == "message/rfc822":
+        return ""  # Attachments and forwarded messages are not the current reply.
     mime = str(payload.get("mimeType", ""))
+    if mime == "multipart/alternative":
+        # Prefer the rendered HTML copy (with quote removal), not concatenated
+        # alternatives that can disagree or repeat old conversation history.
+        parts = payload.get("parts", []) or []
+        for part in sorted(parts, key=lambda item: item.get("mimeType") != "text/html"):
+            text = extract_visible_text(part)
+            if text.strip():
+                return text
+        return ""
     chunks = []
     if mime.startswith("text/") and payload.get("body", {}).get("data"):
         body = decode_part_body(payload["body"]["data"])
@@ -367,7 +397,11 @@ def extract_visible_text(payload: dict[str, Any]) -> str:
             soup = BeautifulSoup(body, "html.parser")
             for element in soup(["head", "style", "script", "noscript"]):
                 element.decompose()
+            for element in soup.select("blockquote, .gmail_quote, .yahoo_quoted, .moz-cite-prefix"):
+                element.decompose()
             body = soup.get_text(" ", strip=True)
+        body = re.split(r"(?im)^\s*(?:On .+wrote:|[- ]*Original Message[- ]*|[- ]*Forwarded message[- ]*)\s*$", body)[0]
+        body = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith(">"))
         chunks.append(body)
     for part in payload.get("parts", []) or []:
         chunks.append(extract_visible_text(part))
@@ -411,12 +445,38 @@ def job_terms(jobs: list[dict[str, str]]) -> set[str]:
 
 
 def classify_application_outcome(message_text: str) -> tuple[str | None, list[str]]:
-    text = normalize_for_matching(message_text)
+    # Keep wrapped conditional promises together, but separate independent
+    # contact instructions so their "if you have questions" cannot hide a decision.
+    non_decisive = re.compile(r"\b(?:if|unless|until|should we|in case|not saying that)\b")
+    clauses = []
+    for sentence in re.split(r"[.!?;]+", message_text):
+        parts = re.split(
+            r",\s*(?:but\s+)?(?=please\s+(?:contact\b|let us know\b))",
+            sentence, flags=re.IGNORECASE,
+        )
+        # A leading condition still governs the following contact request:
+        # "If selected, please let us know your availability for an interview."
+        if non_decisive.search(normalize_for_matching(parts[0])):
+            continue
+        clauses.extend(normalize_for_matching(part) for part in parts)
+    text = " ".join(clause for clause in clauses if not non_decisive.search(clause))
     for outcome, patterns in OUTCOME_PATTERNS:
         reasons = [label for label, pattern in patterns if re.search(pattern, text)]
         if reasons:
             return outcome, reasons
     return None, []
+
+
+def outcome_detail(body: str, outcome: str) -> str:
+    """Quote only a decisive current-body sentence, bounded and redacted."""
+    for sentence in re.split(r"(?<=[.!?;])\s+", body):
+        if classify_application_outcome(sentence)[0] != outcome:
+            continue
+        sentence = re.sub(r"https?://\S+|www\.\S+|[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", "[redacted]", sentence)
+        sentence = re.sub(r"(?i)\b(?:password|passcode|otp|code|token|secret)\s*[:=]\s*\S+", "[redacted]", sentence)
+        sentence = re.sub(r"(?<!\w)\+?\d[\d ().-]{6,}\d(?!\w)|\b\d{4,}\b", "[redacted]", sentence)
+        return " ".join(sentence.split())[:180]
+    return ""
 
 
 def match_active_application(
@@ -425,6 +485,12 @@ def match_active_application(
 ) -> tuple[dict[str, str] | None, str]:
     text = normalize_for_matching(message_text)
     active = [job for job in jobs if normalize(job.get("stage", "")) in ACTIVE_EMAIL_STAGES]
+    company_matches = [job for job in active if
+        len(normalize_for_matching(job.get("company", ""))) >= 3
+        and contains_term(text, normalize_for_matching(job.get("company", "")))]
+    companies = {normalize_for_matching(job["company"]) for job in company_matches}
+    if len(companies) > 1:
+        return None, "multiple employers mentioned; application needs review"
 
     exact = [
         job
@@ -432,6 +498,10 @@ def match_active_application(
         if len(normalize_for_matching(job.get("title", ""))) >= 8
         and contains_term(text, normalize_for_matching(job.get("title", "")))
     ]
+    if exact and company_matches:
+        exact = [job for job in exact if job in company_matches]
+        if not exact:
+            return None, "matched title conflicts with matched employer"
     if len(exact) == 1:
         return exact[0], "exact job title"
     if len(exact) > 1:
@@ -439,6 +509,8 @@ def match_active_application(
 
     scored: list[tuple[int, dict[str, str], list[str]]] = []
     for job in active:
+        if company_matches and job not in company_matches:
+            continue
         company = normalize_for_matching(job.get("company", ""))
         title_terms = {
             token
@@ -512,7 +584,7 @@ def message_summary(service, msg_id: str) -> dict[str, Any]:
         "body_text": text,
         "text": (
             f"{header_value(headers, 'From')} {header_value(headers, 'To')} "
-            f"{header_value(headers, 'Subject')} {msg.get('snippet') or ''} {text}"
+            f"{header_value(headers, 'Subject')} {text or msg.get('snippet') or ''}"
         ),
     }
 
@@ -603,7 +675,13 @@ def record_application_outcome(
     finally:
         conn.close()
 
-    tracker_synced = tracker_sync() if tracker_sync is not None else scraper.sync_application_tracker_if_enabled()
+    try:
+        tracker_synced = tracker_sync() if tracker_sync is not None else scraper.sync_application_tracker_if_enabled()
+    except Exception:
+        # The DB transaction is already durable. Report its real outcome even
+        # if Sheet read-back fails; the scheduled monitor retries tracker sync.
+        # Provider exceptions may contain private data, so do not quote them.
+        tracker_synced = False
     return {
         "status": "updated",
         "reason": f"application marked {outcome}",
@@ -635,6 +713,7 @@ def process_application_outcome(
     if outcome:
         summary["outcome"] = outcome
         summary["outcome_reasons"] = outcome_reasons
+        summary["outcome_detail"] = outcome_detail(summary.get("body_text", ""), outcome)
     else:
         normalized = normalize_for_matching(content)
         summary["acknowledgement"] = any(
@@ -748,6 +827,8 @@ def format_alert(matches: list[dict[str, Any]]) -> str:
         if date:
             lines.append(f"🕒 {date}")
         if outcome in OUTCOME_ALERTS:
+            if m.get("outcome_detail"):
+                lines.append(html.escape(str(m["outcome_detail"])[:180]))
             if not job:
                 lines.append("⚠️ Couldn’t link this email to one application.")
             elif update.get("status") not in {"updated", "already_recorded"}:
