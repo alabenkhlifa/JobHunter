@@ -33,7 +33,7 @@ import scraper
 
 from .cdp import BrowserDialogError, BrowserTimeoutError, CDPClient, CDPError, connect_first_page
 from .email_verification import complete_email_verification
-from . import prefill, successfactors_ui5
+from . import prefill, successfactors_ui5, teamtailor
 
 
 DEFAULT_BLOCKLIST_TERMS = (
@@ -148,6 +148,8 @@ class PageInspection:
         if not self.loaded_application_page:
             return False
         context = getattr(self, "application_context", {})
+        if context.get("kind") == "teamtailor" and not context.get("bound"):
+            return False
         if context.get("kind") in {"linkedin_easy_apply", "successfactors_ui5"}:
             return bool(context.get("actionable"))
         if context.get("kind") == "successfactors":
@@ -629,7 +631,8 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
   // may themselves contain pipes.
   const linkedin = dialog && dialogHeading.startsWith('Apply to ') && dialogCompany &&
     titleIdentity.endsWith(employerSuffix) && titleIdentity.length > employerSuffix.length;
-  const scope = linkedin ? dialog : document;
+  const teamtailor = __JOBHUNTER_TEAMTAILOR__;
+  const scope = linkedin ? dialog : teamtailor?.form || document;
   const scopeText = (linkedin ? dialog : document.body)?.innerText || '';
   const uploadButton = linkedin && [...dialog.querySelectorAll('button')].find(el =>
     visible(el) && !el.disabled && el.innerText.trim() === 'Upload resume');
@@ -638,7 +641,10 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     !el.disabled && el.accept.split(',').includes('application/pdf')) : [];
   const ownedFile = externalFiles.length === 1 ? externalFiles[0] : null;
   let applicationContext = {};
-  if (linkedin) {
+  if (teamtailor) {
+    applicationContext = {kind: 'teamtailor', bound: !!teamtailor.form,
+      form: teamtailor.form?.id || '', requisition: teamtailor.requisition};
+  } else if (linkedin) {
     const controls = [...dialog.querySelectorAll('button')].filter(el => visible(el) && !el.disabled);
     const continuation = controls.some(el => /^(next|review|submit application)$/i.test(el.innerText.trim()));
     const fields = [...dialog.querySelectorAll('input,select,textarea')].filter(el =>
@@ -699,6 +705,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       widget.closest('form') === el.form && visible(widget) ? widget : null;
   };
   const uploadedFileFor = (el) => {
+    if (teamtailor?.form) return teamtailor.uploaded(el);
     if (el.type !== 'file' || !el.id.endsWith('_File')) return '';
     const base = el.id.slice(0, -5), stored = document.getElementById(base);
     const name = document.getElementById(base + '_FileName');
@@ -729,6 +736,19 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     return form ? (form.id || `form-${[...document.forms].indexOf(form)}`) : '';
   };
   const questionFor = (el) => { try {
+    if (teamtailor?.form && el.form === teamtailor.form) {
+      const container = el.closest('[data-question-mandatory]');
+      if (container && container !== teamtailor.form) {
+        const prompts = [...container.querySelectorAll('p, legend, label, [data-question-label], .label')]
+          .filter(prompt => visible(prompt) && prompt.closest('[data-question-mandatory]') === container);
+        const text = prompts.map(prompt => {
+          const copy = prompt.cloneNode(true);
+          copy.querySelectorAll('input, select, textarea, button').forEach(control => control.remove());
+          return copy.textContent.trim();
+        }).filter(Boolean).join(' ');
+        if (text) return text.slice(0, 300);
+      }
+    }
     const group = el.closest('fieldset, [role=radiogroup], [role=group]');
     if (group) {
       const legend = group.querySelector('legend');
@@ -746,6 +766,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     return '';
   } catch (e) { return ''; } };
   const valuePresent = (el) => {
+    if (teamtailor?.form) return teamtailor.present(el);
     if (uploadedFileFor(el)) return true;
     if (el.type === 'radio') {
       return [...document.querySelectorAll('input[type=radio]')].some(other => other.name === el.name && other.checked);
@@ -760,7 +781,10 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     frame_path: framePath,
     title: document.title,
     text: scopeText.slice(0, 12000),
-    headings: [...scope.querySelectorAll('h1, h2, h3, [role=heading]')]
+    sensitive_text: teamtailor?.form ? [...teamtailor.form.elements]
+      .filter(el => el.matches('input,select,textarea') && el.form === teamtailor.form && presented(el))
+      .flatMap(el => [questionFor(el), labelFor(el)]).filter(Boolean).join('\n') : null,
+    headings: [...(teamtailor ? document : scope).querySelectorAll('h1, h2, h3, [role=heading]')]
       .filter(el => visible(el) && !el.closest('aside, nav, [class*="recommend" i], [class*="similar" i], [class*="related" i]'))
       .slice(0, 20)
       .map(el => (el.innerText || '').trim().slice(0, 200)).filter(Boolean),
@@ -768,7 +792,9 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       id: el.id || `form-${[...document.forms].indexOf(el)}`,
       text: (el.innerText || '').trim().slice(0, 4000)
     })),
-    inputs: [...scope.querySelectorAll('input, select, textarea'), ...(ownedFile ? [ownedFile] : [])].filter(presented).slice(0, 80).map((el) => ({
+    inputs: (teamtailor?.form ? [...teamtailor.form.elements].filter(el => el.matches('input, select, textarea')) :
+      [...scope.querySelectorAll('input, select, textarea'), ...(ownedFile ? [ownedFile] : [])])
+      .filter(el => (!teamtailor?.form || el.form === teamtailor.form) && presented(el)).slice(0, 80).map((el) => ({
       tag: el.tagName.toLowerCase(),
       type: el.type || '',
       id: el.id || '',
@@ -780,12 +806,13 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
       value: (el.type === 'radio' || el.type === 'checkbox') ? (el.value || '') : '',
       disabled: !!el.disabled || el.matches(':disabled'),
       required: !unavailableChild(el) && (!!el.required || el.getAttribute('aria-required') === 'true' ||
+        (teamtailor?.form && teamtailor.required(el)) ||
         (applicationContext.kind === 'successfactors' && el.form?.id === applicationContext.form && /\*/.test(labelFor(el))) ||
         (!!widgetFor(el) && (widgetFor(el).getAttribute('aria-required') === 'true' || el.getAttribute('i_required') === 'true'))),
       widget_id: widgetFor(el)?.id || '',
       uploaded_file_name: uploadedFileFor(el),
       value_present: valuePresent(el),
-      invalid: el.getAttribute('aria-invalid') === 'true' || !el.checkValidity(),
+      invalid: teamtailor?.form ? teamtailor.invalid(el) : el.getAttribute('aria-invalid') === 'true' || !el.checkValidity(),
       options: el.tagName === 'SELECT' ? [...el.options].slice(0, 25).map(o => o.text.trim()).filter(Boolean) : []
     })),
     buttons: [...scope.querySelectorAll('button, input[type=submit], input[type=button], [role=button]')].filter(visible).slice(0, 80).map((el) => ({
@@ -841,6 +868,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
 })()
 """
     expression = expression.replace('__JOBHUNTER_UI5__', successfactors_ui5.SNAPSHOT_JS)
+    expression = expression.replace('__JOBHUNTER_TEAMTAILOR__', teamtailor.FORM_JS)
     expression = expression.replace('__JOBHUNTER_PREFILL__', prefill.SNAPSHOT_JS)
     expression = expression.replace('__JOBHUNTER_SUCCESSFACTORS__', json.dumps(_SUCCESSFACTORS_TENANTS))
     client.frame_path = ()
@@ -885,10 +913,12 @@ def _inspection_from_data(data: dict[str, Any], blocklist_terms: tuple[str, ...]
     ]
 
     sensitive = []
-    lines = [" ".join(line.split()) for line in text.splitlines()]
+    sensitive_text = data.get('sensitive_text')
+    lines = [" ".join(line.split()) for line in (text if sensitive_text is None else sensitive_text).splitlines()]
     for line in lines:
         low = line.lower()
-        if any(term in low for term in SENSITIVE_QUESTION_TERMS):
+        if any((term in low if sensitive_text is None else re.search(r"\b" + re.escape(term) + r"\b", low))
+               for term in SENSITIVE_QUESTION_TERMS):
             if line and line not in sensitive:
                 sensitive.append(line[:240])
         if len(sensitive) >= 10:
@@ -1346,8 +1376,17 @@ class AutoApplyEngine:
   if (!/^https?:$/.test(location.protocol) || !document.body) return {{ok:false, reason:'application page is not loaded'}};
   const visible = el => {{const r=el.getBoundingClientRect(), s=getComputedStyle(el);
     return !el.disabled && r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';}};
-  const required = [...document.querySelectorAll('input[required],select[required],textarea[required],input[aria-required=true],select[aria-required=true],textarea[aria-required=true]')].filter(visible);
+  const teamtailor = {teamtailor.FORM_JS};
+  const expectedForm = {json.dumps(getattr(inspection, 'application_context', {}))};
+  if (expectedForm.kind === 'teamtailor' && (!teamtailor?.form ||
+      teamtailor.requisition !== expectedForm.requisition)) return {{ok:false, reason:'application form changed'}};
+  const scope = teamtailor?.form || document;
+  const owned = el => !teamtailor || el.form === teamtailor.form;
+  const fields = teamtailor ? [...teamtailor.form.elements].filter(el =>
+    el.matches('input,select,textarea') && !el.matches(':disabled') && teamtailor.presented(el)) : [];
+  const required = teamtailor ? fields.filter(teamtailor.required) : [...scope.querySelectorAll('input[required],select[required],textarea[required],input[aria-required=true],select[aria-required=true],textarea[aria-required=true]')].filter(visible);
   const missing = required.filter(el => {{
+    if (teamtailor) return !teamtailor.present(el);
     if (el.type === 'radio') return ![...document.querySelectorAll('input[type=radio]')].some(other => other.name === el.name && other.checked);
     if (el.type === 'checkbox') {{
       const locationGroup = location.hostname === 'job-boards.eu.greenhouse.io' && el.name.endsWith('[]');
@@ -1356,7 +1395,8 @@ class AutoApplyEngine:
     }}
     return !(el.value || '').trim();
   }});
-  if (missing.length || [...document.querySelectorAll('[aria-invalid=true]')].some(visible)) return {{ok:false, reason:'required or invalid fields remain'}};
+  if (missing.length || (teamtailor ? fields.some(teamtailor.invalid) :
+      [...scope.querySelectorAll('[aria-invalid=true]')].some(visible))) return {{ok:false, reason:'required or invalid fields remain'}};
   const challenge = [...document.querySelectorAll('iframe')].some(frame => {{
     const src = frame.getAttribute('src') || '';
     const rect = frame.getBoundingClientRect();
@@ -1365,8 +1405,19 @@ class AutoApplyEngine:
       && rect.width >= 120 && rect.height >= 100;
   }});
   if (challenge) return {{ok:false, reason:'human verification is open'}};
-  const el = document.querySelector({json.dumps(selector)});
+  const matches = [...document.querySelectorAll({json.dumps(selector)})];
+  if (teamtailor && (matches.length !== 1 || !owned(matches[0]) ||
+      !matches[0].matches('button[type=submit],input[type=submit]'))) return {{ok:false, reason:'submit control is not owned by the application'}};
+  const el = matches[0];
   if (!el || el.disabled) return {{ok:false, reason:'selector unavailable'}};
+  if (teamtailor) {{
+    const action = el.hasAttribute('formaction') ? el.formAction : el.form.action;
+    const method = el.hasAttribute('formmethod') ? el.formMethod : el.form.method;
+    const target = el.hasAttribute('formtarget') ? el.formTarget :
+      (el.form.getAttribute('target') || document.querySelector('base[target]')?.getAttribute('target') || '_self');
+    if (action !== el.form.action || method !== 'post' || (target && target.toLowerCase() !== '_self'))
+      return {{ok:false, reason:'submit destination differs from the approved application'}};
+  }}
   el.scrollIntoView({{block:'center',behavior:'instant'}});
   const rect = el.getBoundingClientRect(), top = document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2);
   if (!visible(el) || (top !== el && !el.contains(top))) return {{ok:false, reason:'submit control is obscured'}};

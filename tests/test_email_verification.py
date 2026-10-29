@@ -153,7 +153,7 @@ def test_submit_invokes_reader_only_after_approved_initial_click_and_stays_attem
     c.evaluate.side_effect = [URL, {"ok": True}]
     engine = module.AutoApplyEngine(module.ApplyConfig(db_path=str(tmp_path/'jobs.db'), tracker_sync=False,
         evidence_enabled=False, expected_page_url=URL), c)
-    engine._verify_before_mutation = Mock()
+    engine._verify_before_mutation = Mock(return_value=module.PageInspection(URL, 'Apply', ''))
     engine.inspect = Mock(return_value=module.PageInspection(URL+'/confirmation', 'Thank you', 'Received'))
     monkeypatch.setattr(module.time, "sleep", Mock())
     def handoff(client, **kwargs):
