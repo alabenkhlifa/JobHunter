@@ -36,6 +36,29 @@ from .email_verification import complete_email_verification
 from . import prefill, successfactors_ui5
 
 
+# React-select's text input is a search buffer, not the stored answer. Only
+# recognize Greenhouse's exact, label-bound single-choice widget structure.
+_GREENHOUSE_CHOICE_JS = r"""(el) => {
+  const doc = el.ownerDocument, win = doc.defaultView;
+  if (win.location.protocol !== 'https:' ||
+      !['job-boards.greenhouse.io', 'job-boards.eu.greenhouse.io'].includes(win.location.hostname) ||
+      !el.matches('input.select__input[role="combobox"]')) return null;
+  const select = el.closest('.select');
+  if (!select || !el.form || select.closest('form') !== el.form || !el.id ||
+      ![...(el.labels || [])].some(label => select.contains(label) && label.htmlFor === el.id) ||
+      select.querySelectorAll('input[role="combobox"]').length !== 1) return false;
+  const values = el.closest('.select__value-container');
+  if (!values || values.closest('.select') !== select ||
+      !values.classList.contains('select__value-container--has-value') ||
+      values.querySelector('.select__placeholder')) return false;
+  const choices = [...values.querySelectorAll('.select__single-value')].filter(choice =>
+      choice.closest('.select') === select && choice.closest('.select__value-container') === values);
+  if (choices.length !== 1 || !choices[0].textContent.trim()) return false;
+  const rect = choices[0].getBoundingClientRect(), style = win.getComputedStyle(choices[0]);
+  return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+}"""
+
+
 DEFAULT_BLOCKLIST_TERMS = (
     "captcha",
     "recaptcha",
@@ -752,6 +775,8 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
     }
     if (el.type === 'checkbox') return el.checked;
     if (widgetFor(el) && ['', '-1', '-999'].includes(el.value)) return false;
+    const choice = (__JOBHUNTER_GREENHOUSE_CHOICE__)(el);
+    if (choice !== null) return choice;
     return !!(el.value || '').trim();
   };
   return {
@@ -840,6 +865,7 @@ def inspect_page(client: CDPClient, *, blocklist_terms: tuple[str, ...] = DEFAUL
   return {...root, frame_candidates: candidates, prefill_snapshot: __JOBHUNTER_PREFILL__};
 })()
 """
+    expression = expression.replace('__JOBHUNTER_GREENHOUSE_CHOICE__', _GREENHOUSE_CHOICE_JS)
     expression = expression.replace('__JOBHUNTER_UI5__', successfactors_ui5.SNAPSHOT_JS)
     expression = expression.replace('__JOBHUNTER_PREFILL__', prefill.SNAPSHOT_JS)
     expression = expression.replace('__JOBHUNTER_SUCCESSFACTORS__', json.dumps(_SUCCESSFACTORS_TENANTS))
@@ -1354,6 +1380,8 @@ class AutoApplyEngine:
       const group = locationGroup ? required.filter(other => other.type === 'checkbox' && other.name === el.name && other.form === el.form) : [el];
       return !group.some(other => other.checked);
     }}
+    const choice = ({_GREENHOUSE_CHOICE_JS})(el);
+    if (choice !== null) return !choice || !el.checkValidity();
     return !(el.value || '').trim();
   }});
   if (missing.length || [...document.querySelectorAll('[aria-invalid=true]')].some(visible)) return {{ok:false, reason:'required or invalid fields remain'}};
