@@ -330,7 +330,8 @@ def save_json(path: Path, data: dict[str, Any]) -> None:
     write_private_json(path, data)
 
 
-def interested_jobs(db_path: Path) -> list[dict[str, str]]:
+def interested_jobs(db_path: Path, *, include_closed: bool = False) -> list[dict[str, str]]:
+    """Load relevant applications, optionally retaining closed employer context."""
     if not db_path.exists():
         return []
     conn = sqlite3.connect(db_path)
@@ -349,7 +350,8 @@ def interested_jobs(db_path: Path) -> list[dict[str, str]]:
                 LIMIT 1
             )
             WHERE (
-                    j.status IN ('interested', 'submitted')
+                    (? = 1 AND a.stage IN ('rejected', 'withdrawn'))
+                 OR j.status IN ('interested', 'submitted')
                  OR a.stage IN (
                         'submitted',
                         'draft_ready',
@@ -363,9 +365,10 @@ def interested_jobs(db_path: Path) -> list[dict[str, str]]:
                         'offer_received'
                     )
             )
-              AND COALESCE(a.stage, '') NOT IN ('rejected', 'withdrawn')
+              AND (? = 1 OR COALESCE(a.stage, '') NOT IN ('rejected', 'withdrawn'))
             ORDER BY datetime(j.date_scraped) DESC
-            """
+            """,
+            (int(include_closed), int(include_closed)),
         ).fetchall()
         return [dict(r) for r in rows if not str(r["id"]).startswith("test-")]
     finally:
@@ -501,12 +504,28 @@ def match_active_application(
 ) -> tuple[dict[str, str] | None, str]:
     text = normalize_for_matching(message_text)
     active = [job for job in jobs if normalize(job.get("stage", "")) in ACTIVE_EMAIL_STAGES]
-    company_matches = [job for job in active if
+    # Closed applications still identify the employer in a reply. Removing
+    # them from the matching context can redirect an old refusal to another
+    # employer whose active role has a similar title.
+    company_matches = [job for job in jobs if
         len(normalize_for_matching(job.get("company", ""))) >= 3
         and contains_term(text, normalize_for_matching(job.get("company", "")))]
     companies = {normalize_for_matching(job["company"]) for job in company_matches}
     if len(companies) > 1:
         return None, "multiple employers mentioned; application needs review"
+    if company_matches:
+        active_company_matches = [job for job in company_matches if job in active]
+        if not active_company_matches:
+            return None, "matched employer has no unique active application"
+        known_exact = [job for job in company_matches
+                       if len(normalize_for_matching(job.get("title", ""))) >= 8
+                       and contains_term(text, normalize_for_matching(job["title"]))]
+        if known_exact:
+            longest = max(len(normalize_for_matching(job["title"])) for job in known_exact)
+            most_specific = [job for job in known_exact if len(normalize_for_matching(job["title"])) == longest]
+            if not any(job in active for job in most_specific):
+                return None, "matched role has no active application"
+        company_matches = active_company_matches
 
     exact = [
         job
@@ -903,7 +922,7 @@ def collect_mail(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[s
         state["mailbox_scope"] = scope
     account = getattr(args, "account", None)
     service = gmail_service(args.google_token, account) if account is not None else gmail_service(args.google_token)
-    jobs = interested_jobs(args.db_path)
+    jobs = interested_jobs(args.db_path, include_closed=True)
     seen = set(state.get("seen_message_ids") or [])
     new_seen = set(seen)
     matches: list[dict[str, Any]] = []

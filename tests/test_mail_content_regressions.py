@@ -210,6 +210,62 @@ def test_same_title_at_two_employers_uses_company_to_select_exact_application():
     assert job["id"] == "denodo"
 
 
+@pytest.mark.parametrize("closed_stage", ["rejected", "withdrawn", "package_generated"])
+def test_inactive_employer_cannot_redirect_a_refusal_to_a_similar_active_title(closed_stage):
+    jobs = [
+        {"id": "closed", "company": "Example Bank", "title": "Tech Lead Java Core Banking", "stage": closed_stage},
+        {"id": "active", "company": "Other Company", "title": "Tech Lead Java", "stage": "submitted"},
+    ]
+    job, reason = gmail_watcher.match_active_application(
+        "Example Bank: Your Tech Lead Java Core Banking application will not be progressing.", jobs,
+    )
+    assert job is None
+    assert reason == "matched employer has no unique active application"
+
+
+def test_closed_role_cannot_redirect_to_another_active_role_at_the_same_employer():
+    jobs = [
+        {"id": "closed", "company": "Example Bank", "title": "Tech Lead Java Core Banking", "stage": "rejected"},
+        {"id": "active", "company": "Example Bank", "title": "Tech Lead Java", "stage": "submitted"},
+    ]
+    job, reason = gmail_watcher.match_active_application(
+        "Example Bank: Your Tech Lead Java Core Banking application will not be progressing.", jobs,
+    )
+    # Both titles occur in the email. The longer, exact closed role must win.
+    assert job is None
+    assert reason == "matched role has no active application"
+
+
+def test_full_mail_scan_retains_closed_employers_without_loading_unapplied_jobs(tmp_path, monkeypatch):
+    db = make_application_db(tmp_path)
+    with closing(sqlite3.connect(db)) as conn, conn:
+        conn.execute("UPDATE jobs SET company='Other Company', title='Tech Lead Java'")
+        conn.execute("INSERT INTO jobs (id,title,company,status) VALUES ('closed','Tech Lead Java Core Banking','Example Bank','rejected')")
+        conn.execute("INSERT INTO applications (job_id,stage,created_at) VALUES ('closed','rejected','2026-07-01')")
+        conn.execute("INSERT INTO jobs (id,title,company,status) VALUES ('unapplied','Engineer','Unapplied Company','new')")
+    assert {job['id'] for job in gmail_watcher.interested_jobs(db)} == {'job-skycargo'}
+    assert {job['id'] for job in gmail_watcher.interested_jobs(db, include_closed=True)} == {'job-skycargo', 'closed'}
+    gmail = Mock()
+    monkeypatch.setattr(gmail_watcher, 'gmail_service', lambda _: gmail)
+    gmail.users().messages().list().execute.return_value = {'messages': [{'id': 'old-refusal'}]}
+    text = 'Example Bank: Your Tech Lead Java Core Banking application. We will not be progressing your application.'
+    gmail.users().messages().get().execute.return_value = {
+        'payload': {'mimeType': 'text/plain', 'headers': [{'name': 'Subject', 'value': 'Application update'}],
+                    'body': {'data': base64.urlsafe_b64encode(text.encode()).decode()}},
+    }
+    sync = Mock()
+    args = argparse.Namespace(google_token=tmp_path/'fake-token', db_path=db, state_path=tmp_path/'seen.json',
+                              query='in:anywhere', max_messages=100, tracker_sync=sync)
+    matches, state = gmail_watcher.collect_mail(args)
+    assert matches[0]['outcome'] == 'rejected'
+    assert matches[0]['application_update']['status'] == 'skipped'
+    assert matches[0]['application_match_reason'] == 'matched employer has no unique active application'
+    with closing(sqlite3.connect(db)) as conn:
+        assert conn.execute("SELECT stage FROM applications WHERE job_id='job-skycargo'").fetchone()[0] == 'submitted'
+    sync.assert_not_called()
+    assert state['seen_message_ids'] == ['old-refusal']
+
+
 def test_html_alternative_is_not_combined_with_stale_plaintext_or_attachments():
     def part(mime, text, **extra):
         return {"mimeType": mime, "body": {"data": base64.urlsafe_b64encode(text.encode()).decode()}, **extra}
