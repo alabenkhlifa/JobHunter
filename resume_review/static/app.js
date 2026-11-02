@@ -33,11 +33,13 @@ function variant(){return state.catalog.variants.find(x=>x.id===state.selection.
 function basePath(){return variant()?.base_overrides?['variants',state.catalog.variants.indexOf(variant()),'base_overrides']:['base'];}
 function projectPath(id){return Object.hasOwn(variant()?.project_overrides||{},id)?['variants',state.catalog.variants.indexOf(variant()),'project_overrides',id]:['projects',state.catalog.projects.findIndex(x=>x.id===id)];}
 function currentProject(id){return at(state.catalog,projectPath(id));}
-function field(path,title,{multiline=false,rows=3,hint='',className=''}={}) {
+function availableProjects(){return (variant()?.project_ids||[]).map(currentProject);}
+function field(path,title,{multiline=false,rows=3,hint='',className='',employer=false,projectName=false}={}) {
   const skillIndex=path.indexOf('skills');
   const idPath=skillIndex>=0&&path.length>skillIndex+1?[...path.slice(0,skillIndex+1),Object.keys(at(state.catalog,path.slice(0,skillIndex+1))).indexOf(path[skillIndex+1]),...path.slice(skillIndex+2)]:path;
-  const value=at(state.catalog,path), id='f-'+idPath.join('-').replace(/[^a-z0-9-]/gi,'');
-  const input = multiline ? `<textarea id="${id}" aria-label="${esc(title)}" data-path="${pathAttr(path)}" rows="${rows}" class="${className}">${esc(value)}</textarea>` : `<input id="${id}" aria-label="${esc(title)}" data-path="${pathAttr(path)}" value="${esc(value)}">`;
+  const value=at(state.catalog,path)??'', id='f-'+idPath.join('-').replace(/[^a-z0-9-]/gi,'');
+  const flags=(employer?' data-employer-field':'')+(projectName?' data-project-name':'');
+  const input = multiline ? `<textarea id="${id}" aria-label="${esc(title)}" data-path="${pathAttr(path)}"${flags} rows="${rows}" class="${className}">${esc(value)}</textarea>` : `<input id="${id}" aria-label="${esc(title)}" data-path="${pathAttr(path)}"${flags} value="${esc(value)}">`;
   return `<div class="field"><div class="field-top"><label for="${id}">${esc(title)}</label><button class="request-text" data-request="${pathAttr(path)}" title="Request a change to this text">↗ Request change</button></div>${input}${hint?`<div class="field-footer"><span>${esc(hint)}</span><span data-count-for="${id}">${String(value).length} characters</span></div>`:''}</div>`;
 }
 function info(title,text){return `<div class="info-card"><span>i</span><div><strong>${esc(title)}</strong><p>${esc(text)}</p></div></div>`;}
@@ -86,7 +88,7 @@ function render(){
   document.querySelectorAll('#editor-content details[data-details-key]').forEach(details=>detailStates.set(details.dataset.detailsKey,details.open));
   const scroll=$('.editor').scrollTop;
   renderNav();
-  const titles={flavor:'Headline & summary',variant:'Projects & page limit',projects:'Project wording',sidebar:'Contact & sidebar',changes:'Changes & requests'};
+  const titles={flavor:'Headline & summary',variant:'Projects & page limit',projects:'Employers & projects',sidebar:'Contact & sidebar',changes:'Changes & requests'};
   $('#editor-title').textContent=titles[section];
   $('#editor-content').innerHTML=({flavor:flavorEditor,variant:variantEditor,projects:projectEditor,sidebar:sidebarEditor,changes:changesEditor}[section])();
   document.querySelectorAll('#editor-content details[data-details-key]').forEach(details=>{if(detailStates.has(details.dataset.detailsKey))details.open=detailStates.get(details.dataset.detailsKey);});
@@ -119,17 +121,34 @@ function variantEditor(){
     (state.single_resume?'':`<div class="stack-buttons"><button class="button small" data-duplicate="variant">Duplicate variant</button>${state.catalog.variants.length>1?'<button class="button small danger" data-delete="variant">Delete variant</button>':''}</div>`);
 }
 function projectEditor(){
-  if(!state.catalog.projects.some(x=>x.id===projectId)) projectId=state.selection.project_ids[0]||state.catalog.projects[0].id;
+  const available=availableProjects();
+  if(!available.some(x=>x.id===projectId)) projectId=state.selection.project_ids[0]||available[0]?.id;
+  if(!projectId)return '<p class="empty">Choose a resume to edit its projects.</p>';
   const project=currentProject(projectId),p=projectPath(projectId),scoped=p[0]==='variants';
   const entry=project.entry, bullets=entry?['entry','bullets']:['role','bullets'];
-  let html=`<p class="intro">${scoped?'Edit the project wording for this flavor and variant. These changes stay within this version.':'Edit the complete, reusable project block. Changes appear in every variant that includes this project.'}</p><label for="project-picker">Project</label><select id="project-picker" class="small-select">${state.catalog.projects.map(x=>{const item=currentProject(x.id);return `<option value="${esc(x.id)}" ${x.id===projectId?'selected':''}>${esc(item.label)} — ${esc(item.company)}</option>`;}).join('')}</select>`;
-  html+=field([...p,'label'],'Project label')+`<details><summary>Employer & role details</summary><div class="detail-body">`+
-    field([...p,'company'],'Employer')+Object.keys(project.role).filter(k=>k!=='bullets').map(k=>field([...p,'role',k],label(k))).join('')+
-    '<p class="hint">Projects grouped under the same employer must share employer details. Use “Update employer across projects” after editing them.</p><button class="button small" id="sync-employer">Update employer across projects</button></div></details>';
-  if(entry)html+=`<details open><summary>Project details</summary><div class="detail-body">${Object.keys(entry).filter(k=>k!=='bullets').map(k=>field([...p,'entry',k],k==='dates'?'Client dates (private chronology; not printed)':label(k))).join('')}</div></details>`;
-  html+=`<div class="subheading"><h3>Project bullets</h3><span class="tag">${at(state.catalog,[...p,...bullets]).length} bullets</span></div>`;
+  const companies=[...new Set(available.map(x=>x.company))],group=available.filter(x=>x.company===project.company);
+  let html=`<p class="intro">Choose an employer, then edit its project subsections. Each project has its own name, technology keywords and bullets. ${scoped?'These changes stay within this resume version.':''}</p>`+
+    `<label for="employer-picker">Employer</label><select id="employer-picker" class="small-select">${companies.map(company=>`<option value="${esc(company)}" ${company===project.company?'selected':''}>${esc(company)}</option>`).join('')}</select>`+
+    `<details data-details-key="employer-details"><summary>Employer & role details</summary><div class="detail-body">`+
+    field([...p,'company'],'Employer name',{employer:true})+
+    ['title','dates','location','company_url','subtitle'].map(k=>field([...p,'role',k],label(k),{employer:true})).join('')+
+    '<p class="hint">Employer details are shared by its projects in this resume. Project bullets and keywords stay separate.</p></div></details>'+
+    `<div class="subheading"><h3>Projects at ${esc(project.company)}</h3><span class="tag">${group.filter(x=>x.entry).length} project sections</span></div>`+
+    `<label for="project-picker">${entry?'Project':'Experience to organize'}</label><select id="project-picker" class="small-select">${group.map(item=>`<option value="${esc(item.id)}" ${item.id===projectId?'selected':''}>${esc(item.entry?.name||item.label)}${item.entry?'':' — employer bullets'}</option>`).join('')}</select>`;
+  if(entry){
+    html+=field([...p,'entry','name'],'Project name',{projectName:true})+
+      field([...p,'entry','tech'],'Technology keywords',{multiline:true,rows:2,hint:'Only technologies used on this project'})+
+      `<details><summary>Optional project details</summary><div class="detail-body">`+
+      field([...p,'entry','role'],'Project role')+
+      field([...p,'entry','dates'],'Project dates (private chronology; not printed)')+'</div></details>';
+  }else{
+    html+=info('Organize this experience into projects','Name the first project to move all existing bullets into that subsection. Every word is preserved. Then add more projects and edit their bullets separately.')+
+      `<button class="button small primary" id="split-project">Organize into project sections</button>`+
+      field([...p,'role','tech'],'Technology keywords',{multiline:true,rows:2,hint:'Keywords for this experience; moved into its first project when organized'});
+  }
+  html+=`<div class="subheading"><h3>${entry?'Project':'Employer'} bullets</h3><span class="tag">${at(state.catalog,[...p,...bullets]).length} bullets</span></div>`;
   html+=arrayEditor([...p,...bullets],at(state.catalog,[...p,...bullets]),'Bullet');
-  html+=`<p class="hint">Use **bold wording** for emphasis. Every bullet stays in the selected project block.</p><div class="stack-buttons"><button class="button small" data-duplicate="project">Duplicate project</button></div>`;
+  html+=`<p class="hint">Use **bold wording** for emphasis. Every bullet stays in the selected project block.</p><div class="stack-buttons">${entry?'<button class="button small primary" id="add-employer-project">＋ Add project under this employer</button>':''}<button class="button small" data-duplicate="project">Duplicate project</button>${entry&&group.length>1?'<button class="button small danger" id="remove-employer-project">Remove this project</button>':''}</div>`;
   return html;
 }
 function arrayEditor(path,items,title){
@@ -241,8 +260,9 @@ function openRequest(path=null){
 function slug(value){return value.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'draft';}
 function uniqueId(name,items){let id=slug(name),n=2;while(items.some(x=>x.id===id))id=slug(name)+'-'+n++;return id;}
 function openCreate(kind){
-  createKind=kind;$('#create-title').textContent=kind==='flavor'?'New flavor':'New variant';$('#create-name').value='';
-  $('#create-hint').textContent=kind==='flavor'?'Starts with an empty headline and summary, plus one- and two-page variants. The current project selection is copied.':'Copies the current project selection and page limit. All wording stays shared with its flavor.';
+  createKind=kind;$('#create-title').textContent={flavor:'New flavor',variant:'New variant',split:'Name the first project',project:'Add a project'}[kind];$('#create-name').value='';
+  $('#create-hint').textContent={flavor:'Starts with an empty headline and summary, plus one- and two-page variants. The current project selection is copied.',variant:'Copies the current project selection and page limit. All wording stays shared with its flavor.',split:'All existing bullets and keywords are preserved in a named project subsection. Other existing blocks under this employer keep their labels. Unknown project dates stay unspecified.',project:'This project appears under the selected employer. Enter its first bullet and any confirmed technology keywords.'}[kind];
+  $('#create-project-fields').hidden=kind!=='project';$('#create-first-bullet').required=kind==='project';$('#create-first-bullet').disabled=kind!=='project';$('#create-first-bullet').value='';$('#create-project-tech').value='';$('#create-error').hidden=true;
   $('#create-dialog').showModal();$('#create-name').focus();
 }
 function switchFlavor(id){
@@ -271,7 +291,19 @@ document.addEventListener('input',event=>{
   if(target.hasAttribute('data-skill-heading')){renameSkillGroup(target);return;}
   if(!target.dataset.path)return;
   const path=JSON.parse(target.dataset.path);
-  set(state.catalog,path,target.type==='checkbox'?target.checked:target.hasAttribute('data-number')?Number(target.value):target.value);
+  if(target.hasAttribute('data-employer-field')){
+    const before=projectPath(projectId),company=currentProject(projectId).company,key=path.at(-1),group=availableProjects().filter(item=>item.company===company);
+    const overrides=variant().project_overrides??={};
+    for(const item of group){const changed=clone(item);if(key==='company')changed.company=target.value;else changed.role[key]=target.value;overrides[item.id]=changed;}
+    const after=projectPath(projectId),attributes=['data-path','data-request','data-move','data-add','data-remove'];
+    document.querySelectorAll('#editor-content [data-path],#editor-content [data-request],#editor-content [data-move],#editor-content [data-add],#editor-content [data-remove]').forEach(element=>{
+      for(const attribute of attributes){if(!element.hasAttribute(attribute))continue;const old=JSON.parse(element.getAttribute(attribute));if(before.every((part,i)=>old[i]===part))element.setAttribute(attribute,JSON.stringify([...after,...old.slice(before.length)]));}
+    });
+    if(key==='company'){const option=$('#employer-picker').selectedOptions[0];option.value=target.value;option.textContent=target.value;}
+  }else{
+    set(state.catalog,path,target.type==='checkbox'?target.checked:target.hasAttribute('data-number')?Number(target.value):target.value);
+    if(target.hasAttribute('data-project-name')){at(state.catalog,path.slice(0,-2)).label=target.value;$('#project-picker').selectedOptions[0].textContent=target.value;}
+  }
   const counter=document.querySelector(`[data-count-for="${target.id}"]`);if(counter)counter.textContent=target.value.length+' characters';
   markDirty();
 });
@@ -279,6 +311,7 @@ document.addEventListener('change',event=>{
   const target=event.target;
   if(target.hasAttribute('data-skill-heading')){target.value=target.value.trim();renameSkillGroup(target);}
   if(target.id==='project-picker'){projectId=target.value;render();}
+  if(target.id==='employer-picker'){projectId=availableProjects().find(item=>item.company===target.value).id;render();}
   if(target.dataset.projectToggle){
     const id=target.dataset.projectToggle;
     if(target.checked)state.selection.project_ids.push(id);else state.selection.project_ids=state.selection.project_ids.filter(x=>x!==id);
@@ -312,6 +345,9 @@ document.addEventListener('click',async event=>{
     if(button.id==='reload-state'){state=await api('/api/state');dirty=false;conflict=false;$('#error').hidden=true;render();renderPreview();}
     if(button.id==='request-from-changes'||button.id==='new-request')openRequest();
     if(button.id==='add-flavor')openCreate('flavor');if(button.id==='add-variant')openCreate('variant');
+    if(button.id==='split-project')openCreate('split');
+    if(button.id==='add-employer-project')openCreate('project');
+    if(button.id==='remove-employer-project'){await action('/api/projects/remove',{project_id:projectId});toast('Project removed from this resume. Undo can restore it.');}
     if(button.id==='zoom-in'){zoom=Math.min(170,(zoom||100)+15);applyZoom();}
     if(button.id==='zoom-out'){zoom=Math.max(55,(zoom||100)-15);applyZoom();}
     if(button.id==='apply-sidebar-json'){const base=JSON.parse($('#sidebar-raw').value);set(state.catalog,basePath(),base);markDirty();await save();render();toast('Sidebar content updated.');}
@@ -334,8 +370,17 @@ document.addEventListener('click',async event=>{
 $('#request-form').addEventListener('submit',async event=>{
   event.preventDefault();try{await action('/api/requests',{path:requestPath,message:$('#request-message').value});$('#request-dialog').close();toast('Request saved for the assistant to read.');}catch(_){}
 });
-$('#create-form').addEventListener('submit',event=>{
+$('#create-form').addEventListener('submit',async event=>{
   event.preventDefault();const name=$('#create-name').value.trim();if(!name)return;
+  if(createKind==='split'||createKind==='project'){
+    const before=new Set(variant().project_ids);
+    try{
+      await action('/api/projects/'+(createKind==='split'?'split':'add'),{project_id:projectId,name,bullet:$('#create-first-bullet').value,tech:$('#create-project-tech').value});
+      if(createKind==='project')projectId=variant().project_ids.find(id=>!before.has(id));
+      $('#create-dialog').close();render();toast(createKind==='split'?'Experience organized into projects. All wording preserved.':'Project added under this employer.');
+    }catch(error){$('#create-error').textContent=error.message;$('#create-error').hidden=false;}
+    return;
+  }
   if(createKind==='flavor'){
     const id=uniqueId(name,state.catalog.flavors),projects=state.selection.project_ids.length?state.selection.project_ids.slice():state.catalog.projects.map(x=>x.id);
     state.catalog.flavors.push({id,label:name,confirmation:'draft',headline:'',summary:''});

@@ -182,7 +182,7 @@ class ReviewStore:
                 raise Conflict("The review changed in another tab. Reload the latest version before saving.")
             state = copy.deepcopy(self.state)
             operation(state)
-            if action in ("Saved edits", "Reviewed text proposal") and (
+            if action in ("Saved edits", "Reviewed text proposal", "Updated employer projects") and (
                     state["catalog"] != self.state["catalog"] or state["selection"] != self.state["selection"]):
                 snapshots = self.directory / "snapshots"
                 snapshots.mkdir(exist_ok=True, mode=0o700)
@@ -222,6 +222,17 @@ class ReviewStore:
             state["requests"].append({"id": uuid.uuid4().hex, "path": path, "before": before,
                                       "message": message, "status": "open", "author": "user", "at": now()})
         return self.mutate(body.get("revision"), "Added change request", operation)
+
+    def projects(self, kind, body):
+        from . import projects
+
+        def operation(state):
+            previous = copy.deepcopy(state['catalog'])
+            {'split': projects.split, 'add': projects.add, 'remove': projects.remove}[kind](state, body)
+            invalidate_changed(previous, state['catalog'])
+            validate_catalog({'resume_blocks': state['catalog']})
+            compose(state['catalog'], state['selection'])
+        return self.mutate(body.get('revision'), 'Updated employer projects', operation)
 
     def undo(self, body):
         def operation(state):
@@ -421,6 +432,8 @@ def handler_for(store, access=None):
                     if not access.accepts_token(body.get("token")):
                         raise Unauthorized("This private review link is invalid.")
                     return self.reply(200, {"authenticated": True}, cookie=access.cookie())
+                if route in {"/api/projects/split", "/api/projects/add", "/api/projects/remove"}:
+                    return self.reply(200, store.projects(route.rsplit('/', 1)[-1], body))
                 routes = {"/api/save": store.save, "/api/requests": store.request,
                           "/api/proposals": store.propose, "/api/proposals/decide": store.decide,
                           "/api/approve": store.approval, "/api/undo": store.undo}

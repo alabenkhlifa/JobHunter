@@ -242,6 +242,77 @@ def test_failed_catalog_validation_is_atomic(store):
     assert store.read() == original
 
 
+def test_employer_projects_preserve_latest_edits_other_variants_and_undo(store, source):
+    original = source.read_bytes()
+    state = store.read()
+    project = state['catalog']['projects'][0]
+    project['role']['bullets'] = project['entry']['bullets'][:]
+    project['role']['tech'] = project['entry']['tech']
+    project['entry'] = None
+    sibling = copy.deepcopy(state['catalog']['variants'][0])
+    sibling['id'] = 'other-version'
+    state['catalog']['variants'].append(sibling)
+    state['catalog']['projects'][0]['role']['bullets'][0] = 'Candidate revised this exact bullet in the website.'
+    state['catalog']['base']['skills']['Backend'].append('Kotlin')
+    saved = store.save(save_body(state))
+    before = store.request({'revision': saved['revision'], 'message': 'Keep my website edits', 'path': None})
+    other_selection = {**before['selection'], 'variant_id': 'other-version'}
+    other_before = compose(before['catalog'], other_selection)[0]
+    grouped = store.projects('split', {'revision': before['revision'], 'project_id': 'services', 'name': 'Service platform'})
+    effective = grouped['catalog']['variants'][0]['project_overrides']['services']
+    assert effective['entry']['bullets'] == before['catalog']['projects'][0]['role']['bullets']
+    assert effective['entry']['tech'] == 'Java'
+    assert effective['entry']['dates'] == 'Not specified'
+    assert 'bullets' not in effective['role'] and 'tech' not in effective['role']
+    assert grouped['catalog']['projects'] == before['catalog']['projects']
+    assert grouped['catalog']['base'] == before['catalog']['base']
+    assert grouped['requests'] == before['requests'] and grouped['approvals'] == before['approvals']
+    assert compose(grouped['catalog'], other_selection)[0] == other_before
+    added = store.projects('add', {'revision': grouped['revision'], 'project_id': 'services',
+                                   'name': 'Notifications', 'bullet': 'Implemented notification delivery tests.', 'tech': 'Python, HTTP'})
+    added_id = next(identifier for identifier in added['selection']['project_ids'] if identifier != 'services')
+    payload, _ = compose(added['catalog'], added['selection'])
+    assert len(payload['experience']) == 1
+    assert [entry['name'] for entry in payload['experience'][0]['engagements']] == ['Service platform', 'Notifications']
+    assert payload['experience'][0]['engagements'][0]['bullets'] == effective['entry']['bullets']
+    assert payload['experience'][0]['engagements'][1]['tech'] == 'Python, HTTP'
+    assert compose(added['catalog'], other_selection)[0] == other_before
+    preview = store.preview()
+    assert preview['audit_ok'] and 'Candidate revised this exact bullet in the website.' in preview['text']
+    assert 'Implemented notification delivery tests.' in preview['text']
+    removed = store.projects('remove', {'revision': added['revision'], 'project_id': added_id})
+    assert compose(removed['catalog'], removed['selection'])[0] == compose(grouped['catalog'], grouped['selection'])[0]
+    restored = store.undo({'revision': removed['revision']})
+    assert restored['catalog'] == added['catalog'] and restored['selection'] == added['selection']
+    assert source.read_bytes() == original
+    assert ReviewStore(source, store.directory).read() == restored
+
+
+def test_project_structure_errors_and_stale_edits_are_atomic(store):
+    original = store.read()
+    with pytest.raises(ValueError):
+        store.projects('add', {'revision': 0, 'project_id': 'not-in-this-resume', 'name': 'New', 'bullet': 'A fact.'})
+    with pytest.raises(ValueError, match='first project bullet'):
+        store.projects('add', {'revision': 0, 'project_id': 'services', 'name': 'New', 'bullet': ''})
+    with pytest.raises(ValueError, match='at least one project'):
+        store.projects('remove', {'revision': 0, 'project_id': 'services'})
+    assert store.read() == original
+    state = store.request({'revision': 0, 'message': 'A newer change', 'path': None})
+    with pytest.raises(Conflict):
+        store.projects('add', {'revision': 0, 'project_id': 'services', 'name': 'New', 'bullet': 'A fact.'})
+    assert store.read() == state
+
+
+def test_project_structure_endpoints_require_workspace_authentication(shared_server, store):
+    server, access = shared_server
+    headers = {'Host': access.host, 'Origin': access.origin, 'X-Review-Client': 'studio', 'Content-Type': 'application/json'}
+    body = {'revision': 0, 'project_id': 'services', 'name': 'New project', 'bullet': 'A confirmed candidate statement.'}
+    assert request(server, 'POST', '/api/projects/add', body, headers)[0] == 401
+    status, _, _ = request(server, 'POST', '/api/projects/add', body, {**headers, 'Authorization': 'Bearer '+access.token})
+    assert status == 200
+    assert len(store.read()['selection']['project_ids']) == 2
+
+
 def test_single_resume_onboarding_preserves_wording_and_keeps_private_facts_out(tmp_path):
     profile = {"name": "Example", "headline": "Mobile Developer", "summary": "Builds mobile apps.",
                "private_notes": "Never share", "evidence_bank": [{"private": "Never share"}],
@@ -323,6 +394,28 @@ def test_review_sessions_expire_and_token_rotation_revokes_access(monkeypatch):
     assert not rotated.authorized(headers)
     monkeypatch.setattr(module.time, "time", lambda: timestamp + access.lifetime + 1)
     assert not access.authorized(headers)
+
+
+@pytest.mark.skipif(os.environ.get("JOBHUNTER_BROWSER_TESTS") != "1", reason="requires Node Playwright and Chromium")
+def test_browser_employer_projects_preserve_wording_and_live_pdf(http_server, store, source):
+    original = source.read_bytes()
+    state = store.read()
+    project = state['catalog']['projects'][0]
+    project['role']['bullets'] = project['entry']['bullets'][:]
+    project['role']['tech'] = project['entry']['tech']
+    project['entry'] = None
+    second = copy.deepcopy(project)
+    second.update(id='other-employer', company='Other Company', label='Other Company')
+    state['catalog']['projects'].append(second)
+    state['catalog']['variants'][0]['project_ids'].append(second['id'])
+    state['catalog']['variants'][0]['default_project_ids'].append(second['id'])
+    state['selection']['project_ids'].append(second['id'])
+    store.save(save_body(state))
+    result = subprocess.run(['node', str(Path(__file__).with_name('browser_resume_review_projects_check.cjs')),
+                             f'http://127.0.0.1:{http_server.server_port}'], capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert source.read_bytes() == original
+    assert ReviewStore(source, store.directory).read() == store.read()
 
 
 @pytest.mark.skipif(os.environ.get("JOBHUNTER_BROWSER_TESTS") != "1", reason="requires Node Playwright and Chromium")
