@@ -60,6 +60,22 @@ ACCOUNT_NOTICE_PATTERN = re.compile(
 )
 REJECTION_PATTERNS = [
     (
+        "not shortlisted",
+        r"\b(?:unable to|cannot|can t) "
+        r"(?:include you (?:in|on) (?:the|our) shortlist|shortlist you)\b",
+    ),
+    (
+        "candidate not taken forward",
+        r"\b(?:we (?:have |ve )?|have |ve )(?:decided|chosen|opted) not to "
+        r"(?:take|progress|move) you (?:any )?(?:forward|further)\b",
+    ),
+    (
+        "decision not to move forward",
+        r"\bwe (?:have |ve )?made (?:the|a) decision not to "
+        r"(?:proceed|progress|move forward) "
+        r"(?:with (?:you|your application)|at this time)\b",
+    ),
+    (
         "unable to offer position",
         r"\bwe (?:are unable to|cannot|can t|will not|won t) offer you "
         r"(?:a|the) (?:position|role|job)\b",

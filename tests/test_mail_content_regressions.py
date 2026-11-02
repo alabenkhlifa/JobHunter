@@ -14,6 +14,20 @@ from test_google_integrations import make_application_db
 
 @pytest.mark.parametrize("body,outcome,label", [
     (
+        "After reviewing your application, we are unfortunately unable to include "
+        "you in the shortlist for this position.",
+        "rejected", "Application rejected",
+    ),
+    (
+        "After reviewing your application, we have opted not to take you forward.",
+        "rejected", "Application rejected",
+    ),
+    (
+        "After reviewing your application, we've made the decision not to move "
+        "forward at this time.",
+        "rejected", "Application rejected",
+    ),
+    (
         "Following our discussion, we would like to invite you to a second interview. "
         "Please let us know your availability.",
         "interview_invited", "Interview invitation received",
@@ -126,6 +140,18 @@ def test_full_content_to_verified_sheet_and_outcome_alert(tmp_path, monkeypatch,
     "Unfortunately, our recruiter is away this week; your application remains under review.",
 ])
 def test_generic_conditional_or_acknowledgement_is_not_an_outcome(text):
+    assert gmail_watcher.classify_application_outcome(text) == (None, [])
+
+
+@pytest.mark.parametrize("text", [
+    "We received your application. If we are unable to include you in the shortlist, we will let you know.",
+    "We cannot shortlist you until your application review is complete.",
+    "If we have opted not to take you forward, we will send a separate decision.",
+    "We have not opted not to take you forward. Your application is still under review.",
+    "We have not made the decision not to move forward at this time.",
+    "If we have made the decision not to move forward at this time, we will notify you.",
+])
+def test_shortlist_and_decision_wording_requires_an_actual_decision(text):
     assert gmail_watcher.classify_application_outcome(text) == (None, [])
 
 
