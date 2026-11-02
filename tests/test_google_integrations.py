@@ -514,7 +514,7 @@ def test_monitor_full_email_rejection_updates_database_sheet_and_notification(tm
     alert = send.call_args.args[0]
     assert "Application rejected" in alert
     assert "Database and spreadsheet updated" in alert
-    assert "Receipt confirmation; no status change." in alert
+    assert "Receipt confirmation; no status change." not in alert
     assert "We received many applications" not in alert
     assert json.loads(args.state_path.read_text())["seen_message_ids"] == ["receipt", "rejection"]
     send.reset_mock()

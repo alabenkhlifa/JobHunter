@@ -132,7 +132,10 @@ REJECTION_PATTERNS = [
 ]
 ACKNOWLEDGEMENT_PATTERNS = (
     r"\b(?:we (?:have )?(?:well )?received|we ve received) your application\b",
-    r"\byour application (?:has been|was) (?:received|submitted)\b",
+    r"\byour application (?:has been|was|is) (?:successfully )?(?:received|submitted)\b",
+    r"\byou (?:have |ve )?(?:successfully )?applied\b",
+    r"\bwe (?:will |ll |are |re )?(?:currently )?(?:read and )?(?:review|process)(?:ing)? your (?:submitted )?application\b",
+    r"\bwe review applications as they (?:come|arrive) in\b",
     r"\byour application (?:will be reviewed|is (?:currently )?under review)\b",
     r"\bthank you for submitting your application\b",
     r"\bwe are (?:currently )?reviewing your (?:application|professional background)\b",
@@ -158,7 +161,7 @@ OFFER_PATTERNS = [
     ),
     (
         "position offered",
-        r"\b(?:pleased|delighted|happy) to offer you (?:the |a )?"
+        r"\b(?:pleased|delighted|happy|would like|d like) to offer you (?:the |a )?"
         r"(?:position|role|job)\b",
     ),
     ("offer of employment", r"\boffer of employment\b"),
@@ -168,6 +171,11 @@ OFFER_PATTERNS = [
         r"(?:ready|approved|issued|attached|enclosed)\b",
     ),
     ("offer letter", r"\b(?:your|the) offer letter\b|\boffer letter (?:for|regarding)\b"),
+    (
+        "offer acceptance confirmed",
+        r"\b(?:your|the) (?:job |employment )?offer (?:has been|was|is) (?:accepted|signed)\b|"
+        r"\bwe (?:have |ve )?received your (?:signed|accepted) (?:job |employment )?offer(?: letter)?\b",
+    ),
 ]
 INTERVIEW_PATTERNS = [
     (
@@ -237,6 +245,12 @@ ACTION_REQUIRED_PATTERNS = [
 ]
 PROGRESSION_PATTERNS = [
     (
+        "application accepted",
+        r"\byour (?:application|candidacy)(?: for .{1,100}?)? "
+        r"(?:has been|was|is) (?:accepted|successful)\b|"
+        r"\bwe (?:have |ve )?accepted your application\b",
+    ),
+    (
         "application progressed",
         r"\b(?:pleased|happy) to inform you (?:that )?(?:your application|you) "
         r"(?:has|have) (?:progressed|advanced|been shortlisted)\b",
@@ -287,6 +301,19 @@ OUTCOME_ALERTS = {
     "action_required": ("⚠️", "Application action required"),
     "application_progressed": ("➡️", "Application progressed"),
 }
+OUTCOME_NEXT_STEPS = {
+    "offer_received": "Review the offer terms and respond to the recruiter.",
+    "interview_invited": "Check the interview details and confirm availability.",
+    "assessment_requested": "Check the assessment instructions and deadline.",
+    "action_required": "Review the requested information and deadline.",
+    "application_progressed": "Read the recruiter's next steps.",
+}
+OFFER_REVIEW_SIGNAL = re.compile(
+    r"\b(?:employment (?:contract|agreement)|signed offer|offer acceptance|"
+    r"welcome to (?:the|our) team|joining date|start date|"
+    r"contrato (?:de trabajo|laboral)|oferta (?:laboral|de empleo)|"
+    r"contrat de travail|promesse d embauche)\b"
+)
 GENERIC_TITLE_TERMS = {
     "architect",
     "backend",
@@ -463,14 +490,15 @@ def job_terms(jobs: list[dict[str, str]]) -> set[str]:
     return terms
 
 
-def classify_application_outcome(message_text: str) -> tuple[str | None, list[str]]:
+def decisive_text(message_text: str) -> str:
     # Keep wrapped conditional promises together, but separate independent
     # contact instructions so their "if you have questions" cannot hide a decision.
     non_decisive = re.compile(r"\b(?:if|unless|until|should we|in case|not saying that)\b")
     clauses = []
     for sentence in re.split(r"[.!?;]+", message_text):
         parts = re.split(
-            r",\s*(?:but\s+)?(?=please\s+(?:contact\b|let us know\b))",
+            r",\s*(?:but\s+)?(?=please\s+(?:contact\b|let us know\b))|"
+            r"(?:,\s*|\s+)(?=if you (?:choose to |decide to |wish to |want to )?(?:accept|agree)\b)",
             sentence, flags=re.IGNORECASE,
         )
         # A leading condition still governs the following contact request:
@@ -478,7 +506,15 @@ def classify_application_outcome(message_text: str) -> tuple[str | None, list[st
         if non_decisive.search(normalize_for_matching(parts[0])):
             continue
         clauses.extend(normalize_for_matching(part) for part in parts)
-    text = " ".join(clause for clause in clauses if not non_decisive.search(clause))
+    return " ".join(clause for clause in clauses if not non_decisive.search(clause))
+
+
+def possible_offer(message_text: str) -> bool:
+    return bool(OFFER_REVIEW_SIGNAL.search(decisive_text(message_text)))
+
+
+def classify_application_outcome(message_text: str) -> tuple[str | None, list[str]]:
+    text = decisive_text(message_text)
     for outcome, patterns in OUTCOME_PATTERNS:
         reasons = [label for label, pattern in patterns if re.search(pattern, text)]
         if reasons:
@@ -486,15 +522,18 @@ def classify_application_outcome(message_text: str) -> tuple[str | None, list[st
     return None, []
 
 
+def redact_mail_text(text: str) -> str:
+    text = re.sub(r"https?://\S+|www\.\S+|[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", "[redacted]", text)
+    text = re.sub(r"(?i)\b(?:password|passcode|otp|code|token|secret|contrase.a)\s*[:=]\s*\S+", "[redacted]", text)
+    return re.sub(r"(?<!\w)\+?\d[\d ().-]{6,}\d(?!\w)|\b\d{4,}\b", "[redacted]", text)
+
+
 def outcome_detail(body: str, outcome: str) -> str:
     """Quote only a decisive current-body sentence, bounded and redacted."""
     for sentence in re.split(r"(?<=[.!?;])\s+", body):
         if classify_application_outcome(sentence)[0] != outcome:
             continue
-        sentence = re.sub(r"https?://\S+|www\.\S+|[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", "[redacted]", sentence)
-        sentence = re.sub(r"(?i)\b(?:password|passcode|otp|code|token|secret)\s*[:=]\s*\S+", "[redacted]", sentence)
-        sentence = re.sub(r"(?<!\w)\+?\d[\d ().-]{6,}\d(?!\w)|\b\d{4,}\b", "[redacted]", sentence)
-        return " ".join(sentence.split())[:180]
+        return " ".join(redact_mail_text(sentence).split())[:180]
     return ""
 
 
@@ -582,7 +621,7 @@ def match_active_application(
 
 
 def is_relevant(
-    message_text: str, jobs: list[dict[str, str]], *, sender: str = "", subject: str = "",
+    message_text: str, jobs: list[dict[str, str]], *, sender: str = "", subject: str = "", body_text: str | None = None,
 ) -> tuple[bool, list[str]]:
     text = normalize(message_text)
     reasons: list[str] = []
@@ -591,6 +630,11 @@ def is_relevant(
         return False, []
     if ACCOUNT_NOTICE_PATTERN.search(normalize_for_matching(subject or message_text)):
         return False, []
+    if address == "drive-shares-dm-noreply@google.com":
+        return False, []
+    content = f"{subject} {body_text}" if body_text is not None else message_text
+    if classify_application_outcome(content)[0] == "offer_received" or possible_offer(content):
+        return True, ["offer or hiring update"]
     if any(noise in text for noise in GOOGLE_SHARE_NOISE):
         return False, []
     hits = [k for k in POSITIVE_KEYWORDS if contains_term(text, k)]
@@ -751,14 +795,16 @@ def process_application_outcome(
         summary["outcome_detail"] = outcome_detail(summary.get("body_text", ""), outcome)
     else:
         normalized = normalize_for_matching(content)
+        if possible_offer(content):
+            summary["review_reason"] = "Possible offer or hiring update; review the email."
         summary["acknowledgement"] = any(
             re.search(pattern, normalized)
             for pattern in ACKNOWLEDGEMENT_PATTERNS
-        ) and not re.search(
+        ) and not summary.get("review_reason") and not re.search(
             r"\b(?:unfortunately|regret|unsuccessful|declined|rejected|decided|chosen|other candidates)\b",
             normalized,
         )
-        if not summary["acknowledgement"]:
+        if not summary["acknowledgement"] and not summary.get("review_reason"):
             if any(re.search(pattern, normalized) for pattern in ACCOUNT_CONFIRMATION_PATTERNS):
                 summary["notice"] = "account_registered"
             elif WELCOME_SUBJECT_PATTERN.search(normalize_for_matching(summary.get("subject", ""))):
@@ -805,7 +851,7 @@ def format_email_date(value: str, timezone: dt.tzinfo | None = None) -> str:
 
 def preview_text(message: dict[str, Any]) -> str:
     text = html.unescape(message.get("snippet") or "")
-    text = re.sub(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}", "", text)
+    text = redact_mail_text(text)
     text = " ".join(text.split())
     subject = " ".join((message.get("subject") or "").split())
     if subject and text.casefold().startswith(subject.casefold()):
@@ -864,6 +910,8 @@ def format_alert(matches: list[dict[str, Any]]) -> str:
         if outcome in OUTCOME_ALERTS:
             if m.get("outcome_detail"):
                 lines.append(html.escape(str(m["outcome_detail"])[:180]))
+            if outcome in OUTCOME_NEXT_STEPS:
+                lines.append(f"<b>Next:</b> {OUTCOME_NEXT_STEPS[outcome]}")
             if not job:
                 lines.append("⚠️ Couldn’t link this email to one application.")
             elif update.get("status") not in {"updated", "already_recorded"}:
@@ -878,6 +926,8 @@ def format_alert(matches: list[dict[str, Any]]) -> str:
             # Welcome messages can contain credentials; do not quote their body.
             lines.append("Informational email; no action required. Application status unchanged.")
         else:
+            if m.get("review_reason"):
+                lines.append(html.escape(m["review_reason"]))
             preview = preview_text(m)
             if preview:
                 lines.append(preview)
@@ -941,6 +991,7 @@ def collect_mail(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[s
             inspected += 1
             relevant, reasons = is_relevant(
                 summary["text"], jobs, sender=summary.get("from", ""), subject=summary.get("subject", ""),
+                body_text=summary.get("body_text"),
             )
             # Verification secrets belong only to the active ATS interaction,
             # never the periodic recruiter digest.
@@ -949,7 +1000,9 @@ def collect_mail(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[s
                 r"contrasena de un solo uso|codigo de (?:acceso|verificacion|seguridad))\b",
                 normalize_for_matching(summary["text"]),
             )
-            if relevant and not verification:
+            content = f"{summary.get('subject', '')} {summary.get('body_text', summary['text'])}"
+            actual_offer = classify_application_outcome(content)[0] == "offer_received"
+            if relevant and (not verification or actual_offer):
                 summary["reasons"] = reasons
                 try:
                     sync = getattr(args, "tracker_sync", None)

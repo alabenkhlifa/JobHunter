@@ -16,10 +16,18 @@ from jobhunter_integrations.gmail_auth import GmailAuthError, write_private_json
 
 
 def notification_batches(matches):
-    """Keep every reply visible and each HTML message within Telegram's limit."""
+    """Deliver meaningful replies, with offers first and routine notices quiet."""
     batches = []
     batch = []
-    for match in matches:
+    def notify(item):
+        if item.get("processing_error") or item.get("outcome") or item.get("review_reason"):
+            return True
+        return not (item.get("acknowledgement") or item.get("notice") in {"account_registered", "welcome"})
+
+    important = {"offer_received": 0, "interview_invited": 1, "assessment_requested": 2, "action_required": 2}
+    replies = [item for item in matches if notify(item)]
+    replies.sort(key=lambda item: important.get(item.get("outcome"), 3))
+    for match in replies:
         item = dict(match)
         # Bound untrusted headers before escaping; never truncate HTML entities.
         for field, limit in (("subject", 120), ("from", 160), ("date", 64)):
