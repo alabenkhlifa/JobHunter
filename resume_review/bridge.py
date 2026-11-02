@@ -13,13 +13,15 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 
-def call(url, route, body=None):
+def call(url, route, body=None, token=None):
     parsed = urlsplit(url)
     if parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1"):
         raise ValueError("The review bridge only connects to the local review service.")
     data = json.dumps(body).encode() if body is not None else None
-    request = Request(url.rstrip("/") + route, data=data,
-                      headers={"Content-Type": "application/json", "X-Review-Client": "studio"})
+    headers = {"Content-Type": "application/json", "X-Review-Client": "studio"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    request = Request(url.rstrip("/") + route, data=data, headers=headers)
     with urlopen(request, timeout=60) as response:
         return json.load(response)
 
@@ -27,6 +29,7 @@ def call(url, route, body=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8766")
+    parser.add_argument("--token-file", type=Path)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
     proposal = sub.add_parser("propose")
@@ -35,7 +38,8 @@ def main():
     proposal.add_argument("--rationale", required=True)
     proposal.add_argument("--request-id")
     args = parser.parse_args()
-    state = call(args.url, "/api/state")
+    token = args.token_file.read_text().strip() if args.token_file else None
+    state = call(args.url, "/api/state", token=token)
     if args.command == "status":
         print(json.dumps({"revision": state["revision"], "updated_at": state["updated_at"],
                           "selection": state["selection"],
@@ -45,7 +49,7 @@ def main():
     else:
         updated = call(args.url, "/api/proposals", {"revision": state["revision"], "path": json.loads(args.path),
                       "after": args.replacement_file.read_text().rstrip("\n"), "rationale": args.rationale,
-                      "request_id": args.request_id})
+                      "request_id": args.request_id}, token=token)
         print(json.dumps({"revision": updated["revision"], "proposal_id": updated["proposals"][-1]["id"],
                           "status": "pending-user-review"}))
 

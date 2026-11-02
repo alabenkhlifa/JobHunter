@@ -12,6 +12,8 @@ import pytest
 
 from resume_blocks import build
 from resume_review.server import Conflict, ReviewError, ReviewStore, compose, handler_for
+from resume_review.access import ReviewAccess
+from resume_review.onboarding import single_resume_catalog
 
 
 @pytest.fixture
@@ -238,6 +240,113 @@ def test_failed_catalog_validation_is_atomic(store):
     with pytest.raises(ValueError):
         store.save(save_body(changed))
     assert store.read() == original
+
+
+def test_single_resume_onboarding_preserves_wording_and_keeps_private_facts_out(tmp_path):
+    profile = {"name": "Example", "headline": "Mobile Developer", "summary": "Builds mobile apps.",
+               "private_notes": "Never share", "evidence_bank": [{"private": "Never share"}],
+               "skills": {"Mobile": ["Swift", "Kotlin"]},
+               "additional": {"languages": ["English"], "github": "github.com/example", "private": "Never share"},
+               "experience": [{"id": "private-id", "company": "Example Company", "title": "Developer",
+                               "dates": "2020 - Present", "tech": ["Swift", "Kotlin"],
+                               "bullets": ["Built the app.", "Maintained the app."], "private_notes": "Never share"}]}
+    original = copy.deepcopy(profile)
+    catalog = single_resume_catalog(profile)
+    assert profile == original
+    assert "Never share" not in json.dumps(catalog)
+    assert catalog["projects"][0]["role"]["bullets"] == profile["experience"][0]["bullets"]
+    assert catalog["projects"][0]["role"]["tech"] == "Swift, Kotlin"
+    assert catalog["base"]["website"] == "github.com/example"
+    assert all(item["confirmation"] == "draft" for kind in ("flavors", "variants", "projects") for item in catalog[kind])
+    source = tmp_path / "profile.json"
+    source.write_text(json.dumps(profile))
+    original_bytes = source.read_bytes()
+    store = ReviewStore(source, tmp_path / "review", single_resume=True)
+    state = store.read()
+    assert state["single_resume"] is True
+    state["catalog"]["flavors"][0]["summary"] = "My revised summary."
+    saved = store.save(save_body(state))
+    assert ReviewStore(source, store.directory, single_resume=True).read() == saved
+    changed = copy.deepcopy(saved)
+    changed["catalog"]["flavors"].append({**changed["catalog"]["flavors"][0], "id": "another"})
+    with pytest.raises(ReviewError, match="one resume"):
+        store.save(save_body(changed))
+    assert store.read() == saved
+    assert source.read_bytes() == original_bytes
+
+
+@pytest.fixture
+def shared_server(store):
+    access = ReviewAccess("https://review.example/resume-review/", "synthetic-private-access-token-1234567890")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(store, access))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server, access
+    server.shutdown()
+    thread.join()
+    server.server_close()
+
+
+def test_shared_workspace_protects_all_candidate_data_and_sets_scoped_cookie(shared_server, store):
+    server, access = shared_server
+    headers = {"Host": access.host, "Origin": access.origin,
+               "X-Review-Client": "studio", "Content-Type": "application/json"}
+    assert request(server, "GET", "/", headers={"Host": access.host})[0] == 200
+    for route in ("/api/state", "/api/export", "/api/preview", "/previews/" + "a" * 32 + "/resume.pdf"):
+        status, _, body = request(server, "GET", route, headers={"Host": access.host})
+        assert status == 401 and b"Example Candidate" not in body
+    assert request(server, "POST", "/api/save", save_body(store.read()), headers)[0] == 401
+    assert request(server, "POST", "/api/session", {"token": "wrong"}, headers)[0] == 401
+    assert request(server, "POST", "/api/session", {"token": access.token}, {**headers, "Origin": "https://hostile.example"})[0] == 400
+    status, response, _ = request(server, "POST", "/api/session", {"token": access.token}, headers)
+    assert status == 200
+    cookie = response["Set-Cookie"]
+    assert all(flag in cookie for flag in ("Path=/resume-review/", "HttpOnly", "Secure", "SameSite=Strict"))
+    assert access.token not in cookie
+    authenticated = {**headers, "Cookie": cookie.split(";", 1)[0]}
+    assert request(server, "GET", "/api/state", headers=authenticated)[0] == 200
+    assert request(server, "POST", "/api/requests", {"revision": 0, "message": "Check this wording"}, authenticated)[0] == 200
+    assert store.read()["requests"][-1]["message"] == "Check this wording"
+    assert request(server, "GET", "/api/state", headers={**headers, "Cookie": cookie.split(";", 1)[0] + "bad"})[0] == 401
+    operator = {"Authorization": "Bearer " + access.token}
+    assert request(server, "GET", "/api/state", headers=operator)[0] == 200
+
+
+def test_review_sessions_expire_and_token_rotation_revokes_access(monkeypatch):
+    import resume_review.access as module
+    access = ReviewAccess("https://review.example/resume-review/", "synthetic-private-access-token-1234567890")
+    timestamp = 1000000
+    monkeypatch.setattr(module.time, "time", lambda: timestamp)
+    headers = {"Cookie": access.cookie().split(";", 1)[0]}
+    assert access.authorized(headers)
+    rotated = ReviewAccess("https://review.example/resume-review/", "different-private-access-token-1234567890")
+    assert not rotated.authorized(headers)
+    monkeypatch.setattr(module.time, "time", lambda: timestamp + access.lifetime + 1)
+    assert not access.authorized(headers)
+
+
+@pytest.mark.skipif(os.environ.get("JOBHUNTER_BROWSER_TESTS") != "1", reason="requires Node Playwright and Chromium")
+def test_shared_browser_single_resume_autosave_and_authenticated_preview(source, tmp_path):
+    profile = json.loads(source.read_text())
+    profile["resume_blocks"]["flavors"] = profile["resume_blocks"]["flavors"][:1]
+    source.write_text(json.dumps(profile))
+    original = source.read_bytes()
+    store = ReviewStore(source, tmp_path / "single-review", single_resume=True)
+    access = ReviewAccess("https://review.example/resume-review/", "synthetic-private-access-token-1234567890")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(store, access))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = subprocess.run(["node", str(Path(__file__).with_name("browser_resume_review_shared_check.cjs")),
+                                 f"http://127.0.0.1:{server.server_port}"],
+                                capture_output=True, text=True, timeout=90)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert source.read_bytes() == original
+        assert ReviewStore(source, store.directory, single_resume=True).read() == store.read()
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 @pytest.mark.skipif(os.environ.get("JOBHUNTER_BROWSER_TESTS") != "1",

@@ -1,6 +1,8 @@
 'use strict';
 
 const $ = selector => document.querySelector(selector);
+const workspacePath = new URL('.', window.location.href).pathname;
+const workspaceURL = path => workspacePath + path.replace(/^\//, '');
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clone = value => structuredClone(value);
 const pathAttr = path => esc(JSON.stringify(path));
@@ -14,7 +16,7 @@ const detailStates=new Map();
 
 async function api(path, body) {
   const options = body === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json','X-Review-Client':'studio'},body:JSON.stringify(body)};
-  const response = await fetch(path,options);
+  const response = await fetch(workspaceURL(path),options);
   const result = await response.json();
   if(!response.ok) { const error = new Error(result.error || 'The request failed.'); error.status=response.status; throw error; }
   return result;
@@ -66,6 +68,9 @@ async function action(path,body){
   finally{localAction=false;}
 }
 function renderNav(){
+  const single=!!state.single_resume;
+  $('#library-heading').textContent=single?'YOUR RESUME':'YOUR RESUME LIBRARY';
+  for(const selector of ['#flavor-heading','#flavor-list','.variant-heading','#variant-list'])$(selector).hidden=single;
   $('#undo').disabled=!state.undo?.length;
   $('#flavor-list').innerHTML=state.catalog.flavors.map(item=>`<button class="nav-item ${item.id===state.selection.flavor_id?'active':''}" data-flavor="${esc(item.id)}"><span class="item-dot"></span><span>${esc(item.label.replace(' (Senior Backend / Senior Software)',''))}<small>${item.confirmation==='candidate-confirmed'?'Imported approved wording':'Draft wording'}</small></span></button>`).join('');
   const variants=state.catalog.variants.filter(item=>item.flavor_id===state.selection.flavor_id);
@@ -91,11 +96,11 @@ function render(){
 function flavorEditor(){
   const current=flavor();if(!current)return '';
   const i=state.catalog.flavors.indexOf(current), p=['flavors',i];
-  return `<p class="intro">Set the exact introduction for this role family. It stays fixed across the projects and page limits you choose.</p>`+
-    field([...p,'label'],'Flavor name')+field([...p,'headline'],'Resume headline',{multiline:true,rows:2,hint:'The title below your name'})+
-    field([...p,'summary'],'Professional summary',{multiline:true,rows:8,className:'summary',hint:'Exact wording, used in every variant of this flavor'})+
+  return `<p class="intro">${state.single_resume?'Edit your headline and summary. Changes save automatically and appear in the preview.':'Set the exact introduction for this role family. It stays fixed across the projects and page limits you choose.'}</p>`+
+    (state.single_resume?'':field([...p,'label'],'Flavor name'))+field([...p,'headline'],'Resume headline',{multiline:true,rows:2,hint:'The title below your name'})+
+    field([...p,'summary'],'Professional summary',{multiline:true,rows:8,className:'summary',hint:state.single_resume?'Your exact wording':'Exact wording, used in every variant of this flavor'})+
     info('One flavor, consistent wording','The preview renders what you write. It does not rewrite the summary, shorten bullets, or add projects.')+
-    `<div class="stack-buttons"><button class="button small" data-duplicate="flavor">Duplicate flavor</button>${state.catalog.flavors.length>1?'<button class="button small danger" data-delete="flavor">Delete flavor</button>':''}</div>`;
+    (state.single_resume?'':`<div class="stack-buttons"><button class="button small" data-duplicate="flavor">Duplicate flavor</button>${state.catalog.flavors.length>1?'<button class="button small danger" data-delete="flavor">Delete flavor</button>':''}</div>`);
 }
 function variantEditor(){
   const current=variant();if(!current)return '<p class="empty">This flavor needs a variant. Use the + beside Variants to create one.</p>';
@@ -106,12 +111,12 @@ function variantEditor(){
     return `<div class="project-check"><input type="checkbox" id="project-${esc(id)}" data-project-toggle="${esc(id)}" ${included?'checked':''}><label for="project-${esc(id)}">${esc(project.label)}<small>${esc(project.company)} · ${(project.entry?.bullets||project.role.bullets||[]).length} bullets</small></label><div class="order-controls"><button class="icon-button" data-project-order="${esc(id)}" data-direction="-1" aria-label="Move ${esc(project.label)} up">↑</button><button class="icon-button" data-project-order="${esc(id)}" data-direction="1" aria-label="Move ${esc(project.label)} down">↓</button></div></div>`;
   }).join('');
   return `<p class="intro">Choose the full project blocks in this version and their order. The renderer preserves every selected bullet.</p>`+
-    field([...p,'label'],'Variant name')+
+    (state.single_resume?'':field([...p,'label'],'Variant name'))+
     `<div class="field"><div class="field-top"><label for="page-limit">Page limit</label></div><select id="page-limit" data-path="${pathAttr([...p,'max_pages'])}" data-number><option value="1" ${current.max_pages===1?'selected':''}>1 page</option><option value="2" ${current.max_pages===2?'selected':''}>Up to 2 pages</option></select></div>`+
     `<div class="subheading"><h3>Included projects</h3><span class="tag">${state.selection.project_ids.length} selected</span></div><div class="card">${list}</div>`+
-    info('A page limit is a ceiling','A two-page variant can render as one page. Overflow stays visible with a warning, so you can shorten wording or change the selection yourself.')+
+    info('A page limit is a ceiling','A two-page limit can render as one page. Overflow stays visible with a warning, so you can shorten wording or change the selection yourself.')+
     (current.base_overrides||current.project_overrides?info('Content for this variant','Sidebar content and project wording are customized for this flavor and variant. Edit them in Contact & sidebar and Project wording.'): '')+
-    `<div class="stack-buttons"><button class="button small" data-duplicate="variant">Duplicate variant</button>${state.catalog.variants.length>1?'<button class="button small danger" data-delete="variant">Delete variant</button>':''}</div>`;
+    (state.single_resume?'':`<div class="stack-buttons"><button class="button small" data-duplicate="variant">Duplicate variant</button>${state.catalog.variants.length>1?'<button class="button small danger" data-delete="variant">Delete variant</button>':''}</div>`);
 }
 function projectEditor(){
   if(!state.catalog.projects.some(x=>x.id===projectId)) projectId=state.selection.project_ids[0]||state.catalog.projects[0].id;
@@ -128,7 +133,7 @@ function projectEditor(){
   return html;
 }
 function arrayEditor(path,items,title){
-  return items.map((value,i)=>`<div class="list-item">${typeof value==='string'?field([...path,i],`${title} ${i+1}`,{multiline:true,rows:3}):genericEditor([...path,i],value)}<div class="list-tools"><button data-move="${pathAttr([...path,i])}" data-direction="-1" aria-label="Move ${title} ${i+1} up">↑ Move up</button><button data-move="${pathAttr([...path,i])}" data-direction="1" aria-label="Move ${title} ${i+1} down">↓ Move down</button><button data-remove="${pathAttr([...path,i])}" ${items.length===1?'disabled':''}>Remove</button></div></div>`).join('')+`<button class="button small" data-add="${pathAttr(path)}">＋ Add ${esc(title.toLowerCase())}</button>`;
+  return items.map((value,i)=>`<div class="list-item">${typeof value==='string'?field([...path,i],`${title} ${i+1}`,{multiline:true,rows:3}):genericEditor([...path,i],value)}<div class="list-tools"><button data-move="${pathAttr([...path,i])}" data-direction="-1" aria-label="Move ${title} ${i+1} up">↑ Move up</button><button data-move="${pathAttr([...path,i])}" data-direction="1" aria-label="Move ${title} ${i+1} down">↓ Move down</button><button data-remove="${pathAttr([...path,i])}" ${items.length===1&&['bullets','languages'].includes(path.at(-1))?'disabled':''}>Remove</button></div></div>`).join('')+`<button class="button small" data-add="${pathAttr(path)}">＋ Add ${esc(title.toLowerCase())}</button>`;
 }
 function genericEditor(path,value){
   if(path.at(-1)==='skills')return skillsEditor(path,value);
@@ -143,7 +148,7 @@ function genericEditor(path,value){
   return '';
 }
 function skillsEditor(path,skills){
-  return Object.entries(skills).map(([heading,items],i)=>`<details open data-details-key="${pathAttr([...path,i])}"><summary>${esc(heading)}</summary><div class="detail-body"><div class="field"><div class="field-top"><label for="skill-heading-${i}">Skill group heading</label></div><input id="skill-heading-${i}" aria-label="Skill group heading ${i+1}" data-skill-heading="${i}" data-skill-path="${pathAttr(path)}" value="${esc(heading)}" required><p class="raw-error" data-heading-error role="alert" hidden></p></div>${arrayEditor([...path,heading],items,'Skill')}</div></details>`).join('');
+  return Object.entries(skills).map(([heading,items],i)=>`<details open data-details-key="${pathAttr([...path,i])}"><summary>${esc(heading)}</summary><div class="detail-body"><div class="field"><div class="field-top"><label for="skill-heading-${i}">Skill group heading</label></div><input id="skill-heading-${i}" aria-label="Skill group heading ${i+1}" data-skill-heading="${i}" data-skill-path="${pathAttr(path)}" value="${esc(heading)}" required><p class="raw-error" data-heading-error role="alert" hidden></p></div>${arrayEditor([...path,heading],items,'Skill')}</div></details>`).join('')+`<button class="button small" data-add-skill-group="${pathAttr(path)}">＋ Add skill group</button>`;
 }
 function renameSkillGroup(target){
   const prefix=JSON.parse(target.dataset.skillPath),skills=at(state.catalog,prefix),entries=Object.entries(skills),i=Number(target.dataset.skillHeading);
@@ -167,7 +172,7 @@ function renameSkillGroup(target){
 }
 function sidebarEditor(){
   const path=basePath(),base=at(state.catalog,path),scoped=path[0]==='variants';
-  return `<p class="intro">${scoped?'Content for this flavor and variant. Changes here stay within this version.':'Shared content across every flavor and variant.'} All contact fields, skills, certifications, links, education and teaching entries are editable here.</p>`+
+  return `<p class="intro">${state.single_resume?'Edit the content of your resume.':scoped?'Content for this flavor and variant. Changes here stay within this version.':'Shared content across every flavor and variant.'} All contact fields, skills, certifications, links, education and teaching entries are editable here.</p>`+
     Object.entries(base).map(([key,value])=>`<details data-details-key="${pathAttr([...path,key])}" ${['name','email','phone','location'].includes(key)?'open':''}><summary>${esc(label(key))}</summary><div class="detail-body">${genericEditor([...path,key],value)}</div></details>`).join('')+
     `<details data-details-key="sidebar-raw"><summary>Advanced: complete shared content</summary><div class="detail-body"><p class="hint">Add categories, optional fields or entries using the renderer's public JSON structure. Apply explicitly after editing.</p><textarea id="sidebar-raw" aria-label="Shared sidebar JSON">${esc(JSON.stringify(base,null,2))}</textarea><div class="stack-buttons"><button class="button small" id="apply-sidebar-json">Apply shared content</button></div></div></details>`;
 }
@@ -206,14 +211,14 @@ async function renderPreview(){
     preview=result;
     if($('#pages').dataset.preview!==result.id){
       const scroll=$('#pages').scrollTop;
-      $('#pages').innerHTML=Array.from({length:result.pages},(_,i)=>`<div class="page"><img src="/previews/${result.id}/page-${i+1}.png" alt="Resume preview, page ${i+1}" width="1013" height="1433"><div class="page-caption"><span>A4 · ACTUAL PDF OUTPUT</span><span>PAGE ${i+1} OF ${result.pages}</span></div></div>`).join('');
+      $('#pages').innerHTML=Array.from({length:result.pages},(_,i)=>`<div class="page"><img src="${workspaceURL(`/previews/${result.id}/page-${i+1}.png`)}" alt="Resume preview, page ${i+1}" width="1013" height="1433"><div class="page-caption"><span>A4 · ACTUAL PDF OUTPUT</span><span>PAGE ${i+1} OF ${result.pages}</span></div></div>`).join('');
       $('#pages').dataset.preview=result.id;$('#pages').scrollTop=scroll;applyZoom();
     }
     $('#page-info').textContent=`${result.pages} ${result.pages===1?'page':'pages'} / ${variant()?.max_pages||'–'} maximum · ${state.selection.project_ids.length} projects`;
     $('#render-status').textContent=result.audit_ok?'Preview up to date ✓':'Needs attention';
     $('#preview-warnings').hidden=!result.warnings.length;
     $('#preview-warnings').innerHTML=result.warnings.map(esc).join('<br>');
-    $('#download').href=`/previews/${result.id}/resume.pdf`;$('#download').classList.remove('disabled');
+    $('#download').href=workspaceURL(`/previews/${result.id}/resume.pdf`);$('#download').classList.remove('disabled');
     const approved=state.approvals.some(x=>x.digest===result.content_digest);
     $('#approval-label').textContent=approved?'This exact version is approved':'Review this version';
     $('#approval-detail').textContent=approved?'Further edits create a new review version.':'Approval is saved for this exact text and selection.';
@@ -301,7 +306,8 @@ document.addEventListener('click',async event=>{
     if(button.dataset.move){const path=JSON.parse(button.dataset.move),items=at(state.catalog,path.slice(0,-1)),i=path.at(-1),j=i+Number(button.dataset.direction);if(j>=0&&j<items.length){[items[i],items[j]]=[items[j],items[i]];markDirty();render();}}
     if(button.dataset.projectOrder){const items=state.selection.project_ids,i=items.indexOf(button.dataset.projectOrder),j=i+Number(button.dataset.direction);if(i>=0&&j>=0&&j<items.length){[items[i],items[j]]=[items[j],items[i]];variant().default_project_ids=items.slice();markDirty();render();}}
     if(button.dataset.remove){const path=JSON.parse(button.dataset.remove);at(state.catalog,path.slice(0,-1)).splice(path.at(-1),1);markDirty();render();}
-    if(button.dataset.add){const path=JSON.parse(button.dataset.add),items=at(state.catalog,path);const old=items.at(-1);items.push(typeof old==='string'?'New entry — edit this text':clone(old||{}));markDirty();render();}
+    if(button.dataset.add){const path=JSON.parse(button.dataset.add),items=at(state.catalog,path),old=items.at(-1),key=path.at(-1);const empty=key==='education'?{degree:'',school:'',dates:''}:key==='volunteering'?{title:'',organization:'',dates:'',description:'',url:''}:'New entry — edit this text';items.push(old===undefined?empty:typeof old==='string'?'New entry — edit this text':clone(old));markDirty();render();}
+    if(button.dataset.addSkillGroup){const path=JSON.parse(button.dataset.addSkillGroup),skills=at(state.catalog,path);let heading='New skill group',index=2;while(Object.hasOwn(skills,heading))heading='New skill group '+index++;skills[heading]=['New skill — edit this text'];markDirty();render();}
     if(button.dataset.proposal){await action('/api/proposals/decide',{id:button.dataset.proposal,decision:button.dataset.decision});toast(button.dataset.decision==='accept'?'Replacement applied. Review the updated preview.':'Proposal rejected.');}
     if(button.id==='reload-state'){state=await api('/api/state');dirty=false;conflict=false;$('#error').hidden=true;render();renderPreview();}
     if(button.id==='request-from-changes'||button.id==='new-request')openRequest();
@@ -356,6 +362,13 @@ async function poll(){
   }catch(_){$('#save-status').textContent='Reconnecting…';}
 }
 async function start(){
-  try{state=await api('/api/state');render();$('#save-status').textContent='All changes saved ✓';await renderPreview();setInterval(poll,2500);}catch(error){showError(error);$('#save-status').textContent='Connection failed';}
+  try{
+    const token=new URLSearchParams(window.location.hash.slice(1)).get('token');
+    if(token){
+      history.replaceState(null,'',window.location.pathname);
+      await api('/api/session',{token});
+    }
+    state=await api('/api/state');render();$('#save-status').textContent='All changes saved ✓';await renderPreview();setInterval(poll,2500);
+  }catch(error){showError(error);$('#save-status').textContent=error.status===401?'Private link required':'Connection failed';}
 }
 start();

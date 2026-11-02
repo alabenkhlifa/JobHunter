@@ -57,6 +57,10 @@ class Conflict(ReviewError):
     status = 409
 
 
+class Unauthorized(ReviewError):
+    status = 401
+
+
 def find(items, identifier):
     for item in items:
         if item["id"] == identifier:
@@ -138,7 +142,7 @@ def invalidate_changed(old, new):
 
 
 class ReviewStore:
-    def __init__(self, profile, directory):
+    def __init__(self, profile, directory, *, single_resume=False):
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.directory.chmod(0o700)
@@ -148,12 +152,20 @@ class ReviewStore:
         if self.path.exists():
             self.state = json.loads(self.path.read_text())
             validate_catalog({"resume_blocks": self.state["catalog"]})
+            if bool(self.state.get("single_resume")) != single_resume:
+                raise ReviewError("Use the existing workspace's resume mode.")
         else:
-            catalog = json.loads(Path(profile).read_text())["resume_blocks"]
+            source = json.loads(Path(profile).read_text())
+            catalog = source.get("resume_blocks")
+            if catalog is None and single_resume:
+                from .onboarding import single_resume_catalog
+                catalog = single_resume_catalog(source)
             validate_catalog({"resume_blocks": catalog})
+            if single_resume and (len(catalog["flavors"]) != 1 or len(catalog["variants"]) != 1):
+                raise ReviewError("A single-resume workspace requires exactly one resume.")
             flavor = catalog["flavors"][0]
             variant = next(v for v in catalog["variants"] if v["flavor_id"] == flavor["id"])
-            self.state = {"version": 1, "revision": 0, "catalog": catalog,
+            self.state = {"version": 1, "revision": 0, "catalog": catalog, "single_resume": single_resume,
                           "baseline": copy.deepcopy(catalog), "source_digest": digest(catalog),
                           "selection": {"flavor_id": flavor["id"], "variant_id": variant["id"],
                                         "project_ids": variant["default_project_ids"][:]},
@@ -188,6 +200,10 @@ class ReviewStore:
     def save(self, body):
         def operation(state):
             catalog = copy.deepcopy(body["catalog"])
+            if state.get("single_resume") and any(
+                    [item["id"] for item in catalog[kind]] != [item["id"] for item in state["catalog"][kind]]
+                    for kind in ("flavors", "variants")):
+                raise ReviewError("This workspace contains one resume. Edit its content directly.")
             invalidate_changed(state["catalog"], catalog)
             validate_catalog({"resume_blocks": catalog})
             # A flavor may still be empty or have no variant during editing.
@@ -323,12 +339,12 @@ class ReviewStore:
             return result
 
 
-def handler_for(store):
+def handler_for(store, access=None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass  # Never log candidate content, request bodies or document URLs.
 
-        def reply(self, status, value, content_type="application/json"):
+        def reply(self, status, value, content_type="application/json", *, cookie=None):
             body = json.dumps(value, ensure_ascii=False).encode() if content_type == "application/json" else value
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -336,6 +352,8 @@ def handler_for(store):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            if cookie:
+                self.send_header("Set-Cookie", cookie)
             self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; font-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
             self.end_headers()
             self.wfile.write(body)
@@ -343,10 +361,14 @@ def handler_for(store):
         def trusted(self, mutation=False):
             port = self.server.server_port
             hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+            origins = {f"http://{host}" for host in hosts}
+            if access:
+                hosts.add(access.host)
+                origins.add(access.origin)
             if self.headers.get("Host") not in hosts:
                 raise ReviewError("This review service only accepts local requests.")
             origin = self.headers.get("Origin")
-            if origin and origin not in {f"http://{host}" for host in hosts}:
+            if origin and origin not in origins:
                 raise ReviewError("Cross-origin access is disabled.")
             if mutation and (self.headers.get("X-Review-Client") != "studio"
                              or self.headers.get_content_type() != "application/json"):
@@ -356,6 +378,8 @@ def handler_for(store):
             try:
                 self.trusted()
                 route = urlsplit(self.path).path
+                if access and (route.startswith("/api/") or route.startswith("/previews/")) and not access.authorized(self.headers):
+                    raise Unauthorized("Open your private review link to access this resume.")
                 if route == "/api/state":
                     return self.reply(200, store.read())
                 if route == "/api/preview":
@@ -384,12 +408,19 @@ def handler_for(store):
         def do_POST(self):
             try:
                 self.trusted(mutation=True)
+                route = urlsplit(self.path).path
+                if access and route != "/api/session" and not access.authorized(self.headers):
+                    raise Unauthorized("Open your private review link to access this resume.")
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 < length <= 1_000_000:
                     raise ReviewError("The request is empty or too large.")
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
                     raise ReviewError("A JSON object is required.")
+                if access and route == "/api/session":
+                    if not access.accepts_token(body.get("token")):
+                        raise Unauthorized("This private review link is invalid.")
+                    return self.reply(200, {"authenticated": True}, cookie=access.cookie())
                 routes = {"/api/save": store.save, "/api/requests": store.request,
                           "/api/proposals": store.propose, "/api/proposals/decide": store.decide,
                           "/api/approve": store.approval, "/api/undo": store.undo}
@@ -409,9 +440,20 @@ def main():
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, default=Path("data/resume-review"))
     parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--single-resume", action="store_true")
+    parser.add_argument("--public-url", help="HTTPS workspace URL ending in /; requires --token-file")
+    parser.add_argument("--token-file", type=Path, help="Private file containing the workspace access token")
     args = parser.parse_args()
-    store = ReviewStore(args.profile, args.state_dir)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(store))
+    if bool(args.public_url) != bool(args.token_file):
+        parser.error("--public-url and --token-file must be provided together")
+    access = None
+    if args.public_url:
+        from .access import ReviewAccess
+        if args.token_file.stat().st_mode & 0o077:
+            parser.error("The access token file must not be readable by other users")
+        access = ReviewAccess(args.public_url, args.token_file.read_text().strip())
+    store = ReviewStore(args.profile, args.state_dir, single_resume=args.single_resume)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(store, access))
     print(f"Resume review: http://127.0.0.1:{server.server_port}", flush=True)
     print(f"Saved review: {store.path}", flush=True)
     try:
